@@ -8,6 +8,7 @@
   import { sqlEditor } from "$lib/stores/sql-editor.svelte";
   import { getContext } from "svelte";
   import VeeskerMark from "$lib/VeeskerMark.svelte";
+  import { shouldShowUserHost, txButtonState } from "./status-bar-helpers";
 
   type Props = {
     connectionName: string;
@@ -30,6 +31,10 @@
     onSignIn?: () => void;
     onAuditLog?: () => void;
     onSignOut?: () => void;
+    username?: string;
+    serviceName?: string;
+    onCommit?: () => void;
+    onRollback?: () => void;
   };
   let {
     connectionName, userLabel, schema, serverVersion,
@@ -38,6 +43,10 @@
     theme = "light", onToggleTheme,
     env, readOnly = false, airgap = false, psdpm = false,
     onSignIn, onAuditLog, onSignOut,
+    username = "",
+    serviceName = "",
+    onCommit,
+    onRollback,
   }: Props = $props();
 
   const authCtx = getContext<{ tier: "ce" | "cloud"; email: string }>("auth");
@@ -50,6 +59,10 @@
       return m ? m[1] : serverVersion.split(" ").slice(0, 3).join(" ");
     })()
   );
+
+  const showUserHost = $derived(shouldShowUserHost(username, serviceName));
+  const commitState = $derived(txButtonState(hasPendingTx ?? false));
+  const rollbackState = $derived(txButtonState(hasPendingTx ?? false));
 </script>
 
 <div class="bar" class:bar-prod={env === "prod"} class:bar-staging={env === "staging"}>
@@ -94,6 +107,12 @@
         TX
       </span>
     {/if}
+    {#if showUserHost}
+      <span class="bar-divider" aria-hidden="true"></span>
+      <span class="userhost" title="Connected as {username} on service {serviceName}">
+        {username}@{serviceName}
+      </span>
+    {/if}
     <span class="divider" aria-hidden="true"></span>
     <svg class="icon" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
       <ellipse cx="6" cy="4" rx="4.5" ry="1.8" stroke="currentColor" stroke-width="1.1"/>
@@ -111,6 +130,27 @@
 
   <!-- Right: actions -->
   <div class="bar-right">
+    <button
+      class="action-btn commit-btn"
+      class:enabled={commitState.enabled}
+      disabled={!commitState.enabled}
+      aria-disabled={commitState.ariaDisabled}
+      onclick={onCommit}
+      title="Commit pending transaction (F10)"
+    >
+      ✓ Commit<span class="kbd">F10</span>
+    </button>
+    <button
+      class="action-btn rollback-btn"
+      class:enabled={rollbackState.enabled}
+      disabled={!rollbackState.enabled}
+      aria-disabled={rollbackState.ariaDisabled}
+      onclick={onRollback}
+      title="Rollback pending transaction (F11)"
+    >
+      ↺ Rollback<span class="kbd">F11</span>
+    </button>
+    <span class="bar-divider" aria-hidden="true"></span>
     <button
       class="action-btn ai-btn"
       class:active={chatOpen}
@@ -569,5 +609,57 @@
     position: fixed;
     inset: 0;
     z-index: 499;
+  }
+
+  .userhost {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: #ffb380;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .action-btn.commit-btn,
+  .action-btn.rollback-btn {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 5px;
+    color: rgba(255,255,255,0.65);
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 11px; font-weight: 500;
+    letter-spacing: 0.03em;
+    padding: 0.25rem 0.6rem;
+    cursor: pointer;
+    transition: all 0.12s ease;
+  }
+  .commit-btn.enabled {
+    background: rgba(126, 201, 106, 0.15);
+    border-color: rgba(126, 201, 106, 0.4);
+    color: #b6e0a3;
+  }
+  .commit-btn.enabled:hover {
+    background: rgba(126, 201, 106, 0.25);
+    border-color: rgba(126, 201, 106, 0.55);
+  }
+  .rollback-btn.enabled {
+    background: rgba(232, 197, 71, 0.12);
+    border-color: rgba(232, 197, 71, 0.35);
+    color: #e8c547;
+  }
+  .rollback-btn.enabled:hover {
+    background: rgba(232, 197, 71, 0.22);
+    border-color: rgba(232, 197, 71, 0.5);
+  }
+  .action-btn:disabled {
+    opacity: 0.32;
+    cursor: not-allowed;
+  }
+  .action-btn .kbd {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9.5px;
+    opacity: 0.55;
+    padding-left: 3px;
+    border-left: 1px solid rgba(255,255,255,0.15);
+    margin-left: 3px;
   }
 </style>
