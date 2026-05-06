@@ -1305,6 +1305,11 @@ pub async fn ords_detect(app: AppHandle) -> Result<OrdsDetectResult, ConnectionT
 }
 
 #[tauri::command]
+pub async fn session_self(app: AppHandle) -> Result<Value, ConnectionTestErr> {
+    call_sidecar(&app, "oracle.session_self", json!({})).await
+}
+
+#[tauri::command]
 pub async fn ords_modules_list(
     app: AppHandle,
     owner: String,
@@ -1551,6 +1556,25 @@ pub async fn unsafe_dml_confirm(
         .title("Unsafe SQL — Confirm Execution")
         .buttons(MessageDialogButtons::OkCancelCustom(
             "Execute Anyway".into(),
+            "Cancel".into(),
+        ))
+        .show(move |confirmed| {
+            let _ = tx.send(confirmed);
+        });
+    Ok(rx.await.unwrap_or(false))
+}
+
+#[tauri::command]
+pub async fn confirm_rollback_tx(app: AppHandle) -> Result<bool, ConnectionTestErr> {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    app.dialog()
+        .message(
+            "You have uncommitted changes in this session.\n\nRolling back will permanently discard all pending DML and DDL changes since your last COMMIT. This action cannot be undone.\n\nProceed with ROLLBACK?"
+        )
+        .title("Discard Pending Transaction")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Rollback".into(),
             "Cancel".into(),
         ))
         .show(move |confirmed| {
