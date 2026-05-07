@@ -43,6 +43,7 @@ export type PlsqlMeta = {
 
 export type SqlTab = {
   id: string;
+  kind: "sql" | "command";            // "sql" = Monaco editor; "command" = Command Window (xterm)
   title: string;
   sql: string;
   results: TabResult[];               // replaces `result` + `error`
@@ -57,6 +58,7 @@ export type SqlTab = {
   packageSpec: string | undefined;
   packageActiveTab: "spec" | "body" | undefined;
   specMeta: PlsqlMeta | undefined;
+  connectionId: string | null;        // captured at tab creation; only set for kind === "command"
 };
 
 /** Returns the active TabResult for a tab, or null if none. */
@@ -204,6 +206,7 @@ function nextQueryTitle(): string {
 function makeTab(title: string, sql: string): SqlTab {
   return {
     id: newId(),
+    kind: "sql",
     title,
     sql,
     results: [],
@@ -218,6 +221,36 @@ function makeTab(title: string, sql: string): SqlTab {
     packageSpec: undefined,
     packageActiveTab: undefined,
     specMeta: undefined,
+    connectionId: null,
+  };
+}
+
+function nextCommandTitle(): string {
+  const used = new Set(_tabs.filter((t) => t.kind === "command").map((t) => t.title));
+  let n = 1;
+  while (used.has(`Command ${n}`)) n++;
+  return `Command ${n}`;
+}
+
+function makeCommandTab(connectionId: string): SqlTab {
+  return {
+    id: newId(),
+    kind: "command",
+    title: nextCommandTitle(),
+    sql: "",
+    results: [],
+    activeResultId: null,
+    running: false,
+    splitterError: null,
+    runningRequestId: null,
+    filePath: null,
+    isDirty: false,
+    savedContent: null,
+    plsqlMeta: null,
+    packageSpec: undefined,
+    packageActiveTab: undefined,
+    specMeta: undefined,
+    connectionId,
   };
 }
 
@@ -417,6 +450,14 @@ export const sqlEditor = {
     _tabs.push(tab);
     _activeId = tab.id;
     _drawerOpen = true;
+  },
+
+  openCommandTab(connectionId: string): string {
+    const tab = makeCommandTab(connectionId);
+    _tabs.push(tab);
+    _activeId = tab.id;
+    _drawerOpen = true;
+    return tab.id;
   },
 
   async openPreview(owner: string, name: string, pkCols?: string[]): Promise<void> {
@@ -1117,6 +1158,7 @@ export const sqlEditor = {
     const id = crypto.randomUUID();
     const tab: SqlTab = {
       id,
+      kind: "sql",
       title,
       sql: ddl,
       results: [],
@@ -1131,6 +1173,7 @@ export const sqlEditor = {
       packageSpec: undefined,
       packageActiveTab: undefined,
       specMeta: undefined,
+      connectionId: null,
     };
     _tabs = [..._tabs, tab];
     _activeId = id;

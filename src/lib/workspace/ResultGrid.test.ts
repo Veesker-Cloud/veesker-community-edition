@@ -31,6 +31,7 @@ function makeResult(partial: Partial<TabResult> = {}): TabResult {
 function tab(partial: Partial<SqlTab> = {}): SqlTab {
   return {
     id: "t1",
+    kind: "sql",
     title: "Query 1",
     sql: "",
     results: [],
@@ -41,6 +42,11 @@ function tab(partial: Partial<SqlTab> = {}): SqlTab {
     filePath: null,
     isDirty: false,
     savedContent: null,
+    plsqlMeta: null,
+    packageSpec: undefined,
+    packageActiveTab: undefined,
+    specMeta: undefined,
+    connectionId: null,
     ...partial,
   };
 }

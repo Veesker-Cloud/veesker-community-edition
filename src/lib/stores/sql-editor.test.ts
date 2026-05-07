@@ -88,6 +88,42 @@ describe("sqlEditor.openBlank", () => {
   });
 });
 
+// ── openCommandTab (Bundle 11) ───────────────────────────────────────────────
+
+describe("sqlEditor.openCommandTab", () => {
+  it("creates a tab with kind === 'command' and connectionId snapshot", () => {
+    const id = sqlEditor.openCommandTab("conn-abc");
+    expect(sqlEditor.tabs.length).toBe(1);
+    const tab = sqlEditor.tabs[0];
+    expect(tab.id).toBe(id);
+    expect(tab.kind).toBe("command");
+    expect(tab.title).toBe("Command 1");
+    expect(tab.connectionId).toBe("conn-abc");
+    expect(sqlEditor.activeId).toBe(id);
+    expect(sqlEditor.drawerOpen).toBe(true);
+  });
+
+  it("auto-numbers Command 1, Command 2, ... and skips colliding names", () => {
+    sqlEditor.openCommandTab("c1");
+    sqlEditor.openCommandTab("c1");
+    sqlEditor.openCommandTab("c1");
+    expect(sqlEditor.tabs.map((t) => t.title)).toEqual(["Command 1", "Command 2", "Command 3"]);
+  });
+
+  it("ignores SQL tabs when computing the next Command number", () => {
+    sqlEditor.openBlank();             // Query 1
+    sqlEditor.openCommandTab("c1");    // Command 1
+    sqlEditor.openBlank();             // Query 2
+    sqlEditor.openCommandTab("c1");    // Command 2
+    expect(sqlEditor.tabs.map((t) => t.title)).toEqual([
+      "Query 1",
+      "Command 1",
+      "Query 2",
+      "Command 2",
+    ]);
+  });
+});
+
 // ── openPreview ───────────────────────────────────────────────────────────────
 
 describe("sqlEditor.openPreview", () => {

@@ -33,6 +33,7 @@ function makeResult(partial: Partial<TabResult> = {}): TabResult {
 function makeTab(partial: Partial<SqlTab> = {}): SqlTab {
   return {
     id: partial.id ?? "t1",
+    kind: partial.kind ?? "sql",
     title: partial.title ?? "Query 1",
     sql: partial.sql ?? "",
     results: partial.results ?? [],
@@ -43,6 +44,11 @@ function makeTab(partial: Partial<SqlTab> = {}): SqlTab {
     filePath: partial.filePath ?? null,
     isDirty: partial.isDirty ?? false,
     savedContent: partial.savedContent ?? null,
+    plsqlMeta: partial.plsqlMeta ?? null,
+    packageSpec: partial.packageSpec ?? undefined,
+    packageActiveTab: partial.packageActiveTab ?? undefined,
+    specMeta: partial.specMeta ?? undefined,
+    connectionId: partial.connectionId ?? null,
     ...partial,
   };
 }
