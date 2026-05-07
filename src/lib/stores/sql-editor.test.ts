@@ -259,6 +259,172 @@ describe("sqlEditor.runSelection", () => {
   });
 });
 
+// ── runStatementShared (Bundle 8) ─────────────────────────────────────────────
+
+describe("sqlEditor.runStatementShared", () => {
+  it("returns Ok with SharedExecResult shape on success", async () => {
+    mockedQueryExecute.mockResolvedValue(okResult(1));
+    const result = await sqlEditor.runStatementShared("SELECT * FROM dual", { origin: "user_typed" });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.rowCount).toBe(1);
+      expect(result.data.columns).toEqual([{ name: "X", dataType: "NUMBER" }]);
+      expect(result.data.rows).toEqual([[1]]);
+      expect(result.data.dbmsOutput).toEqual([]);
+      expect(result.data.warnings).toEqual([]);
+      expect(typeof result.data.elapsedMs).toBe("number");
+    }
+  });
+
+  it("forwards opts.origin into queryExecute", async () => {
+    mockedQueryExecute.mockResolvedValue(okResult(1));
+    await sqlEditor.runStatementShared("SELECT 1 FROM dual", { origin: "user_typed" });
+    const call = mockedQueryExecute.mock.calls[0];
+    expect(call[0]).toBe("SELECT 1 FROM dual");
+    expect(call[4]).toBe("user_typed");
+  });
+
+  it("returns Err on empty SQL without invoking queryExecute", async () => {
+    const result = await sqlEditor.runStatementShared("   \n  ", { origin: "user_typed" });
+    expect(result.ok).toBe(false);
+    expect(mockedQueryExecute).not.toHaveBeenCalled();
+  });
+
+  it("strips a single trailing semicolon", async () => {
+    mockedQueryExecute.mockResolvedValue(okResult(0, false));
+    await sqlEditor.runStatementShared("SELECT 1 FROM dual ;  ", { origin: "user_typed" });
+    expect(mockedQueryExecute.mock.calls[0][0]).toBe("SELECT 1 FROM dual");
+  });
+
+  it("forwards Err result from queryExecute (PSDPM/server-side errors)", async () => {
+    mockedQueryExecute.mockResolvedValue(errResult(-32050, "PSDPM hard-locked: production connection"));
+    const result = await sqlEditor.runStatementShared("DROP TABLE prod_data", {
+      origin: "user_typed",
+      bypassConfirm: true,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.code).toBe(-32050);
+      expect(result.error.message).toContain("PSDPM");
+    }
+  });
+
+  it("triggers askConfirm modal for TRUNCATE; returns Err when user cancels", async () => {
+    const runPromise = sqlEditor.runStatementShared("TRUNCATE TABLE t", { origin: "user_typed" });
+    await Promise.resolve();
+    expect(sqlEditor.pendingConfirm).not.toBeNull();
+    sqlEditor.confirmRun(false);
+    const result = await runPromise;
+    expect(result.ok).toBe(false);
+    expect(mockedQueryExecute).not.toHaveBeenCalled();
+  });
+
+  it("triggers askConfirm modal for TRUNCATE; proceeds when user accepts", async () => {
+    mockedQueryExecute.mockResolvedValue(okResult(0, false));
+    const runPromise = sqlEditor.runStatementShared("TRUNCATE TABLE t", { origin: "user_typed" });
+    await Promise.resolve();
+    expect(sqlEditor.pendingConfirm).not.toBeNull();
+    sqlEditor.confirmRun(true);
+    const result = await runPromise;
+    expect(result.ok).toBe(true);
+    expect(mockedQueryExecute).toHaveBeenCalled();
+  });
+
+  it("bypassConfirm skips the askConfirm modal even for TRUNCATE", async () => {
+    mockedQueryExecute.mockResolvedValue(okResult(0, false));
+    const result = await sqlEditor.runStatementShared("TRUNCATE TABLE t", {
+      origin: "ai_approved",
+      bypassConfirm: true,
+    });
+    expect(result.ok).toBe(true);
+    expect(sqlEditor.pendingConfirm).toBeNull();
+    expect(mockedQueryExecute).toHaveBeenCalled();
+  });
+
+  async function flushUntil<T>(check: () => T | null, maxTicks = 20): Promise<T> {
+    for (let i = 0; i < maxTicks; i++) {
+      const v = check();
+      if (v !== null && v !== undefined) return v;
+      await Promise.resolve();
+    }
+    throw new Error("flushUntil: condition never became truthy");
+  }
+
+  it("triggers askUnsafeDml modal on -32031; replays with acknowledgeUnsafe=true on accept", async () => {
+    const unsafeError = errResult(-32031, "UPDATE without WHERE clause");
+    mockedQueryExecute.mockResolvedValueOnce(unsafeError).mockResolvedValueOnce(okResult(0, false));
+    const runPromise = sqlEditor.runStatementShared("UPDATE foo SET x = 1", {
+      origin: "user_typed",
+      bypassConfirm: true,
+    });
+    await flushUntil(() => sqlEditor.pendingUnsafeDml);
+    sqlEditor.resolveUnsafeDml(true);
+    const result = await runPromise;
+    expect(result.ok).toBe(true);
+    const secondCall = mockedQueryExecute.mock.calls[1];
+    expect(secondCall[3]).toBe(true);
+  });
+
+  it("askUnsafeDml on -32031 with cancel returns Err and does not replay", async () => {
+    mockedQueryExecute.mockResolvedValue(errResult(-32031, "UPDATE without WHERE clause"));
+    const runPromise = sqlEditor.runStatementShared("UPDATE foo SET x = 1", {
+      origin: "user_typed",
+      bypassConfirm: true,
+    });
+    await flushUntil(() => sqlEditor.pendingUnsafeDml);
+    sqlEditor.resolveUnsafeDml(false);
+    const result = await runPromise;
+    expect(result.ok).toBe(false);
+    expect(mockedQueryExecute).toHaveBeenCalledTimes(1);
+  });
+
+  it("bypassUnsafeDml replays automatically with acknowledgeUnsafe=true without modal", async () => {
+    const unsafeError = errResult(-32031, "UPDATE without WHERE clause");
+    mockedQueryExecute.mockResolvedValueOnce(unsafeError).mockResolvedValueOnce(okResult(0, false));
+    const result = await sqlEditor.runStatementShared("UPDATE foo SET x = 1", {
+      origin: "ai_approved",
+      bypassConfirm: true,
+      bypassUnsafeDml: true,
+    });
+    expect(result.ok).toBe(true);
+    expect(sqlEditor.pendingUnsafeDml).toBeNull();
+    expect(mockedQueryExecute).toHaveBeenCalledTimes(2);
+    expect(mockedQueryExecute.mock.calls[1][3]).toBe(true);
+  });
+
+  it("does NOT touch any active tab.results / tab.running", async () => {
+    sqlEditor.openBlank();
+    sqlEditor.updateSql(sqlEditor.activeId!, "SELECT existing FROM dual");
+    const tab = sqlEditor.active!;
+    const beforeResults = tab.results;
+    const beforeRunning = tab.running;
+    mockedQueryExecute.mockResolvedValue(okResult(7));
+    await sqlEditor.runStatementShared("SELECT * FROM dual", { origin: "user_typed" });
+    expect(tab.results).toBe(beforeResults);
+    expect(tab.running).toBe(beforeRunning);
+  });
+
+  it("populates dbmsOutput from queryExecute response", async () => {
+    mockedQueryExecute.mockResolvedValue({
+      ok: true,
+      data: {
+        columns: [],
+        rows: [],
+        rowCount: 0,
+        elapsedMs: 5,
+        dbmsOutput: ["line 1", "line 2"],
+      },
+    });
+    const result = await sqlEditor.runStatementShared("BEGIN dbms_output.put_line('x'); END;", {
+      origin: "user_typed",
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.dbmsOutput).toEqual(["line 1", "line 2"]);
+    }
+  });
+});
+
 // ── runStatementAtCursor ──────────────────────────────────────────────────────
 
 describe("sqlEditor.runStatementAtCursor", () => {
