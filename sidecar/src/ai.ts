@@ -5,6 +5,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { tableDescribe, objectDdl, objectsList, queryExecute } from "./oracle";
 import { getSessionSafety } from "./state";
+import {
+  requestApproval as defaultRequestApproval,
+  type ApprovalDecision,
+} from "./ai-approval-state";
 
 export type AiMessage = { role: "user" | "assistant"; content: string };
 
@@ -182,7 +186,75 @@ export function isReadOnlySql(raw: string): boolean {
   return true;
 }
 
-async function executeTool(name: string, input: Record<string, string>): Promise<string> {
+// L2.1 PSDPM lock message returned to the model when the user has the active
+// connection in PL/SQL Developer Parity Mode. Returned as the tool result so
+// Claude can apologise / suggest the user disable PSDPM rather than crashing.
+const PSDPM_LOCK_MSG =
+  "Error: PSDPM mode active — AI cannot execute queries. Disable PSDPM in connection settings to allow AI tools.";
+
+function psdpmLocked(): boolean {
+  const safety = getSessionSafety();
+  // 4-layer hard-lock Layer 4 (Sprint C): when env=prod, PSDPM is structurally
+  // forced ON regardless of the persisted psdpm_mode flag. AI tools cannot run
+  // against a prod connection under any circumstance.
+  return safety?.psdpm === true || safety?.env === "prod";
+}
+
+// L3.6 (Sprint C Onda 3): names of the database-touching tools the AI may
+// invoke. Every call to one of these requires per-statement user approval
+// unless the user already opted into "approve for this turn" earlier in the
+// same aiChat invocation (turnApproved set).
+const APPROVAL_GATED_TOOLS = new Set<string>([
+  "describe_object",
+  "run_query",
+  "get_ddl",
+  "list_objects",
+]);
+
+export type RequestApprovalFn = (
+  requestId: string,
+  tool: string,
+  input: unknown,
+) => Promise<ApprovalDecision>;
+
+// `turnApproved` is mutated as the AI calls tools within a single aiChat
+// invocation: once the user picks "approve for this turn" on tool X, every
+// later call to tool X in the same turn skips the approval prompt. The set
+// lifetime is one aiChat call — a fresh user message starts a new aiChat and
+// therefore a fresh empty set, forcing re-approval.
+//
+// `requestApprovalFn` is dependency-injected so unit tests can substitute a
+// deterministic fake without resorting to bun's global mock.module (which
+// leaks across sibling test files). Production callers omit it and get the
+// real notification-driven implementation from ai-approval-state.ts.
+export async function executeTool(
+  name: string,
+  input: Record<string, string>,
+  turnApproved: Set<string> = new Set<string>(),
+  requestApprovalFn: RequestApprovalFn = defaultRequestApproval,
+): Promise<string> {
+  // L2.1: every database-touching AI tool is short-circuited when PSDPM is on.
+  // The model is told why so it can ask the user to flip the toggle. PSDPM
+  // MUST stay before the approval gate — there's no point asking the user to
+  // approve a call that's structurally forbidden.
+  if (psdpmLocked()) {
+    if (name === "describe_object" || name === "run_query" || name === "get_ddl" || name === "list_objects") {
+      return PSDPM_LOCK_MSG;
+    }
+  }
+  // L3.6: per-statement approval gate. Only DB-touching tools are gated; any
+  // future tools added to TOOLS but absent from APPROVAL_GATED_TOOLS will run
+  // ungated — keep the set in sync when adding tools.
+  if (APPROVAL_GATED_TOOLS.has(name) && !turnApproved.has(name)) {
+    const requestId = crypto.randomUUID();
+    const decision = await requestApprovalFn(requestId, name, input);
+    if (!decision.approved) {
+      return "Error: User denied this tool call.";
+    }
+    if (decision.applyToTurn) {
+      turnApproved.add(name);
+    }
+  }
   switch (name) {
     case "describe_object": {
       const res = await tableDescribe({ owner: input.owner, name: input.name });
@@ -346,6 +418,10 @@ export async function aiChat(params: AiChatParams, tools: boolean = false): Prom
   const toolsUsed: string[] = [];
   const activeTools = getTools(tools);
   const system = buildSystem(params.context, tools);
+  // L3.6: one approval-cache per aiChat invocation (one user message). Tools
+  // invoked across multiple Anthropic round-trips inside this same while-loop
+  // share the cache; a new aiChat call (next user message) starts empty.
+  const turnApproved = new Set<string>();
 
   let response = await client.messages.create({
     model: "claude-haiku-4-5-20251001",
@@ -365,7 +441,7 @@ export async function aiChat(params: AiChatParams, tools: boolean = false): Prom
       toolsUsed.push(tu.name);
       let result: string;
       try {
-        result = await executeTool(tu.name, tu.input as Record<string, string>);
+        result = await executeTool(tu.name, tu.input as Record<string, string>, turnApproved);
       } catch (e) {
         result = `Error: ${e instanceof Error ? e.message : String(e)}`;
       }

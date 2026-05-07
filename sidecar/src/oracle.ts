@@ -9,6 +9,16 @@ import { join, basename } from "node:path";
 import { embedText, type EmbedParams } from "./embedding";
 import { log } from "./logger";
 import { SESSION_UUID } from "./state";
+import { emitNotification } from "./notifications";
+
+// L3.4 — Sprint C Onda 3: cursor-batched fetch granularity for streaming
+// progress notifications. 200 rows/batch keeps round-trip overhead low while
+// providing fine enough progress resolution for the renderer (50ms throttle).
+export const QUERY_STREAM_BATCH = 200;
+// Throttle floor between progress notifications: don't emit more than once
+// every 50ms even if many batches arrive faster. Combined with the row-count
+// trigger this caps ~20 notifications/sec/query in the worst case.
+export const QUERY_PROGRESS_THROTTLE_MS = 50;
 
 // Guarantee DML never auto-commits regardless of driver version or future defaults.
 oracledb.autoCommit = false;
@@ -835,6 +845,9 @@ export type QueryResult = {
   rows: QueryResultRow[];
   rowCount: number;
   elapsedMs: number;
+  // L3.3 Sprint C Onda 3 — DBMS_OUTPUT is enabled session-wide, drained after
+  // every queryExecute. Empty array if the statement produced no output.
+  dbmsOutput: string[];
 };
 
 // ── In-flight query tracking ─────────────────────────────────────────────────
@@ -884,6 +897,28 @@ function isCancelError(err: unknown): boolean {
   const m = err.message || "";
   // node-oracledb thin driver raises ORA-01013 or NJS-018 when break() is called.
   return m.includes("ORA-01013") || m.includes("NJS-018");
+}
+
+/**
+ * L3.3 Sprint C Onda 3 — Enable DBMS_OUTPUT on the currently-active session.
+ *
+ * Idempotent: calling DBMS_OUTPUT.ENABLE multiple times on the same session
+ * is harmless. Best-effort by design: any failure (no active session, sysdba
+ * lockdown, weird PSDPM combo) is swallowed because DBMS_OUTPUT is ergonomic,
+ * not load-bearing — query.execute paths still work without it.
+ *
+ * Called from `workspace.open` after a successful connection so every fresh
+ * session has the buffer ready, and exposed as RPC `oracle.session_dbms_output_enable`
+ * for the rare case where the renderer wants to re-enable mid-session.
+ */
+export async function enableDbmsOutputForActiveSession(): Promise<void> {
+  try {
+    await withActiveSession(async (conn) => {
+      await conn.execute(`BEGIN DBMS_OUTPUT.ENABLE(1000000); END;`);
+    });
+  } catch {
+    // Best-effort: DBMS_OUTPUT enable failures must never break the caller.
+  }
 }
 
 async function drainDbmsOutput(conn: oracledb.Connection): Promise<string[] | null> {
@@ -940,7 +975,14 @@ export type ServerStatementResult =
   | { status: "error";     statementIndex: number; sql: string; elapsedMs: number; error: { code: number; message: string }; output: string[] | null }
   | { status: "cancelled"; statementIndex: number; sql: string; elapsedMs: number; output: null };
 
-export type MultiQueryResult = { multi: true; results: ServerStatementResult[] };
+// L3.3 Sprint C Onda 3 — Multi-statement results carry a cumulative
+// `dbmsOutput` field at the top level (union of every statement's per-stmt
+// output, in order). Per-statement `output` is preserved for back-compat.
+export type MultiQueryResult = {
+  multi: true;
+  results: ServerStatementResult[];
+  dbmsOutput: string[];
+};
 
 // oracledb thin mode detects statement type by first keyword (case-sensitive in some versions).
 // Passing outFormat/maxRows also signals "this is a query" and can cause the driver to strip
@@ -951,13 +993,23 @@ const PLSQL_EXEC_RE =
   /^(?:[ \t]*--[^\n]*\n)*[ \t]*(?:BEGIN|DECLARE|CREATE\s+(?:OR\s+REPLACE\s+)?(?:EDITIONABLE\s+|NONEDITIONABLE\s+)?(?:FUNCTION|PROCEDURE|TRIGGER|PACKAGE(?:\s+BODY)?|TYPE(?:\s+BODY)?))\b/i;
 const PLSQL_ANON_RE = /^(?:[ \t]*--[^\n]*\n)*[ \t]*(?:BEGIN|DECLARE)\b/i;
 
-/** Run a single statement against the active session; returns QueryResult. */
+/**
+ * Run a single statement against the active session; returns QueryResult.
+ *
+ * L3.4 Sprint C Onda 3 — SELECT-class statements are executed via cursor
+ * (resultSet: true) and fetched in batches of QUERY_STREAM_BATCH rows so we
+ * can emit `query.progress` notifications while the result set drains. PL/SQL
+ * anonymous blocks, DDL, DML, TCL all stay on the legacy single-shot path
+ * (no resultSet — they don't return a streamable row set). The streaming
+ * branch transparently falls back to single-shot if the driver/mock returns
+ * rows in `r.rows` instead of `r.resultSet` (used by existing unit tests).
+ */
 async function executeSingleStatement(
   conn: oracledb.Connection,
   sql: string,
   requestId: string,
   fetchAll: boolean = false
-): Promise<QueryResult> {
+): Promise<Omit<QueryResult, "dbmsOutput">> {
   const started = Date.now();
   let r: any;
   const isPlsql = PLSQL_EXEC_RE.test(sql);
@@ -965,14 +1017,27 @@ async function executeSingleStatement(
   // any options object is passed (including `{}`), causing ORA-06550.
   // Oracle SQL APIs accept BEGIN...END without the trailing semicolon, so strip it.
   const sqlToSend = PLSQL_ANON_RE.test(sql) ? sql.replace(/;\s*$/, "") : sql;
+  // Only SELECT-class statements should stream — they're the ones that produce
+  // a row set big enough that progress reporting matters. classifySql() looks
+  // at the first non-comment keyword.
+  const sqlKind = classifySql(sql);
+  const wantsStreaming = !isPlsql && sqlKind === "select";
   try {
     if (isPlsql) {
       // Don't pass a bind array for PL/SQL: thin mode scans the statement body for
       // :name patterns and misidentifies :old/:new trigger references as bind variables.
       r = await conn.execute(sqlToSend);
-    } else {
+    } else if (wantsStreaming) {
       // autoCommit: false is the global default but stated explicitly so that DML
       // never commits on its own — the user must use the Commit button.
+      // resultSet: true returns a cursor that we drain in QUERY_STREAM_BATCH chunks.
+      r = await conn.execute(sqlToSend, [], {
+        resultSet: true,
+        outFormat: oracledb.OUT_FORMAT_ARRAY,
+        autoCommit: false,
+      });
+    } else {
+      // DML / DDL / TCL / unknown — keep the original single-shot semantics.
       // maxRows: 0 means unlimited (oracledb convention)
       const opts = fetchAll
         ? { maxRows: 0, outFormat: oracledb.OUT_FORMAT_ARRAY, autoCommit: false }
@@ -985,16 +1050,67 @@ async function executeSingleStatement(
     }
     throw execErr;
   }
-  const elapsedMs = Date.now() - started;
+
   const meta: any[] = r.metaData ?? [];
-  const rawRows: any[][] = r.rows ?? [];
   const columns: QueryColumn[] = meta.map((m) => ({
     name: m.name,
     dataType: formatColumnType(m),
   }));
+
+  // Streaming path: drain the cursor in batches, emit throttled progress.
+  // r.resultSet is undefined when (a) statement was DDL/DML, (b) the test mock
+  // returned rows directly without a resultSet object — fall through to the
+  // legacy r.rows path in either case.
+  if (wantsStreaming && r.resultSet && typeof r.resultSet.getRows === "function") {
+    const cursor = r.resultSet;
+    const collected: any[][] = [];
+    let lastEmitMs = started;
+    let lastEmitRows = 0;
+    try {
+      while (true) {
+        if (_running?.requestId === requestId && _running.cancelled) break;
+        const batch: any[][] = await cursor.getRows(QUERY_STREAM_BATCH);
+        if (!batch || batch.length === 0) break;
+        for (const row of batch) collected.push(row);
+        const now = Date.now();
+        if (
+          now - lastEmitMs >= QUERY_PROGRESS_THROTTLE_MS ||
+          collected.length - lastEmitRows >= QUERY_STREAM_BATCH
+        ) {
+          emitNotification("query.progress", {
+            requestId,
+            rowsFetched: collected.length,
+            elapsedMs: now - started,
+          });
+          lastEmitMs = now;
+          lastEmitRows = collected.length;
+        }
+        // fetchAll === false caps at the original 100-row limit for parity
+        // with the legacy single-shot behaviour. fetchAll === true streams
+        // until exhausted.
+        if (!fetchAll && collected.length >= 100) break;
+      }
+    } finally {
+      try {
+        await cursor.close();
+      } catch {
+        /* best-effort: cursor close failure must not mask the real error */
+      }
+    }
+    const rows: QueryResultRow[] = collected.map((row) => row.map(normalizeCell));
+    return {
+      columns,
+      rows,
+      rowCount: collected.length,
+      elapsedMs: Date.now() - started,
+    };
+  }
+
+  // Legacy single-shot path (DML/DDL/PLSQL/test mocks without resultSet).
+  const rawRows: any[][] = r.rows ?? [];
   const rows: QueryResultRow[] = rawRows.map((row) => row.map(normalizeCell));
   const rowCount = rawRows.length > 0 ? rawRows.length : (r.rowsAffected ?? 0);
-  return { columns, rows, rowCount, elapsedMs };
+  return { columns, rows, rowCount, elapsedMs: Date.now() - started };
 }
 
 /**
@@ -1087,7 +1203,7 @@ export async function queryExecute(p: {
         throw new RpcCodedError(SPLITTER_ERROR, `Splitter error: ${msg}`);
       }
       if (statements.length === 0) {
-        return { multi: true, results: [] };
+        return { multi: true, results: [], dbmsOutput: [] };
       }
 
       // Enforce read-only / unsafe-DML BEFORE we run anything: if the batch
@@ -1097,16 +1213,10 @@ export async function queryExecute(p: {
       }
 
       const collected: ServerStatementResult[] = [];
-
-      // Enable DBMS_OUTPUT once for the whole multi-statement run.
-      // Wrapped in withActiveSession so any session-lost error is mapped consistently.
-      try {
-        await withActiveSession(async (conn) => {
-          await conn.execute(`BEGIN DBMS_OUTPUT.ENABLE(1000000); END;`);
-        });
-      } catch {
-        // Non-fatal — DBMS_OUTPUT is best-effort.
-      }
+      // L3.3 — DBMS_OUTPUT.ENABLE is now lifted into workspace.open (and the
+      // dedicated oracle.session_dbms_output_enable RPC), so we no longer
+      // re-enable it here on every multi-statement run. The drain calls below
+      // still capture any output the user's PL/SQL produced.
 
       for (let i = 0; i < statements.length; i++) {
         const stmt = statements[i];
@@ -1121,9 +1231,13 @@ export async function queryExecute(p: {
         try {
           let output: string[] | null = null;
           const qr = await withActiveSession(async (conn) => {
-            const result = await executeSingleStatement(conn, stmt, requestId);
-            output = await drainDbmsOutput(conn);
-            return result;
+            try {
+              return await executeSingleStatement(conn, stmt, requestId);
+            } finally {
+              // Drain even on failure so the next statement starts with an
+              // empty buffer. drainDbmsOutput is best-effort internally.
+              output = await drainDbmsOutput(conn);
+            }
           });
           collected.push({
             status: "ok",
@@ -1147,7 +1261,16 @@ export async function queryExecute(p: {
         }
       }
 
-      return { multi: true, results: collected };
+      // Cumulative top-level dbmsOutput is the union of every statement's
+      // captured per-stmt output, preserving order. Per-stmt `output` is kept
+      // as-is for back-compat with renderer code already shipped.
+      const cumulative: string[] = [];
+      for (const r of collected) {
+        if ("output" in r && Array.isArray(r.output)) {
+          for (const line of r.output) cumulative.push(line);
+        }
+      }
+      return { multi: true, results: collected, dbmsOutput: cumulative };
     } finally {
       if (_running?.requestId === requestId) {
         _running = null;
@@ -1159,7 +1282,23 @@ export async function queryExecute(p: {
   try {
     enforceSafetyForStatement(p.sql, { acknowledgeUnsafe: p.acknowledgeUnsafe });
     return await withActiveSession(async (conn) => {
-      return executeSingleStatement(conn, p.sql, requestId, p.fetchAll === true);
+      let dbmsOutput: string[] = [];
+      try {
+        const base = await executeSingleStatement(conn, p.sql, requestId, p.fetchAll === true);
+        const drained = await drainDbmsOutput(conn);
+        dbmsOutput = drained ?? [];
+        return { ...base, dbmsOutput };
+      } catch (err) {
+        // Drain anyway so the buffer is empty for the next query. We can't
+        // attach the output to the thrown error (caller doesn't expect it),
+        // but draining keeps the session consistent.
+        try {
+          await drainDbmsOutput(conn);
+        } catch {
+          /* best-effort */
+        }
+        throw err;
+      }
     });
   } finally {
     if (_running?.requestId === requestId) _running = null;

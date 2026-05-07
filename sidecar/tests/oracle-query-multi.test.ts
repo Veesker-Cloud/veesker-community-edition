@@ -33,7 +33,7 @@ describe("queryExecute multi-statement (splitMulti: true)", () => {
     const conn = fakeConn(async () => makeSelectResult());
     setSession(conn, "SCOTT");
     const r = await queryExecute({ sql: "-- just a comment\n/* another */", splitMulti: true });
-    expect(r).toEqual({ multi: true, results: [] });
+    expect(r).toEqual({ multi: true, results: [], dbmsOutput: [] });
     expect(conn.execute).not.toHaveBeenCalled();
   });
 

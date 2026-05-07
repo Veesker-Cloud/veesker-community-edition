@@ -59,13 +59,15 @@ describe("queryExecute", () => {
     expect(r.rowCount).toBe(0);
   });
 
-  test("passes maxRows: 100 and OUT_FORMAT_ARRAY to driver", async () => {
+  test("requests resultSet:true + OUT_FORMAT_ARRAY for SELECT (streaming path)", async () => {
     const exec = mock(async () => ({ metaData: [], rows: [] }));
     setSession({ execute: exec } as any, "SCOTT");
     await queryExecute({ sql: "SELECT * FROM t" });
-    const opts = exec.mock.calls[0][2];
-    expect(opts.maxRows).toBe(100);
+    // First call is the user's SELECT — second call is DBMS_OUTPUT drain.
+    const opts = (exec.mock.calls[0] as any[])[2];
+    expect(opts.resultSet).toBe(true);
     expect(typeof opts.outFormat).toBe("number");
+    expect(opts.autoCommit).toBe(false);
   });
 
   test("normalizes Float32Array cells (VECTOR) to plain arrays", async () => {

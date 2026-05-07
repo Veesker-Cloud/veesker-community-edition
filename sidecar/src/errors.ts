@@ -31,6 +31,11 @@ export const SESSION_SELF_PRIV_MISSING = -32033;
 export const SESSION_SELF_TRANSIENT = -32034;
 export const SESSION_SELF_NOT_FOUND = -32035;
 
+// L3.6 — Sprint C Onda 3 AI per-statement approval gate. Returned when the
+// host UI calls ai.approval.resolve with a requestId that is unknown
+// (already resolved, never registered, or already timed out).
+export const APPROVAL_UNKNOWN_REQUEST_ID = -32036;
+
 export class RpcCodedError extends Error {
   code: number;
   data?: Record<string, unknown>;

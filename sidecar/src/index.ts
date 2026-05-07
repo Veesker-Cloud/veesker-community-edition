@@ -40,8 +40,13 @@ import {
   procExecute,
   dmlPreview,
   querySessionSelf,
+  enableDbmsOutputForActiveSession,
 } from "./oracle";
 import { aiChat, aiSuggestEndpoint } from "./ai";
+import { resolveApproval } from "./ai-approval-state";
+// L2.1: read session safety (PSDPM flag) and reject embed.batch when active.
+import { getSessionSafety } from "./state";
+import { RpcCodedError, PSDPM_BLOCKED, APPROVAL_UNKNOWN_REQUEST_ID } from "./errors";
 import { chartConfigure, chartReset } from "./chart";
 import { ordsDetect, ordsModulesList, ordsModuleGet, ordsEnableSchema, ordsModuleExportSql, ordsRolesList, ordsGenerateSql, ordsApply, ordsClientsList, ordsClientsCreate, ordsClientsRevoke } from "./ords";
 import {
@@ -64,8 +69,18 @@ import { tablesStats } from "./perf-stats";
 
 const handlers: HandlerMap = {
   "connection.test": (params) => connectionTest(params as any),
-  "workspace.open": (params) => openSession(params as any),
+  "workspace.open": async (params) => {
+    const result = await openSession(params as any);
+    // L3.3 — wire DBMS_OUTPUT on every fresh session so PUT_LINE works without
+    // a separate user gesture. Best-effort: failures here never break the open.
+    await enableDbmsOutputForActiveSession();
+    return result;
+  },
   "workspace.close": () => closeSession(),
+  "oracle.session_dbms_output_enable": async () => {
+    await enableDbmsOutputForActiveSession();
+    return { ok: true };
+  },
   "session.setAction": async (params: any) => {
     const action = String(params?.action ?? "SQL Editor");
     await setSessionAction(action);
@@ -99,6 +114,30 @@ const handlers: HandlerMap = {
   "embed.batch": (params) => embedBatch(params as any),
   "ai.chat": (params) => aiChat(params as any, false),
   "ai.suggest_endpoint": (params) => aiSuggestEndpoint(params as any),
+  // L3.6 (Sprint C Onda 3): host UI calls this once the user has clicked
+  // Approve / Approve-for-turn / Deny on a pending tool-call. The matching
+  // requestApproval Promise inside the AI tool-use loop unblocks. Unknown
+  // requestIds (already resolved or timed out) raise -32036 so the renderer
+  // can surface a clean error rather than a silent no-op.
+  "ai.approval.resolve": async (params: any) => {
+    const requestId = String(params?.requestId ?? "");
+    const approved = !!params?.approved;
+    const applyToTurn = !!params?.applyToTurn;
+    if (!requestId) {
+      throw new RpcCodedError(
+        APPROVAL_UNKNOWN_REQUEST_ID,
+        "approval_unknown_request_id"
+      );
+    }
+    const found = resolveApproval(requestId, { approved, applyToTurn });
+    if (!found) {
+      throw new RpcCodedError(
+        APPROVAL_UNKNOWN_REQUEST_ID,
+        "approval_unknown_request_id"
+      );
+    }
+    return { ok: true };
+  },
   "explain.plan": (params) => explainPlan(params as any),
   "oracle.session_self": () => querySessionSelf(),
   "proc.describe": (params) => procDescribe(params as any),
