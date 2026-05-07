@@ -101,6 +101,37 @@
       defaultAutoExplainMode(initial.safety?.env),
     ),
   );
+  let expandedHints = $state<Set<string>>(new Set());
+  function toggleHint(key: string) {
+    const next = new Set(expandedHints);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    expandedHints = next;
+  }
+  const effectiveAirgap = $derived(env === "prod" ? true : airgapMode);
+  const effectivePsdpm = $derived(env === "prod" ? true : psdpmMode);
+  const lockedCount = $derived(env === "prod" ? 2 : 0);
+  const onCount = $derived(
+    (env ? 1 : 0) +
+    (readOnly ? 1 : 0) +
+    (!!statementTimeoutSec ? 1 : 0) +
+    (warnUnsafeDml ? 1 : 0) +
+    (!autoPerfAnalysis ? 1 : 0) +
+    (effectiveAirgap ? 1 : 0) +
+    (effectivePsdpm ? 1 : 0) +
+    (autoExplainMode !== "manual" ? 1 : 0),
+  );
+  const previewLines = $derived((() => {
+    const lines: Array<{ text: string; accent?: string }> = [];
+    if (env) lines.push({ text: `${env.toUpperCase()} badge on tabs`, accent: env === "prod" ? "#f5a08a" : env === "staging" ? "#e8c87e" : "#6aa0f5" });
+    if (readOnly) lines.push({ text: "DML/DDL blocked", accent: "#7ec96a" });
+    if (warnUnsafeDml) lines.push({ text: "EXPLAIN before unsafe DML", accent: "#6acfe8" });
+    if (!autoPerfAnalysis) lines.push({ text: "No background cost analysis" });
+    if (effectiveAirgap) lines.push({ text: "AI + cloud outbound disabled", accent: "#f5a08a" });
+    if (effectivePsdpm) lines.push({ text: "No background SQL (PSDPM)", accent: "#c48af0" });
+    if (autoExplainMode !== "manual") lines.push({ text: `Auto-EXPLAIN: ${autoExplainMode === "always" ? "every statement" : "DML only"}` });
+    if (statementTimeoutSec) lines.push({ text: `Timeout: ${statementTimeoutSec}s` });
+    return lines;
+  })());
   let showSafety = $state<boolean>(untrack(() => {
     const s = initial.safety;
     return !!(s && (s.env || s.readOnly || s.statementTimeoutMs || s.warnUnsafeDml || s.autoPerfAnalysis === false || s.airgapMode || s.psdpmMode));
@@ -330,139 +361,108 @@
     onclick={() => (showSafety = !showSafety)}
   >
     {showSafety ? "▼" : "▶"} Safety guards
-    {#if env || readOnly || statementTimeoutSec || warnUnsafeDml || !autoPerfAnalysis || airgapMode || psdpmMode || autoExplainMode !== "manual"}
+    {#if onCount > 0}
       <span class="safety-summary">
         {#if env}<span class="badge badge-{env}">{env}</span>{/if}
         {#if readOnly}<span class="badge badge-ro">read-only</span>{/if}
-        {#if statementTimeoutSec}<span class="badge">{statementTimeoutSec}s timeout</span>{/if}
+        {#if statementTimeoutSec}<span class="badge">{statementTimeoutSec}s</span>{/if}
         {#if warnUnsafeDml}<span class="badge badge-warn">warn DML</span>{/if}
         {#if !autoPerfAnalysis}<span class="badge">no auto-perf</span>{/if}
-        {#if airgapMode}<span class="badge badge-airgap">air-gapped</span>{/if}
-        {#if psdpmMode}<span class="badge badge-psdpm">PSDPM</span>{/if}
+        {#if effectiveAirgap}<span class="badge badge-airgap">air-gapped</span>{/if}
+        {#if effectivePsdpm}<span class="badge badge-psdpm">PSDPM</span>{/if}
         {#if autoExplainMode !== "manual"}<span class="badge badge-explain">EXPLAIN: {autoExplainMode === "when_dml" ? "DML" : "always"}</span>{/if}
       </span>
     {:else}
-      <span class="safety-hint">all off · click to configure</span>
+      <span class="safety-hint">{onCount} on{lockedCount > 0 ? ` · ${lockedCount} locked` : " · all defaults"}</span>
     {/if}
   </button>
 
   {#if showSafety}
     <div class="safety-panel">
-      <p class="safety-blurb">
-        These flags are <strong>per-connection</strong> and <strong>off by default</strong>. They're
-        opt-in safety nets for production work — none of them slow Veesker down or block you from
-        running DDL/DML when off.
-      </p>
-
-      <div class="safety-row">
-        <label class="safety-field">
-          Environment
-          <select bind:value={env} disabled={isEdit}>
-            <option value="">— unspecified —</option>
-            <option value="dev">dev</option>
-            <option value="staging">staging</option>
-            <option value="prod">prod (red badge)</option>
-          </select>
-          {#if isEdit}
-            <small><strong>Immutable after save.</strong> Delete and recreate to change env.</small>
-          {:else}
-            <small>Tags the tab so you remember which env you're in. <strong>Cannot be changed after save.</strong></small>
+      <div class="sg-cols">
+        <div class="sg-col">
+          <div class="sg-group-label">Connection</div>
+          <div class="sg-field">
+            <div class="sg-field-header">
+              <span class="sg-field-name">Environment</span>
+              {#if env}<span class="sg-immutable">⚠ IMMUTABLE</span>{/if}
+            </div>
+            <select bind:value={env} disabled={isEdit}>
+              <option value="">— unspecified —</option>
+              <option value="dev">dev</option>
+              <option value="staging">staging</option>
+              <option value="prod">prod (red badge)</option>
+            </select>
+            {#if isEdit}<small>Delete and recreate this connection to change env.</small>{/if}
+          </div>
+          <div class="sg-field">
+            <div class="sg-field-header"><span class="sg-field-name">Timeout (seconds)</span></div>
+            <input type="number" min="0" placeholder="0 = unlimited" bind:value={statementTimeoutSec} />
+          </div>
+          <div class="sg-group-label" style="margin-top:0.75rem;">AI / Perf</div>
+          <div class="sg-toggle-row">
+            <button type="button" class="sg-tog" class:sg-on={autoPerfAnalysis} aria-pressed={autoPerfAnalysis} aria-label="Toggle auto-perf analysis" onclick={() => { autoPerfAnalysis = !autoPerfAnalysis; }}><span class="sg-knob"></span></button>
+            <span class="sg-toggle-label">Auto-perf analysis</span>
+            <button type="button" class="sg-hint-btn" onclick={() => toggleHint("perf")}>?</button>
+          </div>
+          {#if expandedHints.has("perf")}
+            <div class="sg-hint-text">Background EXPLAIN PLAN + table stats to surface cost badges as you type. Turn off to silence background analysis; the "Why slow?" button still works on demand.</div>
           {/if}
-        </label>
-
-        <label class="safety-field">
-          Statement timeout (seconds)
-          <input
-            type="number"
-            min="0"
-            placeholder="empty = no timeout"
-            bind:value={statementTimeoutSec}
-          />
-          <small>Kills any single statement that runs longer. Default: unlimited.</small>
-        </label>
+          <div class="sg-field" style="margin-top:0.35rem;">
+            <div class="sg-field-header"><span class="sg-field-name">📊 Auto-EXPLAIN</span></div>
+            <select bind:value={autoExplainMode}>
+              <option value="manual">Manual — only on F9</option>
+              <option value="when_dml">When DML / staging+prod</option>
+              <option value="always">Always — every statement</option>
+            </select>
+          </div>
+        </div>
+        <div class="sg-col">
+          <div class="sg-group-label">Safety</div>
+          <div class="sg-toggle-row">
+            <button type="button" class="sg-tog" class:sg-on={readOnly} aria-pressed={readOnly} aria-label="Toggle read-only mode" onclick={() => { readOnly = !readOnly; }}><span class="sg-knob"></span></button>
+            <span class="sg-toggle-label">Read-only</span>
+            <button type="button" class="sg-hint-btn" onclick={() => toggleHint("ro")}>?</button>
+          </div>
+          {#if expandedHints.has("ro")}
+            <div class="sg-hint-text">Refuse DML/DDL on this connection — SELECT, EXPLAIN, and WITH queries still work.</div>
+          {/if}
+          <div class="sg-toggle-row">
+            <button type="button" class="sg-tog" class:sg-on={warnUnsafeDml} aria-pressed={warnUnsafeDml} aria-label="Toggle warn unsafe DML" onclick={() => { warnUnsafeDml = !warnUnsafeDml; }}><span class="sg-knob"></span></button>
+            <span class="sg-toggle-label">Warn unsafe DML</span>
+            <button type="button" class="sg-hint-btn" onclick={() => toggleHint("dml")}>?</button>
+          </div>
+          {#if expandedHints.has("dml")}
+            <div class="sg-hint-text">Show EXPLAIN PLAN + estimated rows before running UPDATE/DELETE without a WHERE clause.</div>
+          {/if}
+          <div class="sg-toggle-row" class:sg-row-locked={env === "prod"}>
+            <button type="button" class="sg-tog" class:sg-on={effectiveAirgap} class:sg-locked={env === "prod"} aria-pressed={effectiveAirgap} aria-label="Toggle air-gap mode" disabled={env === "prod"} onclick={() => { airgapMode = !airgapMode; airgapTouched = true; }}><span class="sg-knob"></span></button>
+            <span class="sg-toggle-label">🔒 Air-gap {#if env === "prod"}<span class="sg-lock-note">locked</span>{/if}</span>
+            <button type="button" class="sg-hint-btn" onclick={() => toggleHint("airgap")}>?</button>
+          </div>
+          {#if expandedHints.has("airgap")}
+            <div class="sg-hint-text">Hard-disable AI, cloud sync, sandbox, and any outbound HTTPS while this connection is active. Forced ON when env=prod — override env first to disable.</div>
+          {/if}
+          <div class="sg-toggle-row" class:sg-row-locked={env === "prod"}>
+            <button type="button" class="sg-tog" class:sg-on={effectivePsdpm} class:sg-locked={env === "prod"} aria-pressed={effectivePsdpm} aria-label="Toggle PSDPM mode" disabled={env === "prod"} onclick={() => { psdpmMode = !psdpmMode; }}><span class="sg-knob"></span></button>
+            <span class="sg-toggle-label">🔐 PSDPM {#if env === "prod"}<span class="sg-lock-note">locked</span>{/if}</span>
+            <button type="button" class="sg-hint-btn" onclick={() => toggleHint("psdpm")}>?</button>
+          </div>
+          {#if expandedHints.has("psdpm")}
+            <div class="sg-hint-text">Block AI tools, embed batches, schema pre-fetch, and non-user-initiated SQL. Veesker behaves like PL/SQL Developer — nothing runs unless you click. Forced ON for prod; defaults ON for staging.</div>
+          {/if}
+          <div class="sg-preview">
+            <div class="sg-preview-title">Active with these settings</div>
+            {#if previewLines.length === 0}
+              <div class="sg-preview-empty">No guards active — all defaults</div>
+            {:else}
+              {#each previewLines as line (line.text)}
+                <div class="sg-preview-line" style={line.accent ? `color:${line.accent}` : ""}>· {line.text}</div>
+              {/each}
+            {/if}
+          </div>
+        </div>
       </div>
-
-      <label class="safety-check">
-        <input type="checkbox" bind:checked={readOnly} />
-        <span>
-          <strong>Read-only mode</strong> — refuse DML/DDL on this connection (SELECT/EXPLAIN/WITH allowed).
-        </span>
-      </label>
-
-      <label class="safety-check">
-        <input type="checkbox" bind:checked={warnUnsafeDml} />
-        <span>
-          <strong>Warn on unsafe DML</strong> — show EXPLAIN PLAN + estimated rows before running
-          UPDATE/DELETE without a WHERE clause.
-        </span>
-      </label>
-
-      <label class="safety-check">
-        <input type="checkbox" bind:checked={autoPerfAnalysis} />
-        <span>
-          <strong>Auto-perf analysis</strong> — background EXPLAIN PLAN + table stats
-          to surface red flags as you type. When off, the cost badge / red flags / stats
-          freshness disappear, but the "Why slow?" button keeps working on demand.
-        </span>
-      </label>
-
-      <!-- 4-layer hard-lock Layer 1: when env=prod, BOTH toggles are forced ON
-           and disabled. To enable AI on prod, user must delete + recreate the
-           connection with a different env (F2 immutability rule). -->
-      <!-- L1.2 air-gap toggle -->
-      <label class="safety-check airgap-toggle">
-        <input
-          type="checkbox"
-          checked={env === "prod" ? true : airgapMode}
-          disabled={env === "prod"}
-          onchange={(e) => {
-            airgapMode = (e.currentTarget as HTMLInputElement).checked;
-            airgapTouched = true;
-          }}
-        />
-        <span>
-          <strong>🔒 Air-gap mode</strong> — hard-disable AI, cloud sync, version remote,
-          and any other outbound HTTPS while this connection is active. Recommended for
-          client production engagements; defaults on for connections tagged <em>prod</em>.
-          {#if env === "prod"}<span class="muted hardlock-note">Hard-locked ON when env=prod. Override env first to disable.</span>{/if}
-        </span>
-      </label>
-
-      <!-- L2.1 PSDPM toggle -->
-      <label class="safety-check psdpm-toggle">
-        <input
-          type="checkbox"
-          checked={env === "prod" ? true : psdpmMode}
-          disabled={env === "prod"}
-          onchange={(e) => { psdpmMode = (e.currentTarget as HTMLInputElement).checked; }}
-        />
-        <span>
-          <strong>🔐 PL/SQL Developer Parity Mode</strong> — block AI tools, embed batches,
-          schema pre-fetch, and any non-user-initiated SQL. Veesker behaves like PL/SQL Developer:
-          nothing runs unless you click. Recommended for client production engagements.
-          <span class="muted">Defaults on for prod / staging environments.</span>
-          {#if env === "prod"}<span class="muted hardlock-note">Hard-locked ON when env=prod. Override env first to disable.</span>{/if}
-        </span>
-      </label>
-
-      <!-- L3.2 (Onda 3) auto-EXPLAIN mode -->
-      <label class="safety-field auto-explain-field">
-        <span class="auto-explain-label">📊 Auto-EXPLAIN mode</span>
-        <select bind:value={autoExplainMode}>
-          <option value="manual">Manual — only on F9</option>
-          <option value="when_dml">When DML / staging+prod (recommended)</option>
-          <option value="always">Always — every statement</option>
-        </select>
-        <small>
-          {#if autoExplainMode === "manual"}
-            Run EXPLAIN PLAN only when explicitly requested (F9).
-          {:else if autoExplainMode === "when_dml"}
-            Auto-EXPLAIN before DML/SELECT in PROD/staging.
-          {:else}
-            Auto-EXPLAIN before every statement.
-          {/if}
-        </small>
-      </label>
     </div>
   {/if}
 
@@ -581,10 +581,9 @@
   }
   .meta { font-size: 11px; opacity: 0.6; }
 
-  /* ── Safety panel ─────────────────────────────────────────── */
+  /* ── Safety panel (F-20 redesign) ────────────────────────── */
   .safety-toggle {
-    flex: none;
-    display: flex; align-items: center; gap: 0.5rem;
+    flex: none; display: flex; align-items: center; gap: 0.5rem;
     background: transparent; border: 1px solid var(--border);
     color: var(--text-secondary); padding: 0.5rem 0.85rem;
     font-family: "Inter", sans-serif; font-size: 12px; font-weight: 600;
@@ -593,63 +592,42 @@
   }
   .safety-toggle:hover { background: var(--row-hover); color: var(--text-primary); border-color: var(--border-strong); }
   .safety-summary { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-left: auto; }
-  .safety-hint {
-    margin-left: auto; font-size: 11px; font-weight: 400;
-    text-transform: none; letter-spacing: normal; color: var(--text-muted);
-  }
-  .badge {
-    display: inline-block; padding: 1px 7px; border-radius: 3px;
-    font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;
-    background: var(--bg-surface-raised); color: var(--text-primary);
-    border: 1px solid var(--border);
-  }
-  .badge-prod { background: rgba(179, 62, 31, 0.18); color: #d36b4f; border-color: rgba(179, 62, 31, 0.4); }
-  .badge-staging { background: rgba(217, 153, 42, 0.18); color: #d99c2a; border-color: rgba(217, 153, 42, 0.4); }
-  .badge-dev { background: rgba(74, 158, 218, 0.18); color: #4a9eda; border-color: rgba(74, 158, 218, 0.4); }
-  .badge-ro { background: rgba(106, 110, 119, 0.2); color: var(--text-secondary); }
-  .badge-warn { background: rgba(217, 153, 42, 0.18); color: #d99c2a; border-color: rgba(217, 153, 42, 0.4); }
-  .badge-airgap { background: rgba(20, 24, 32, 0.85); color: #f6f1e8; border-color: rgba(20, 24, 32, 1); }
-  .airgap-toggle strong { letter-spacing: 0.02em; }
-  .badge-psdpm { background: rgba(122, 90, 248, 0.18); color: #a78bfa; border-color: rgba(122, 90, 248, 0.4); }
+  .safety-hint { margin-left: auto; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: normal; color: var(--text-muted); }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; background: var(--bg-surface-raised); color: var(--text-primary); border: 1px solid var(--border); }
+  .badge-prod { background: rgba(179,62,31,0.18); color: #d36b4f; border-color: rgba(179,62,31,0.4); }
+  .badge-staging { background: rgba(217,153,42,0.18); color: #d99c2a; border-color: rgba(217,153,42,0.4); }
+  .badge-dev { background: rgba(74,158,218,0.18); color: #4a9eda; border-color: rgba(74,158,218,0.4); }
+  .badge-ro { background: rgba(106,110,119,0.2); color: var(--text-secondary); }
+  .badge-warn { background: rgba(217,153,42,0.18); color: #d99c2a; border-color: rgba(217,153,42,0.4); }
+  .badge-airgap { background: rgba(20,24,32,0.85); color: #f6f1e8; border-color: rgba(20,24,32,1); }
+  .badge-psdpm { background: rgba(122,90,248,0.18); color: #a78bfa; border-color: rgba(122,90,248,0.4); }
   .badge-explain { background: var(--bg-surface-alt); color: var(--text-primary); border-color: var(--border); }
-  .auto-explain-field { gap: 0.45rem; }
-  .auto-explain-label {
-    font-family: "Inter", sans-serif; font-size: 12px; font-weight: 600;
-    text-transform: uppercase; letter-spacing: 0.08em;
-    color: var(--text-secondary);
-  }
-  .psdpm-toggle .muted, .airgap-toggle .muted {
-    display: block; margin-top: 0.2rem;
-    color: var(--text-muted); font-size: 11.5px; font-weight: 400;
-  }
-  /* 4-layer hard-lock visible note when env=prod forces a toggle. */
-  .hardlock-note { color: #b33e1f !important; font-weight: 500; }
-  .safety-check input[type="checkbox"]:disabled + span strong { opacity: 0.85; }
-
-  .safety-panel {
-    display: flex; flex-direction: column; gap: 0.85rem;
-    padding: 0.85rem 1rem; background: var(--bg-surface-raised);
-    border: 1px solid var(--border); border-radius: 6px;
-  }
-  .safety-blurb {
-    margin: 0; font-family: "Inter", sans-serif; font-size: 12px;
-    line-height: 1.5; color: var(--text-secondary);
-    text-transform: none; letter-spacing: normal; font-weight: 400;
-  }
-  .safety-blurb strong { color: var(--text-primary); }
-  .safety-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-  .safety-field { display: flex; flex-direction: column; gap: 0.35rem; }
-  .safety-field small {
-    font-family: "Inter", sans-serif; font-size: 11px; font-weight: 400;
-    text-transform: none; letter-spacing: normal; color: var(--text-muted);
-  }
-  .safety-check {
-    display: flex; align-items: flex-start; gap: 0.6rem;
-    text-transform: none; letter-spacing: normal; font-weight: 400;
-    color: var(--text-primary); font-size: 13px; line-height: 1.5;
-    cursor: pointer;
-  }
-  .safety-check input[type="checkbox"] { margin-top: 3px; flex-shrink: 0; }
-  .safety-check span { flex: 1; }
-  .safety-check strong { color: var(--text-primary); }
+  .safety-panel { padding: 0.85rem 1rem; background: var(--bg-surface-raised); border: 1px solid var(--border); border-radius: 6px; }
+  .sg-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+  .sg-col { display: flex; flex-direction: column; gap: 0.4rem; }
+  .sg-group-label { font-family: "Inter", sans-serif; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-muted); margin-bottom: 0.15rem; }
+  .sg-field { display: flex; flex-direction: column; gap: 0.3rem; }
+  .sg-field-header { display: flex; align-items: center; gap: 0.4rem; }
+  .sg-field-name { font-family: "Inter", sans-serif; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-secondary); }
+  .sg-field input, .sg-field select, .sg-col > select { font-size: 13px; padding: 0.45rem 0.65rem; }
+  .sg-field small { font-family: "Inter", sans-serif; font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: normal; color: var(--text-muted); }
+  .sg-immutable { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; background: rgba(179,62,31,0.15); color: #f5a08a; border: 1px solid rgba(179,62,31,0.4); border-radius: 3px; padding: 1px 5px; }
+  .sg-toggle-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0; min-height: 28px; }
+  .sg-row-locked { opacity: 0.65; }
+  .sg-toggle-label { flex: 1; font-family: "Inter", sans-serif; font-size: 12px; font-weight: 500; color: var(--text-primary); text-transform: none; letter-spacing: normal; }
+  .sg-lock-note { font-size: 10px; color: #f5a08a; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-left: 4px; }
+  .sg-tog { width: 32px; height: 18px; border-radius: 9px; background: var(--bg-surface-raised); border: 1px solid var(--border-strong); position: relative; cursor: pointer; flex-shrink: 0; padding: 0; transition: background 0.15s, border-color 0.15s; }
+  .sg-tog:disabled { cursor: default; }
+  .sg-tog.sg-on { background: rgba(126,201,106,0.2); border-color: rgba(126,201,106,0.55); }
+  .sg-tog.sg-locked { background: rgba(245,160,138,0.18); border-color: rgba(245,160,138,0.5); }
+  .sg-knob { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--text-muted); transition: left 0.15s, background 0.15s; }
+  .sg-tog.sg-on .sg-knob { left: 16px; background: #7ec96a; }
+  .sg-tog.sg-locked .sg-knob { left: 16px; background: #f5a08a; }
+  .sg-hint-btn { width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--border); background: transparent; color: var(--text-muted); font-size: 9px; font-weight: 700; cursor: pointer; padding: 0; flex-shrink: 0; font-family: "Inter", sans-serif; text-transform: none; letter-spacing: normal; display: flex; align-items: center; justify-content: center; }
+  .sg-hint-btn:hover { background: var(--row-hover); color: var(--text-primary); border-color: var(--border-strong); }
+  .sg-hint-text { font-family: "Inter", sans-serif; font-size: 11px; font-weight: 400; color: var(--text-secondary); line-height: 1.45; padding: 0.3rem 0.5rem; background: var(--bg-surface-alt); border-radius: 4px; text-transform: none; letter-spacing: normal; border-left: 2px solid var(--border-strong); margin-bottom: 0.15rem; }
+  .sg-preview { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
+  .sg-preview-title { font-family: "Inter", sans-serif; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.4rem; }
+  .sg-preview-empty { font-family: "Inter", sans-serif; font-size: 11px; color: var(--text-muted); font-style: italic; }
+  .sg-preview-line { font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--text-secondary); line-height: 1.65; }
 </style>
