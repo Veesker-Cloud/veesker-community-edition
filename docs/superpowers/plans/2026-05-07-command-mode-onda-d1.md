@@ -289,7 +289,7 @@ git commit -m "feat(sprint-d): add command_history_load/append + command_script_
 // Licensed under the Apache License, Version 2.0
 // https://github.com/veesker-cloud/veesker-community-edition
 
-import type { ColumnMeta } from "$lib/sql-query";
+import type { QueryColumn } from "$lib/sql-query";
 
 export interface CommandSettings {
   linesize: number;     // 1..32767 default 80
@@ -347,8 +347,8 @@ export interface CommandHistoryEntry {
 }
 
 export interface SharedExecResult {
-  rows: any[][];
-  columns: ColumnMeta[];
+  rows: unknown[][];
+  columns: QueryColumn[];
   rowCount: number;
   elapsedMs: number;
   dbmsOutput: string[];
@@ -674,35 +674,26 @@ git commit -m "feat(sprint-d): tier-1 directive parser + SQL/PLSQL detection (D.
 import { describe, expect, test } from "vitest";
 import { formatRows, formatStatus } from "./formatter";
 import { DEFAULT_SETTINGS } from "./types";
-import type { ColumnMeta } from "$lib/sql-query";
+import type { QueryColumn } from "$lib/sql-query";
 
-const cols = (defs: Array<[string, string, number?]>): ColumnMeta[] =>
-  defs.map(([name, type, dataLen]) => ({
-    name,
-    typeName: type,
-    dbType: 0,
-    fetchType: 0,
-    nullable: true,
-    dataLength: dataLen ?? 30,
-    precision: null,
-    scale: null,
-  }));
+const cols = (defs: Array<[string, string]>): QueryColumn[] =>
+  defs.map(([name, dataType]) => ({ name, dataType }));
 
 describe("formatRows — basic", () => {
   test("single string column with one row", () => {
-    const out = formatRows([["X"]], cols([["D", "VARCHAR2", 1]]), DEFAULT_SETTINGS);
+    const out = formatRows([["X"]], cols([["D", "VARCHAR2"]]), DEFAULT_SETTINGS);
     expect(out).toMatch(/^D\s*\n-+\s*\nX\s*\n$/);
   });
 
   test("HEADING off omits header", () => {
-    const out = formatRows([["X"]], cols([["D", "VARCHAR2", 1]]), { ...DEFAULT_SETTINGS, heading: false });
+    const out = formatRows([["X"]], cols([["D", "VARCHAR2"]]), { ...DEFAULT_SETTINGS, heading: false });
     expect(out).toBe("X\n");
   });
 
   test("two columns are separated by COLSEP", () => {
     const out = formatRows(
       [["1", "2"]],
-      cols([["A", "VARCHAR2", 1], ["B", "VARCHAR2", 1]]),
+      cols([["A", "VARCHAR2"], ["B", "VARCHAR2"]]),
       DEFAULT_SETTINGS,
     );
     const dataLine = out.split("\n").find((l) => /^1\s+2/.test(l));
@@ -712,7 +703,7 @@ describe("formatRows — basic", () => {
   test("PAGESIZE 2 repeats header every 2 rows", () => {
     const out = formatRows(
       [["a"], ["b"], ["c"], ["d"]],
-      cols([["X", "VARCHAR2", 1]]),
+      cols([["X", "VARCHAR2"]]),
       { ...DEFAULT_SETTINGS, pagesize: 2 },
     );
     const headerLines = out.split("\n").filter((l) => l.trim() === "X");
@@ -720,7 +711,7 @@ describe("formatRows — basic", () => {
   });
 
   test("NULL values render as the NULL setting string", () => {
-    const out = formatRows([[null]], cols([["X", "VARCHAR2", 5]]), { ...DEFAULT_SETTINGS, null: "<null>" });
+    const out = formatRows([[null]], cols([["X", "VARCHAR2"]]), { ...DEFAULT_SETTINGS, null: "<null>" });
     expect(out).toContain("<null>");
   });
 });
