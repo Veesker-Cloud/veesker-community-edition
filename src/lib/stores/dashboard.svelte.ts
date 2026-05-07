@@ -13,6 +13,9 @@ export type DashboardChart = {
   rows: unknown[][];
   totalRows: number;
   addedAt: number;
+  owner: string | null;
+  objectName: string | null;
+  objectType: string | null;
 };
 
 const ROW_CAP = 500;

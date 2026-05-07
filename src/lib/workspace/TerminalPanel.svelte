@@ -152,7 +152,7 @@
           </svg>
         {/if}
       </button>
-      {#if dock === 'bottom' && onMinimize}
+      {#if onMinimize}
         <button
           class="tp-btn"
           aria-label={minimized ? "Restore terminal" : "Minimize terminal"}
@@ -195,6 +195,8 @@
     flex-shrink: 0;
     background: rgba(255,255,255,0.03);
     border-bottom: 1px solid rgba(255,255,255,0.07);
+    position: relative;
+    z-index: 30;
   }
   .tp-label {
     display: flex;

@@ -9,8 +9,20 @@
   import { dashboard } from "$lib/stores/dashboard.svelte";
   import ChartWidget from "./ChartWidget.svelte";
 
-  const kpiCharts    = $derived(dashboard.charts.filter((c) => c.config.type === "kpi"));
-  const nonKpiCharts = $derived(dashboard.charts.filter((c) => c.config.type !== "kpi"));
+  type Props = {
+    owner?: string | null;
+    objectName?: string | null;
+    objectType?: string | null;
+  };
+  let { owner = null, objectName = null, objectType = null }: Props = $props();
+
+  const visibleCharts = $derived(
+    owner != null || objectName != null
+      ? dashboard.charts.filter((c) => c.owner === owner && c.objectName === objectName)
+      : dashboard.charts,
+  );
+  const kpiCharts    = $derived(visibleCharts.filter((c) => c.config.type === "kpi"));
+  const nonKpiCharts = $derived(visibleCharts.filter((c) => c.config.type !== "kpi"));
 
   let clearConfirm = $state(false);
 
@@ -94,7 +106,7 @@
   <div class="dash-header">
     <span class="dash-title">Dashboard</span>
     <div class="dash-actions">
-      {#if dashboard.charts.length > 0}
+      {#if visibleCharts.length > 0}
         {#if clearConfirm}
           <span class="clear-confirm-label">Remove all charts?</span>
           <button class="dash-btn danger" onclick={() => { dashboard.clearDashboard(); clearConfirm = false; }}>Yes</button>
@@ -106,9 +118,13 @@
       {/if}
     </div>
   </div>
-  {#if dashboard.charts.length === 0}
+  {#if visibleCharts.length === 0}
     <div class="dash-empty">
-      <p>No charts yet. Run a query and click <strong>📊 Analyze</strong> to get started.</p>
+      {#if dashboard.charts.length > 0 && (owner != null || objectName != null)}
+        <p>No charts for this object yet. Run a query and click <strong>📊 Analyze</strong> to add one.</p>
+      {:else}
+        <p>No charts yet. Run a query and click <strong>📊 Analyze</strong> to get started.</p>
+      {/if}
     </div>
   {:else}
     <div class="dash-body">

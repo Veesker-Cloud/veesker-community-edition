@@ -88,6 +88,9 @@
     columns: { name: string; dataType: string }[];
     rows: unknown[][];
     sql: string;
+    owner: string | null;
+    objectName: string | null;
+    objectType: string | null;
   } | null>(null);
   let refreshing = $state(false);
   let completionSchema = $state<Record<string, string[]>>({});
@@ -459,7 +462,7 @@
       meta.name,
       meta.username,
       hostOrAlias,
-      meta.autoExplainMode ?? "manual",
+      meta.autoExplainMode ?? "always",
     );
 
     const openRes = await workspaceOpen(id);
@@ -577,6 +580,9 @@
       columns: ar.result.columns,
       rows: ar.result.rows,
       sql: tab.sql,
+      owner: selected?.owner ?? null,
+      objectName: selected?.name ?? null,
+      objectType: selected?.kind ?? null,
     };
     showChat = true;
     Promise.resolve().then(() => { analyzePayload = null; });
@@ -914,7 +920,7 @@
           {/if}
         {/if}
         {#if activeWsTab === "dashboard"}
-          <DashboardTab />
+          <DashboardTab owner={selected?.owner ?? null} objectName={selected?.name ?? null} objectType={selected?.kind ?? null} />
         {/if}
       </div>
       {#if showChat}
