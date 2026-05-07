@@ -1875,3 +1875,72 @@ pub async fn cloud_api_post(app: AppHandle, path: String, body: Value) -> Result
     }
     Ok(())
 }
+
+// Sprint D Onda D.1 — Command Window history + script reader.
+//
+// Three thin commands consumed by the renderer's Command Window REPL:
+//   * `command_history_load`   — page through recent submitted lines
+//   * `command_history_append` — record one submitted line after execution
+//   * `command_script_read`    — read a `@file.sql` script from disk
+
+use crate::persistence::command_history::CommandHistoryEntry;
+
+#[tauri::command]
+pub async fn command_history_load(
+    app: AppHandle,
+    connection_id: String,
+    limit: i64,
+) -> Result<Vec<CommandHistoryEntry>, String> {
+    let svc = app.state::<ConnectionService>();
+    svc.command_history_load(&connection_id, limit)
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+pub async fn command_history_append(
+    app: AppHandle,
+    connection_id: String,
+    command: String,
+    origin: String,
+    status: String,
+    duration_ms: Option<i64>,
+) -> Result<i64, String> {
+    let svc = app.state::<ConnectionService>();
+    svc.command_history_append(&connection_id, &command, &origin, &status, duration_ms)
+        .map_err(|e| e.message)
+}
+
+const COMMAND_SCRIPT_MAX_BYTES: u64 = 1024 * 1024;
+
+#[tauri::command]
+pub async fn command_script_read(app: AppHandle, path: String) -> Result<String, String> {
+    if path.is_empty() {
+        return Err("path required".to_string());
+    }
+    // Reject any path containing parent-dir segments. We check the raw input
+    // (before canonicalize) so a renderer cannot smuggle `..` past the user's
+    // own scope-allow-list — the canonical form would silently flatten them.
+    let raw = Path::new(&path);
+    if raw
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("path traversal segments ('..') are not allowed".to_string());
+    }
+    // Confine reads to the same user folders the renderer is already allowed
+    // to browse (Documents, Desktop, Downloads, Home, app data/config).
+    let canon = validate_user_path(&app, &path).map_err(|e| e.message)?;
+    let meta = std::fs::metadata(&canon)
+        .map_err(|e| format!("SP2-0310: unable to open file \"{path}\": {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("SP2-0310: \"{path}\" is not a regular file"));
+    }
+    if meta.len() > COMMAND_SCRIPT_MAX_BYTES {
+        return Err(format!(
+            "script file is {} bytes, exceeds the 1 MiB limit",
+            meta.len()
+        ));
+    }
+    std::fs::read_to_string(&canon)
+        .map_err(|e| format!("SP2-0310: unable to read file \"{path}\": {e}"))
+}
