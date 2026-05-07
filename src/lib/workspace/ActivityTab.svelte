@@ -9,9 +9,6 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onMount, onDestroy } from "svelte";
 
-  type Props = { onClose: () => void };
-  let { onClose }: Props = $props();
-
   type AuditEntry = {
     ts: string;
     sql: string;
@@ -144,19 +141,13 @@
   }
 </script>
 
-<aside class="ledger" aria-label="Activity Ledger">
-  <header class="ledger-head">
-    <div class="head-left">
-      <strong>Activity Ledger</strong>
-      <span class="count">
-        {#if loadingInitial}loading…{:else}{filtered.length} / {entries.length}{/if}
-      </span>
-    </div>
-    <div class="head-actions">
-      <button class="head-btn" onclick={exportJsonl} title="Export JSONL">Export</button>
-      <button class="close-btn" onclick={onClose} aria-label="Close">✕</button>
-    </div>
-  </header>
+<div class="activity-tab">
+  <div class="sub-head">
+    <span class="count">
+      {#if loadingInitial}loading…{:else}{filtered.length} / {entries.length}{/if}
+    </span>
+    <button class="head-btn" onclick={exportJsonl} title="Export JSONL">Export</button>
+  </div>
   <div class="filters">
     {#each Object.keys(ORIGIN_COLORS) as origin (origin)}
       <button
@@ -196,20 +187,16 @@
       <li class="empty">No statements yet.</li>
     {/if}
   </ul>
-</aside>
+</div>
 
 <style>
-  .ledger {
+  .activity-tab {
     display: flex;
     flex-direction: column;
-    height: 100%;
-    background: var(--bg-surface);
-    border-left: 1px solid var(--border);
-    font-size: 12px;
-    color: var(--text-primary);
-    min-width: 280px;
+    flex: 1 1 auto;
+    overflow: hidden;
   }
-  .ledger-head {
+  .sub-head {
     padding: 8px 12px;
     border-bottom: 1px solid var(--border);
     display: flex;
@@ -218,8 +205,6 @@
     background: var(--bg-surface-alt);
     flex-shrink: 0;
   }
-  .head-left { display: flex; align-items: center; gap: 8px; }
-  .head-actions { display: flex; align-items: center; gap: 6px; }
   .count { color: var(--text-muted); font-size: 11px; font-family: "JetBrains Mono", monospace; }
   .head-btn {
     background: transparent;
@@ -231,16 +216,6 @@
     font-size: 11px;
   }
   .head-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
-  .close-btn {
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    font-size: 13px;
-    padding: 2px 6px;
-    border-radius: 4px;
-  }
-  .close-btn:hover { color: var(--text-primary); background: var(--bg-surface); }
 
   .filters {
     display: flex;

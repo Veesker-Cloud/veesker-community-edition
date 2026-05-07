@@ -3,6 +3,7 @@
 // https://github.com/veesker-cloud/veesker-community-edition
 
 import { makeError, makeResult, type JsonRpcRequest, type JsonRpcResponse } from "./rpc";
+import { RpcCodedError } from "./errors";
 
 export type Handler = (params: any) => Promise<unknown>;
 export type HandlerMap = Record<string, Handler>;
@@ -20,8 +21,10 @@ export async function dispatch(
     return makeResult(req.id, result);
   } catch (err) {
     const message = extractErrorMessage(err);
-    const code = typeof (err as any)?.code === "number" ? (err as any).code : -32000;
-    return makeError(req.id, code, message);
+    if (err instanceof RpcCodedError) {
+      return makeError(req.id, err.code, message, err.data);
+    }
+    return makeError(req.id, -32000, message);
   }
 }
 

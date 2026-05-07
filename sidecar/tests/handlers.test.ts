@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { dispatch } from "../src/handlers";
+import { RpcCodedError } from "../src/errors";
 
 describe("dispatch", () => {
   test("calls registered handler and returns its result", async () => {
@@ -48,12 +49,10 @@ describe("dispatch", () => {
     });
   });
 
-  test("uses err.code when handler throws an error with a numeric code", async () => {
+  test("uses RpcCodedError.code when handler throws RpcCodedError", async () => {
     const handlers = {
       coded: async () => {
-        const e: any = new Error("custom failure");
-        e.code = -32010;
-        throw e;
+        throw new RpcCodedError(-32010, "custom failure");
       },
     };
     const res = await dispatch(handlers, {

@@ -8,6 +8,7 @@
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import { onMount, getContext } from "svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import StatusBar from "$lib/workspace/StatusBar.svelte";
   import SchemaTree, { type SchemaNode } from "$lib/workspace/SchemaTree.svelte";
   import ObjectDetails from "$lib/workspace/ObjectDetails.svelte";
@@ -59,7 +60,8 @@
   import { FEATURES } from "$lib/services/features";
   import LoginModal from "$lib/workspace/LoginModal.svelte";
   import AuditLogPanel from "$lib/workspace/AuditLogPanel.svelte";
-  import ActivityLedger from "$lib/workspace/ActivityLedger.svelte";
+  import OperationsPanel from "$lib/workspace/OperationsPanel.svelte";
+  import { operationsPanel } from "$lib/stores/operations-panel.svelte";
 
   const authCtx = getContext<{ tier: "ce" | "cloud"; email: string }>("auth");
 
@@ -125,8 +127,7 @@
   let showOAuthPanel = $state(false);
   let showLogin = $state(false);
   let showAuditLog = $state(false);
-  // L2.5 Activity Ledger panel — toggleable via Ctrl/Cmd+Shift+L or floating button.
-  let showActivityLedger = $state(false);
+  let txActionInFlight = $state(false);
 
   // ── Panel resize (persisted) ─────────────────────────────────────────────────
   function loadPanelWidth(key: string, def: number): number {
@@ -528,6 +529,31 @@
     }
   }
 
+  async function handleRollbackWithConfirm() {
+    if (txActionInFlight || !sqlEditor.pendingTx) return;
+    txActionInFlight = true;
+    try {
+      const ok = await invoke<boolean>("confirm_rollback_tx");
+      if (ok) await sqlEditor.rollback();
+    } catch (e) {
+      console.error("Rollback failed:", e);
+    } finally {
+      txActionInFlight = false;
+    }
+  }
+
+  async function handleCommit() {
+    if (txActionInFlight || !sqlEditor.pendingTx) return;
+    txActionInFlight = true;
+    try {
+      await sqlEditor.commit();
+    } catch (e) {
+      console.error("Commit failed:", e);
+    } finally {
+      txActionInFlight = false;
+    }
+  }
+
   function handleAnalyze() {
     const tab = sqlEditor.active;
     if (!tab) return;
@@ -544,23 +570,34 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    // Skip shortcuts when typing into a form field so editing flows aren't hijacked.
+    const tagName = (e.target as HTMLElement).tagName;
+    const inEditableField = tagName === "INPUT" || tagName === "TEXTAREA";
+    // L3.5 — F10 Commit / F11 Rollback (PSDPM parity)
+    if (!inEditableField && e.key === "F10") {
+      e.preventDefault();
+      if (sqlEditor.pendingTx) void handleCommit();
+      return;
+    }
+    if (!inEditableField && e.key === "F11") {
+      e.preventDefault(); // also blocks WebView fullscreen
+      if (sqlEditor.pendingTx) handleRollbackWithConfirm();
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "i") {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (inEditableField) return;
       e.preventDefault();
       showChat = !showChat;
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (inEditableField) return;
       e.preventDefault();
       showPalette = true;
       return;
     }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "o") {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      if (inEditableField) return;
       e.preventDefault();
       void sqlEditor.openFromFile();
       return;
@@ -609,10 +646,10 @@
       e.preventDefault();
       void sqlEditor.cancelActive();
     }
-    // L2.5: Cmd+Shift+L (or Ctrl+Shift+L) toggles the Activity Ledger panel.
     if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "l") {
       e.preventDefault();
-      showActivityLedger = !showActivityLedger;
+      operationsPanel.toggle();
+      return;
     }
   }
 
@@ -647,6 +684,10 @@
       schema={info.currentSchema}
       serverVersion={info.serverVersion}
       hasPendingTx={sqlEditor.pendingTx}
+      username={info.user ?? ""}
+      serviceName={info.serviceName ?? ""}
+      onCommit={handleCommit}
+      onRollback={handleRollbackWithConfirm}
       chatOpen={showChat}
       onToggleChat={() => showChat = !showChat}
       onDisconnect={onDisconnect}
@@ -941,17 +982,16 @@
   {#if showAuditLog}
     <AuditLogPanel onClose={() => { showAuditLog = false; }} />
   {/if}
-  <!-- L2.5 Activity Ledger panel: real-time view of every SQL Veesker has issued in this session. -->
-  {#if showActivityLedger}
+  {#if operationsPanel.isOpen}
     <div class="activity-ledger-wrap">
-      <ActivityLedger onClose={() => { showActivityLedger = false; }} />
+      <OperationsPanel onClose={() => operationsPanel.close()} />
     </div>
   {:else}
     <button
       class="activity-ledger-toggle"
-      onclick={() => { showActivityLedger = true; }}
-      title="Show Activity Ledger (Ctrl+Shift+L)"
-      aria-label="Show Activity Ledger"
+      onclick={() => operationsPanel.open()}
+      title="Show Operations Panel (Ctrl+Shift+L)"
+      aria-label="Show Operations Panel"
     >
       <span class="al-dot"></span>
       Activity

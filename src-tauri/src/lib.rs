@@ -293,6 +293,8 @@ pub fn run() {
             commands::ords_clients_revoke,
             commands::dml_preview,
             commands::unsafe_dml_confirm,
+            commands::session_self,
+            commands::confirm_rollback_tx,
             commands::perf_stats,
             commands::object_version_capture,
             commands::object_version_list,

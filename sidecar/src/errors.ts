@@ -26,11 +26,18 @@ export const AUTOCOMMIT_VIOLATION = -32077;
 // Intentionally outside the JSON-RPC reserved range.
 export const QUERY_CANCELLED = -2;
 
+// L3.1 — V$SESSION self-viewer (Sprint C Onda 2)
+export const SESSION_SELF_PRIV_MISSING = -32033;
+export const SESSION_SELF_TRANSIENT = -32034;
+export const SESSION_SELF_NOT_FOUND = -32035;
+
 export class RpcCodedError extends Error {
   code: number;
-  constructor(code: number, message: string) {
+  data?: Record<string, unknown>;
+  constructor(code: number, message: string, data?: Record<string, unknown>) {
     super(message);
     this.code = code;
+    this.data = data;
     this.name = "RpcCodedError";
   }
 }

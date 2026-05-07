@@ -5,7 +5,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { TableStats, TableIndex } from "$lib/perf/perf-rules";
 
-export type WorkspaceInfo = { serverVersion: string; currentSchema: string };
+export type WorkspaceInfo = {
+  serverVersion: string;
+  currentSchema: string;
+  user: string;          // L3.5 — uppercase username for StatusBar user@service
+  serviceName: string;   // L3.5 — extracted from connectString
+};
 export type Schema = { name: string; isCurrent: boolean };
 export type ObjectKind =
   | "TABLE" | "VIEW" | "SEQUENCE"

@@ -39,6 +39,7 @@ import {
   procDescribe,
   procExecute,
   dmlPreview,
+  querySessionSelf,
 } from "./oracle";
 import { aiChat, aiSuggestEndpoint } from "./ai";
 import { chartConfigure, chartReset } from "./chart";
@@ -99,6 +100,7 @@ const handlers: HandlerMap = {
   "ai.chat": (params) => aiChat(params as any, false),
   "ai.suggest_endpoint": (params) => aiSuggestEndpoint(params as any),
   "explain.plan": (params) => explainPlan(params as any),
+  "oracle.session_self": () => querySessionSelf(),
   "proc.describe": (params) => procDescribe(params as any),
   "proc.execute": (params) => procExecute(params as any),
   "chart.configure": (params) => chartConfigure(params as any),

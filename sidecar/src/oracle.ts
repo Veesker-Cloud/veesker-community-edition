@@ -59,6 +59,23 @@ export function buildClientIdentifierString(uuid: string): string {
   return `vsk-${uuid}`.slice(0, ORACLE_CLIENT_ID_MAX);
 }
 
+/**
+ * Returns the parsed SERVICE_NAME from a TNS descriptor or easy-connect string.
+ * Supports: "host:port/service", "//host:port/service",
+ * "(DESCRIPTION=...(SERVICE_NAME=svc)...)".
+ * If no pattern matches, returns the input trimmed (no truncation).
+ */
+export function extractServiceName(connectString: string): string {
+  if (!connectString) return "";
+  const tns = connectString.match(/SERVICE_NAME\s*=\s*([^)\s]+)/i);
+  if (tns) return tns[1];
+  const easy = connectString.match(/\/\/?[^/]+\/([^?\s/]+)/);
+  if (easy) return easy[1];
+  const slash = connectString.match(/\/([^?\s/]+)$/);
+  if (slash) return slash[1];
+  return connectString.trim();
+}
+
 const SET_APP_INFO_SQL =
   `BEGIN
      DBMS_APPLICATION_INFO.SET_MODULE(:module, :action);
@@ -468,6 +485,9 @@ import {
   UNSAFE_DML_WARNING,
   AUTOCOMMIT_VIOLATION,
   PSDPM_BLOCKED,
+  SESSION_SELF_PRIV_MISSING,
+  SESSION_SELF_TRANSIENT,
+  SESSION_SELF_NOT_FOUND,
 } from "./errors";
 import { classifySql, isReadOnlySafe, isUnsafeBulkDml } from "./sql-kind";
 
@@ -498,7 +518,12 @@ export function assertAutoCommitFalse(conn: oracledb.Connection): void {
 }
 
 export type OpenSessionParams = ConnectionTestParams;
-export type OpenSessionResult = { serverVersion: string; currentSchema: string };
+export type OpenSessionResult = {
+  serverVersion: string;
+  currentSchema: string;
+  user: string;          // L3.5 — uppercase username for StatusBar user@service
+  serviceName: string;   // L3.5 — extracted from connectString
+};
 
 export function isLostSessionError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
@@ -580,10 +605,15 @@ export async function openSession(p: OpenSessionParams): Promise<OpenSessionResu
       );
       const serverVersion = versionRes.rows?.[0]?.V ?? "Oracle (version unavailable)";
       const currentSchema = schemaRes.rows?.[0]?.S ?? p.username.toUpperCase();
+      const user = p.username.toUpperCase();
+      const serviceName =
+        p.authType === "basic"
+          ? p.serviceName
+          : p.connectAlias;
       setSession(conn, currentSchema);
       setSessionParams(p);
       setSessionSafety(safety);
-      return { serverVersion, currentSchema };
+      return { serverVersion, currentSchema, user, serviceName };
     } catch (err) {
       // Failed during the version/schema bootstrap — clean up the half-open session.
       try { await conn.close(); } catch {}
@@ -2263,4 +2293,118 @@ export async function procExecute(p: {
     const dbmsOutput = (await drainDbmsOutput(conn)) ?? [];
     return { outParams, refCursors, dbmsOutput };
   });
+}
+
+// ── V$SESSION self-viewer (Sprint C Onda 2 — L3.1) ───────────────────────────
+
+export type SessionSelfRow = {
+  sid: number;
+  serial: number;
+  username: string | null;
+  osuser: string | null;
+  machine: string | null;
+  program: string | null;
+  logonTime: string;
+  module: string | null;
+  action: string | null;
+  clientInfo: string | null;
+  clientIdentifier: string | null;
+  status: string;
+  state: string;
+  event: string | null;
+  sqlId: string | null;
+  blockingSession?: number;
+  blockingSessionStatus?: string;
+};
+
+const SESSION_SELF_SQL = `
+  SELECT
+    sid,
+    serial# AS serial_num,
+    username,
+    osuser,
+    machine,
+    program,
+    TO_CHAR(logon_time, 'YYYY-MM-DD"T"HH24:MI:SS') AS logon_time,
+    module,
+    action,
+    client_info,
+    client_identifier,
+    status,
+    state,
+    event,
+    sql_id,
+    blocking_session,
+    blocking_session_status
+  FROM v$session
+  WHERE audsid = SYS_CONTEXT('USERENV', 'SESSIONID')
+    AND audsid != 0
+`;
+
+export async function querySessionSelf(): Promise<SessionSelfRow> {
+  const conn = getActiveSession();
+  let result: any;
+
+  try {
+    result = await conn.execute(SESSION_SELF_SQL, [], {
+      outFormat: oracledb.OUT_FORMAT_OBJECT,
+    });
+  } catch (err: any) {
+    const oraNum = typeof err?.errorNum === "number" ? err.errorNum : null;
+
+    if (oraNum === 942) {
+      throw new RpcCodedError(
+        SESSION_SELF_PRIV_MISSING,
+        "Missing SELECT privilege on V$SESSION",
+        {
+          kind: "missing_privilege",
+          grant: "GRANT SELECT ON V_$SESSION TO <user>;",
+        },
+      );
+    }
+
+    const transientData: Record<string, unknown> = { kind: "transient" };
+    if (oraNum !== null) {
+      transientData.oracleCode = oraNum;
+    }
+    throw new RpcCodedError(
+      SESSION_SELF_TRANSIENT,
+      err?.message ?? "Oracle error querying V$SESSION",
+      transientData,
+    );
+  }
+
+  const row = result?.rows?.[0];
+  if (!row) {
+    throw new RpcCodedError(
+      SESSION_SELF_NOT_FOUND,
+      "V$SESSION returned no row for current AUDSID",
+      { kind: "session_self_not_found" },
+    );
+  }
+
+  const out: SessionSelfRow = {
+    sid: Number(row.SID),
+    serial: Number(row.SERIAL_NUM),
+    username: row.USERNAME ?? null,
+    osuser: row.OSUSER ?? null,
+    machine: row.MACHINE ?? null,
+    program: row.PROGRAM ?? null,
+    logonTime: String(row.LOGON_TIME),
+    module: row.MODULE ?? null,
+    action: row.ACTION ?? null,
+    clientInfo: row.CLIENT_INFO ?? null,
+    clientIdentifier: row.CLIENT_IDENTIFIER ?? null,
+    status: String(row.STATUS),
+    state: String(row.STATE),
+    event: row.EVENT ?? null,
+    sqlId: row.SQL_ID ?? null,
+  };
+
+  if (row.BLOCKING_SESSION != null) {
+    out.blockingSession = Number(row.BLOCKING_SESSION);
+    out.blockingSessionStatus = row.BLOCKING_SESSION_STATUS ?? undefined;
+  }
+
+  return out;
 }
