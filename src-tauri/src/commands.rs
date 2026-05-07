@@ -1310,6 +1310,25 @@ pub async fn session_self(app: AppHandle) -> Result<Value, ConnectionTestErr> {
 }
 
 #[tauri::command]
+pub async fn ai_approval_resolve(
+    app: AppHandle,
+    request_id: String,
+    approved: bool,
+    apply_to_turn: bool,
+) -> Result<Value, ConnectionTestErr> {
+    call_sidecar(
+        &app,
+        "ai.approval.resolve",
+        json!({
+            "requestId": request_id,
+            "approved": approved,
+            "applyToTurn": apply_to_turn,
+        }),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn ords_modules_list(
     app: AppHandle,
     owner: String,

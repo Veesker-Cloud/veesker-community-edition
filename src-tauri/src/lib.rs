@@ -309,6 +309,7 @@ pub fn run() {
             commands::auth_token_clear,
             commands::cloud_api_get,
             commands::cloud_api_post,
+            commands::ai_approval_resolve,
             terminal::terminal_create,
             terminal::terminal_write,
             terminal::terminal_resize,

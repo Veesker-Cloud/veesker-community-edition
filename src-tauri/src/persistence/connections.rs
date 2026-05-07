@@ -37,6 +37,11 @@ pub struct ConnectionSafety {
     /// non-user RPC origins are blocked. Defaults ON when env=prod or
     /// env=staging, OFF for env=dev / unspecified at save time.
     pub psdpm_mode: bool,
+    /// L3.2 (Onda 3): per-connection auto-EXPLAIN mode.
+    /// "manual" | "always" | "when_dml". Default per env at save time:
+    /// dev / unspecified → "manual"; staging / prod → "when_dml". User can
+    /// freely change in the connection settings — no hard-lock.
+    pub auto_explain_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,6 +84,7 @@ impl TryFrom<ConnectionRow> for ConnectionMeta {
             auto_perf_analysis: r.auto_perf_analysis,
             airgap_mode: r.airgap_mode,
             psdpm_mode: r.psdpm_mode,
+            auto_explain_mode: r.auto_explain_mode.clone(),
         };
         match r.auth_type {
             AuthType::Basic => Ok(ConnectionMeta::Basic {
@@ -145,6 +151,11 @@ pub struct ConnectionSafetyInput {
     /// Existing UIs that don't send this field get the env-derived default.
     #[serde(default)]
     pub psdpm_mode: Option<bool>,
+    /// L3.2 (Onda 3) auto-EXPLAIN mode override. When None, save layer
+    /// chooses based on env (dev → "manual", staging/prod → "when_dml").
+    /// Existing UIs that don't send this field get the env-derived default.
+    #[serde(default)]
+    pub auto_explain_mode: Option<String>,
 }
 
 /// Default policy for the L2.1 PSDPM toggle when the renderer omits the
@@ -211,6 +222,22 @@ pub(crate) fn resolve_psdpm_default(env: Option<&str>, explicit: Option<bool>) -
         return true;
     }
     explicit.unwrap_or_else(|| default_psdpm_for_env(env))
+}
+
+/// L3.2 (Onda 3) policy for auto-EXPLAIN: dev / unspecified → "manual",
+/// staging / prod → "when_dml". When the renderer sends an explicit
+/// non-empty value, that wins. NOT a hard-lock: prod users can opt out.
+pub(crate) fn resolve_auto_explain_default(env: Option<&str>, explicit: Option<&str>) -> String {
+    if let Some(v) = explicit
+        && !v.is_empty()
+        && matches!(v, "manual" | "always" | "when_dml")
+    {
+        return v.to_string();
+    }
+    match env {
+        Some("staging") | Some("prod") => "when_dml".to_string(),
+        _ => "manual".to_string(),
+    }
 }
 
 fn validate_env(env: &Option<String>) -> Result<(), ConnectionError> {
@@ -658,6 +685,10 @@ impl ConnectionService {
         // both ON regardless of explicit user override.
         let airgap_mode = resolve_airgap_default(&safety.env, safety.airgap_mode);
         let psdpm_mode = resolve_psdpm_default(safety.env.as_deref(), safety.psdpm_mode);
+        let auto_explain_mode = resolve_auto_explain_default(
+            safety.env.as_deref(),
+            safety.auto_explain_mode.as_deref(),
+        );
         match id {
             None => Ok(ConnectionRow {
                 id: Uuid::new_v4().to_string(),
@@ -677,6 +708,7 @@ impl ConnectionService {
                 auto_perf_analysis: safety.auto_perf_analysis,
                 airgap_mode,
                 psdpm_mode,
+                auto_explain_mode,
             }),
             Some(id) => {
                 let existing = {
@@ -714,6 +746,7 @@ impl ConnectionService {
                     auto_perf_analysis: safety.auto_perf_analysis,
                     airgap_mode,
                     psdpm_mode,
+                    auto_explain_mode,
                 })
             }
         }
@@ -732,6 +765,10 @@ impl ConnectionService {
         // both ON regardless of explicit user override.
         let airgap_mode = resolve_airgap_default(&safety.env, safety.airgap_mode);
         let psdpm_mode = resolve_psdpm_default(safety.env.as_deref(), safety.psdpm_mode);
+        let auto_explain_mode = resolve_auto_explain_default(
+            safety.env.as_deref(),
+            safety.auto_explain_mode.as_deref(),
+        );
         match id {
             None => Ok(ConnectionRow {
                 id: Uuid::new_v4().to_string(),
@@ -751,6 +788,7 @@ impl ConnectionService {
                 auto_perf_analysis: safety.auto_perf_analysis,
                 airgap_mode,
                 psdpm_mode,
+                auto_explain_mode,
             }),
             Some(id) => {
                 let existing = {
@@ -786,6 +824,7 @@ impl ConnectionService {
                     auto_perf_analysis: safety.auto_perf_analysis,
                     airgap_mode,
                     psdpm_mode,
+                    auto_explain_mode,
                 })
             }
         }

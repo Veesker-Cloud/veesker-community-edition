@@ -64,6 +64,10 @@ pub struct ConnectionRow {
     /// and any non-user RPC origins are blocked. Schema browser still
     /// lazy-loads on expand. Defaults ON for env=prod / env=staging at save.
     pub psdpm_mode: bool,
+    /// L3.2 (Onda 3): per-connection auto-EXPLAIN mode.
+    /// "manual" | "always" | "when_dml". Default per env at save time:
+    /// dev / unspecified → "manual"; staging / prod → "when_dml". NOT a hard-lock.
+    pub auto_explain_mode: String,
 }
 
 #[derive(Debug)]
@@ -105,7 +109,9 @@ CREATE TABLE IF NOT EXISTS connections (
     airgap_mode          INTEGER NOT NULL DEFAULT 0
                            CHECK (airgap_mode IN (0, 1)),
     psdpm_mode           INTEGER NOT NULL DEFAULT 0
-                           CHECK (psdpm_mode IN (0, 1))
+                           CHECK (psdpm_mode IN (0, 1)),
+    auto_explain_mode    TEXT NOT NULL DEFAULT 'manual'
+                           CHECK (auto_explain_mode IN ('manual', 'always', 'when_dml'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS connections_name_unique
     ON connections (LOWER(name));
@@ -138,13 +144,16 @@ CREATE TABLE connections_new (
     airgap_mode          INTEGER NOT NULL DEFAULT 0
                            CHECK (airgap_mode IN (0, 1)),
     psdpm_mode           INTEGER NOT NULL DEFAULT 0
-                           CHECK (psdpm_mode IN (0, 1))
+                           CHECK (psdpm_mode IN (0, 1)),
+    auto_explain_mode    TEXT NOT NULL DEFAULT 'manual'
+                           CHECK (auto_explain_mode IN ('manual', 'always', 'when_dml'))
 );
 INSERT INTO connections_new
     (id, name, auth_type, host, port, service_name, connect_alias, username, created_at, updated_at,
-     env, read_only, statement_timeout_ms, warn_unsafe_dml, auto_perf_analysis, airgap_mode, psdpm_mode)
+     env, read_only, statement_timeout_ms, warn_unsafe_dml, auto_perf_analysis, airgap_mode, psdpm_mode,
+     auto_explain_mode)
     SELECT id, name, 'basic', host, port, service_name, NULL, username, created_at, updated_at,
-           NULL, 0, NULL, 0, 1, 0, 0
+           NULL, 0, NULL, 0, 1, 0, 0, 'manual'
     FROM connections;
 DROP TABLE connections;
 ALTER TABLE connections_new RENAME TO connections;
@@ -205,6 +214,15 @@ fn add_safety_columns_if_missing(conn: &Connection) -> rusqlite::Result<()> {
                CHECK (psdpm_mode IN (0, 1));",
         )?;
     }
+    // L3.2 (Onda 3): per-connection auto-EXPLAIN mode. Default 'manual' for
+    // existing rows; the save path in connections.rs picks 'when_dml' for
+    // staging/prod and 'manual' for dev / unspecified at save time.
+    if !has_column(conn, "connections", "auto_explain_mode")? {
+        conn.execute_batch(
+            "ALTER TABLE connections ADD COLUMN auto_explain_mode TEXT NOT NULL DEFAULT 'manual' \
+               CHECK (auto_explain_mode IN ('manual', 'always', 'when_dml'));",
+        )?;
+    }
     Ok(())
 }
 
@@ -236,8 +254,9 @@ pub fn create(conn: &Connection, row: &ConnectionRow) -> Result<(), StoreError> 
     let res = conn.execute(
         "INSERT INTO connections \
          (id, name, auth_type, host, port, service_name, connect_alias, username, created_at, updated_at, \
-          env, read_only, statement_timeout_ms, warn_unsafe_dml, auto_perf_analysis, airgap_mode, psdpm_mode) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          env, read_only, statement_timeout_ms, warn_unsafe_dml, auto_perf_analysis, airgap_mode, psdpm_mode, \
+          auto_explain_mode) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         params![
             row.id,
             row.name,
@@ -256,6 +275,7 @@ pub fn create(conn: &Connection, row: &ConnectionRow) -> Result<(), StoreError> 
             row.auto_perf_analysis as i32,
             row.airgap_mode as i32,
             row.psdpm_mode as i32,
+            row.auto_explain_mode,
         ],
     );
     match res {
@@ -292,11 +312,12 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRow> {
         auto_perf_analysis: row.get::<_, i64>(14)? != 0,
         airgap_mode: row.get::<_, i64>(15)? != 0,
         psdpm_mode: row.get::<_, i64>(16)? != 0,
+        auto_explain_mode: row.get(17)?,
     })
 }
 
 const SELECT_COLS: &str = "id, name, auth_type, host, port, service_name, connect_alias, username, created_at, updated_at, \
-     env, read_only, statement_timeout_ms, warn_unsafe_dml, auto_perf_analysis, airgap_mode, psdpm_mode";
+     env, read_only, statement_timeout_ms, warn_unsafe_dml, auto_perf_analysis, airgap_mode, psdpm_mode, auto_explain_mode";
 
 pub fn list(conn: &Connection) -> Result<Vec<ConnectionRow>, StoreError> {
     let sql = format!("SELECT {SELECT_COLS} FROM connections ORDER BY LOWER(name)");
@@ -320,7 +341,7 @@ pub fn update(conn: &Connection, row: &ConnectionRow) -> Result<(), StoreError> 
          name = ?, auth_type = ?, host = ?, port = ?, service_name = ?, \
          connect_alias = ?, username = ?, updated_at = ?, \
          env = ?, read_only = ?, statement_timeout_ms = ?, warn_unsafe_dml = ?, \
-         auto_perf_analysis = ?, airgap_mode = ?, psdpm_mode = ? \
+         auto_perf_analysis = ?, airgap_mode = ?, psdpm_mode = ?, auto_explain_mode = ? \
          WHERE id = ?",
         params![
             row.name,
@@ -338,6 +359,7 @@ pub fn update(conn: &Connection, row: &ConnectionRow) -> Result<(), StoreError> 
             row.auto_perf_analysis as i32,
             row.airgap_mode as i32,
             row.psdpm_mode as i32,
+            row.auto_explain_mode,
             row.id
         ],
     );
@@ -394,6 +416,7 @@ mod tests {
             auto_perf_analysis: true,
             airgap_mode: false,
             psdpm_mode: false,
+            auto_explain_mode: "manual".into(),
         }
     }
 
@@ -556,6 +579,7 @@ mod tests {
             auto_perf_analysis: true,
             airgap_mode: false,
             psdpm_mode: false,
+            auto_explain_mode: "manual".into(),
         };
         create(&c, &row).unwrap();
         let got = get(&c, "w1").unwrap().unwrap();
@@ -695,6 +719,50 @@ mod tests {
         update(&c, &updated).unwrap();
         let after = get(&c, "p1").unwrap().unwrap();
         assert!(!after.psdpm_mode, "psdpm_mode should round-trip false");
+    }
+
+    #[test]
+    fn auto_explain_mode_round_trips() {
+        let c = fresh();
+        let mut row = sample("a", "Alpha");
+        row.auto_explain_mode = "always".into();
+        create(&c, &row).unwrap();
+        let got = list(&c).unwrap().pop().unwrap();
+        assert_eq!(got.auto_explain_mode, "always");
+
+        let mut updated = got;
+        updated.auto_explain_mode = "when_dml".into();
+        update(&c, &updated).unwrap();
+        let after = get(&c, "a").unwrap().unwrap();
+        assert_eq!(after.auto_explain_mode, "when_dml");
+    }
+
+    #[test]
+    fn auto_explain_mode_defaults_to_manual_on_old_rows() {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE connections (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                auth_type TEXT NOT NULL DEFAULT 'basic',
+                host TEXT, port INTEGER, service_name TEXT, connect_alias TEXT,
+                username TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                env TEXT, read_only INTEGER NOT NULL DEFAULT 0,
+                statement_timeout_ms INTEGER, warn_unsafe_dml INTEGER NOT NULL DEFAULT 0,
+                auto_perf_analysis INTEGER NOT NULL DEFAULT 1,
+                airgap_mode INTEGER NOT NULL DEFAULT 0,
+                psdpm_mode INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO connections (id, name, auth_type, username, created_at, updated_at)
+              VALUES ('a', 'Alpha', 'basic', 'pdbadmin', '2026-04-20T00:00:00Z', '2026-04-20T00:00:00Z');"
+        ).unwrap();
+        init_db(&c).unwrap();
+        let row = get(&c, "a").unwrap().unwrap();
+        assert_eq!(
+            row.auto_explain_mode, "manual",
+            "auto_explain_mode column should default to 'manual' on legacy rows"
+        );
     }
 
     #[test]
