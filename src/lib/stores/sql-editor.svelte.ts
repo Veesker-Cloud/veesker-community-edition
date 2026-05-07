@@ -3,14 +3,15 @@
 // https://github.com/veesker-cloud/veesker-community-edition
 
 // src/lib/stores/sql-editor.svelte.ts
-import { queryExecute, queryExecuteMulti, queryCancel, type QueryResult } from "$lib/sql-query";
+import { queryExecute, queryExecuteMulti, queryCancel, type QueryResult, type SqlOrigin } from "$lib/sql-query";
 import { splitSql } from "$lib/sql-splitter";
 import { historySave, type HistoryEntry } from "$lib/query-history";
 import { saveAs, saveExisting, openFile } from "$lib/sql-files";
-import { compileErrorsGet, connectionCommit, connectionRollback, explainPlanGet, type ProcExecuteResult } from "$lib/workspace";
+import { compileErrorsGet, connectionCommit, connectionRollback, explainPlanGet, type ProcExecuteResult, type Result } from "$lib/workspace";
 import { detectDestructive, type DestructiveOp } from "$lib/sql-safety";
 import { objectVersionCapture } from "$lib/object-versions";
 import { CloudAuditService } from "$lib/services/CloudAuditService";
+import type { SharedExecResult } from "$lib/command/types";
 
 export type CompileError = {
   line: number;
@@ -42,6 +43,7 @@ export type PlsqlMeta = {
 
 export type SqlTab = {
   id: string;
+  kind: "sql" | "command";            // "sql" = Monaco editor; "command" = Command Window (xterm)
   title: string;
   sql: string;
   results: TabResult[];               // replaces `result` + `error`
@@ -56,6 +58,7 @@ export type SqlTab = {
   packageSpec: string | undefined;
   packageActiveTab: "spec" | "body" | undefined;
   specMeta: PlsqlMeta | undefined;
+  connectionId: string | null;        // captured at tab creation; only set for kind === "command"
 };
 
 /** Returns the active TabResult for a tab, or null if none. */
@@ -203,6 +206,7 @@ function nextQueryTitle(): string {
 function makeTab(title: string, sql: string): SqlTab {
   return {
     id: newId(),
+    kind: "sql",
     title,
     sql,
     results: [],
@@ -217,6 +221,36 @@ function makeTab(title: string, sql: string): SqlTab {
     packageSpec: undefined,
     packageActiveTab: undefined,
     specMeta: undefined,
+    connectionId: null,
+  };
+}
+
+function nextCommandTitle(): string {
+  const used = new Set(_tabs.filter((t) => t.kind === "command").map((t) => t.title));
+  let n = 1;
+  while (used.has(`Command ${n}`)) n++;
+  return `Command ${n}`;
+}
+
+function makeCommandTab(connectionId: string): SqlTab {
+  return {
+    id: newId(),
+    kind: "command",
+    title: nextCommandTitle(),
+    sql: "",
+    results: [],
+    activeResultId: null,
+    running: false,
+    splitterError: null,
+    runningRequestId: null,
+    filePath: null,
+    isDirty: false,
+    savedContent: null,
+    plsqlMeta: null,
+    packageSpec: undefined,
+    packageActiveTab: undefined,
+    specMeta: undefined,
+    connectionId,
   };
 }
 
@@ -418,6 +452,14 @@ export const sqlEditor = {
     _drawerOpen = true;
   },
 
+  openCommandTab(connectionId: string): string {
+    const tab = makeCommandTab(connectionId);
+    _tabs.push(tab);
+    _activeId = tab.id;
+    _drawerOpen = true;
+    return tab.id;
+  },
+
   async openPreview(owner: string, name: string, pkCols?: string[]): Promise<void> {
     const qi = (s: string) => `"${s.replace(/"/g, '""')}"`;
     const orderBy = pkCols && pkCols.length > 0
@@ -481,6 +523,94 @@ export const sqlEditor = {
 
   toggleDrawer(): void {
     _drawerOpen = !_drawerOpen;
+  },
+
+  /**
+   * Sprint D Onda 1 (Bundle 8): shared single-statement execution path used
+   * by SqlEditor (Run button / runActive / runSelection / runStatementAtCursor)
+   * and Command Window (Bundle 9 executor).
+   *
+   * Safety pipeline layers applied:
+   *   1. askConfirm() for TRUNCATE / DROP / destructive DDL  (Sprint A)
+   *      — bypassable via opts.bypassConfirm
+   *   2. askUnsafeDml() for UPDATE/DELETE without WHERE       (Sprint B)
+   *      — server emits code -32031; we re-prompt and replay with
+   *        acknowledgeUnsafe=true. Bypassable via opts.bypassUnsafeDml.
+   *   3. ProductionDetector / PSDPM hard-lock                 (Sprint C O.1)
+   *      — enforced server-side; surfaces here as an error Result that
+   *        we forward without prompting.
+   *   4. Origin attribution                                   (Sprint B)
+   *      — opts.origin is forwarded into queryExecute so the Activity
+   *        Ledger differentiates user_typed (Command Mode) from
+   *        user_clicked (toolbar) and ai_approved (Sheep AI).
+   *   5. DBMS_OUTPUT capture                                  (Sprint C O.3 L3.3)
+   *      — drained by the sidecar after execute; returned in
+   *        SharedExecResult.dbmsOutput.
+   *   6. Audit (HMAC chain in CL / encrypted JSONL)
+   *      — written server-side on every execute; opts.audit=false is a
+   *        reserved flag for future internal/system calls and is currently
+   *        a no-op (server still audits). Default true.
+   *
+   * Cancel surface: callers are responsible for tracking the requestId if
+   * they want to cancel; this function does NOT register the requestId on
+   * any tab. SqlEditor's runActive() sets tab.runningRequestId itself before
+   * calling. Command Mode will hold its own AbortController and surface a
+   * Ctrl+C handler that calls queryCancel() with the same requestId.
+   *
+   * Does NOT touch tab.results / tab.busy / tab.error — the caller manages
+   * its own UI state.
+   */
+  async runStatementShared(
+    sql: string,
+    opts: {
+      origin: SqlOrigin;
+      audit?: boolean;
+      autoExplain?: boolean;
+      bypassConfirm?: boolean;
+      bypassUnsafeDml?: boolean;
+      requestId?: string;
+    },
+  ): Promise<Result<SharedExecResult>> {
+    const cleaned = stripTrailingSemicolon(sql);
+    if (cleaned === "") {
+      return { ok: false, error: { code: -32099, message: "empty statement" } };
+    }
+    if (!opts.bypassConfirm) {
+      const c = askConfirm(cleaned);
+      const okConfirm = c === true || (await c);
+      if (!okConfirm) {
+        return { ok: false, error: { code: -32098, message: "Operation cancelled by user." } };
+      }
+    }
+    const requestId = opts.requestId ?? crypto.randomUUID();
+    const t0 = performance.now();
+    let res = await queryExecute(cleaned, requestId, false, false, opts.origin);
+    if (!res.ok && isUnsafeDmlError(res.error)) {
+      if (opts.bypassUnsafeDml) {
+        res = await queryExecute(cleaned, requestId, false, true, opts.origin);
+      } else {
+        const ack = await askUnsafeDml(cleaned, res.error?.message ?? "");
+        if (!ack) {
+          return { ok: false, error: { code: -32098, message: "Operation cancelled by user." } };
+        }
+        res = await queryExecute(cleaned, requestId, false, true, opts.origin);
+      }
+    }
+    if (!res.ok) {
+      return { ok: false, error: res.error ?? { code: -32000, message: "Unknown error" } };
+    }
+    const elapsedMs = res.data.elapsedMs > 0 ? res.data.elapsedMs : Math.round(performance.now() - t0);
+    return {
+      ok: true,
+      data: {
+        rows: res.data.rows ?? [],
+        columns: res.data.columns ?? [],
+        rowCount: res.data.rowCount,
+        elapsedMs,
+        dbmsOutput: res.data.dbmsOutput ?? [],
+        warnings: [],
+      },
+    };
   },
 
   /** Run the active tab's full SQL as a single statement (cursor-based or whole-buffer). */
@@ -1028,6 +1158,7 @@ export const sqlEditor = {
     const id = crypto.randomUUID();
     const tab: SqlTab = {
       id,
+      kind: "sql",
       title,
       sql: ddl,
       results: [],
@@ -1042,6 +1173,7 @@ export const sqlEditor = {
       packageSpec: undefined,
       packageActiveTab: undefined,
       specMeta: undefined,
+      connectionId: null,
     };
     _tabs = [..._tabs, tab];
     _activeId = id;
@@ -1110,6 +1242,7 @@ export const sqlEditor = {
     _connectionHost = null;
     _autoExplainMode = "manual";
     _pendingConfirm = null;
+    _pendingUnsafeDml = null;
     _pendingTx = false;
     _editorExpanded = false;
   },

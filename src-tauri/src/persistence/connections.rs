@@ -10,7 +10,7 @@ use rusqlite::Connection as SqliteConnection;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::{history, object_versions, secrets, store, tnsnames, wallet};
+use super::{command_history, history, object_versions, secrets, store, tnsnames, wallet};
 use store::{AuthType, ConnectionRow, StoreError};
 
 #[derive(Debug, Clone, Serialize)]
@@ -386,6 +386,15 @@ impl From<wallet::WalletError> for ConnectionError {
             }
             other => ConnectionError::invalid(format!("wallet: {other}")),
         }
+    }
+}
+
+fn map_command_history_err(e: command_history::CommandHistoryError) -> ConnectionError {
+    match e {
+        command_history::CommandHistoryError::Sqlite(s) => {
+            ConnectionError::from(StoreError::from(s))
+        }
+        command_history::CommandHistoryError::InvalidArg(m) => ConnectionError::invalid(m),
     }
 }
 
@@ -903,6 +912,32 @@ impl ConnectionService {
             history::HistoryError::Sqlite(s) => ConnectionError::from(StoreError::from(s)),
             history::HistoryError::InvalidArg(m) => ConnectionError::invalid(m),
         })
+    }
+
+    // Sprint D Onda D.1 — Command Window REPL history. Stored separately from
+    // `query_history` because the REPL records every submitted line (not just
+    // SQL/PLSQL) and the Up-arrow recall needs a tight per-connection index
+    // ordered by `ts DESC`.
+    pub fn command_history_load(
+        &self,
+        connection_id: &str,
+        limit: i64,
+    ) -> Result<Vec<command_history::CommandHistoryEntry>, ConnectionError> {
+        let conn = self.lock()?;
+        command_history::load(&conn, connection_id, limit).map_err(map_command_history_err)
+    }
+
+    pub fn command_history_append(
+        &self,
+        connection_id: &str,
+        command: &str,
+        origin: &str,
+        status: &str,
+        duration_ms: Option<i64>,
+    ) -> Result<i64, ConnectionError> {
+        let conn = self.lock()?;
+        command_history::append(&conn, connection_id, command, origin, status, duration_ms)
+            .map_err(map_command_history_err)
     }
 
     pub fn inspect_wallet(&self, zip_path: &str) -> Result<WalletInfo, ConnectionError> {
