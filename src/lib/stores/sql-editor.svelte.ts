@@ -121,7 +121,7 @@ let _connectionUsername: string | null = null;
 let _connectionHost: string | null = null;
 // L3.2 (Onda 3): per-connection auto-EXPLAIN policy. Drives runActive's
 // parallel EXPLAIN PLAN fetch after a successful SELECT/DML.
-let _autoExplainMode: "manual" | "always" | "when_dml" = "manual";
+let _autoExplainMode: "manual" | "always" | "when_dml" = "always";
 type PendingConfirm = {
   sql: string;
   ops: DestructiveOp[];
@@ -258,8 +258,10 @@ function findTab(id: string): SqlTab | null {
   return _tabs.find((t) => t.id === id) ?? null;
 }
 
+const _PLSQL_ANON_RE = /^(?:[ \t]*--[^\n]*\n)*[ \t]*(?:BEGIN|DECLARE)\b/i;
 function stripTrailingSemicolon(sql: string): string {
   const trimmed = sql.trim();
+  if (_PLSQL_ANON_RE.test(trimmed)) return trimmed;
   if (trimmed.endsWith(";")) return trimmed.slice(0, -1).trim();
   return trimmed;
 }

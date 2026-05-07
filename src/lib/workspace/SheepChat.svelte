@@ -20,6 +20,9 @@
     columns: { name: string; dataType: string }[];
     rows: unknown[][];
     sql: string;
+    owner: string | null;
+    objectName: string | null;
+    objectType: string | null;
   };
 
   type QuickAction = { label: string; value: string };
@@ -278,7 +281,7 @@
           pushAssistant("Something went wrong. Please try again.");
           return;
         }
-        dashboard.addChart({ config: r.data.config, previewData: r.data.previewData, sql: payload.sql, columns: payload.columns, rows: payload.rows });
+        dashboard.addChart({ config: r.data.config, previewData: r.data.previewData, sql: payload.sql, columns: payload.columns, rows: payload.rows, owner: payload.owner ?? null, objectName: payload.objectName ?? null, objectType: payload.objectType ?? null });
         analyzeStep = null;
         currentAnalyzePayload = null;
         pushAssistant("Chart added to Dashboard! Switch to the **Dashboard** tab to see it.\n\nWant to build another chart? Just click **Analyze** again.");

@@ -7,6 +7,8 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { save } from "@tauri-apps/plugin-dialog";
+  import { writeTextFile } from "@tauri-apps/plugin-fs";
   import { onMount, onDestroy } from "svelte";
 
   type AuditEntry = {
@@ -125,19 +127,15 @@
   }
 
   // Export the currently filtered view as JSONL. Each line includes the full
-  // audit entry including origin, prevHash, hmac (when present in CL).
-  function exportJsonl() {
+  async function exportJsonl() {
     const lines = filtered.map((e) => JSON.stringify(e)).join("\n");
-    const blob = new Blob([lines], { type: "application/x-jsonlines" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    a.download = `veesker-activity-${stamp}.jsonl`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const path = await save({
+      defaultPath: `veesker-activity-${stamp}.jsonl`,
+      filters: [{ name: "JSONL", extensions: ["jsonl"] }],
+    });
+    if (!path) return;
+    await writeTextFile(path, lines);
   }
 </script>
 
@@ -146,7 +144,7 @@
     <span class="count">
       {#if loadingInitial}loading…{:else}{filtered.length} / {entries.length}{/if}
     </span>
-    <button class="head-btn" onclick={exportJsonl} title="Export JSONL">Export</button>
+    <button class="head-btn" onclick={() => void exportJsonl()} title="Export JSONL">Export</button>
   </div>
   <div class="filters">
     {#each Object.keys(ORIGIN_COLORS) as origin (origin)}

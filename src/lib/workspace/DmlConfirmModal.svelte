@@ -121,12 +121,13 @@
         class="btn-execute"
         onclick={async () => {
           confirming = true;
+          let ok = false;
           try {
-            const ok = await invoke<boolean>("unsafe_dml_confirm", { summary: sql.slice(0, 300) });
-            if (ok) onConfirm();
+            ok = await invoke<boolean>("unsafe_dml_confirm", { summary: sql.slice(0, 300) });
           } finally {
             confirming = false;
           }
+          if (ok) onConfirm();
         }}
         disabled={confirming || (env === "prod" && !previewReady)}
       >

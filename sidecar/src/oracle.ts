@@ -1013,10 +1013,12 @@ async function executeSingleStatement(
   const started = Date.now();
   let r: any;
   const isPlsql = PLSQL_EXEC_RE.test(sql);
-  // oracledb thin mode strips the trailing `;` from anonymous PL/SQL blocks when
+  // oracledb Thin mode strips the trailing `;` from anonymous PL/SQL blocks when
   // any options object is passed (including `{}`), causing ORA-06550.
-  // Oracle SQL APIs accept BEGIN...END without the trailing semicolon, so strip it.
-  const sqlToSend = PLSQL_ANON_RE.test(sql) ? sql.replace(/;\s*$/, "") : sql;
+  // Thick mode (OCI) requires the trailing `;` per OCI contract — only strip in Thin.
+  const sqlToSend = (PLSQL_ANON_RE.test(sql) && _driverMode === "thin")
+    ? sql.replace(/;\s*$/, "")
+    : sql;
   // Only SELECT-class statements should stream — they're the ones that produce
   // a row set big enough that progress reporting matters. classifySql() looks
   // at the first non-comment keyword.

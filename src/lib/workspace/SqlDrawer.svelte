@@ -919,13 +919,13 @@
             class="term-pane"
             class:term-pane-right={termDock === 'right'}
             style={termDock === 'right'
-              ? `flex:0 0 ${termWidth}px;width:${termWidth}px`
+              ? (termMinimized ? "flex:0 0 28px;width:28px" : `flex:0 0 ${termWidth}px;width:${termWidth}px`)
               : (termMinimized ? "height:28px" : `min-height:${termHeight}px`)}
           >
             <TerminalPanel
               bind:this={termPanelRef}
-              minimized={termMinimized && termDock === 'bottom'}
-              onMinimize={termDock === 'bottom' ? () => { termMinimized = !termMinimized; } : undefined}
+              minimized={termMinimized}
+              onMinimize={() => { termMinimized = !termMinimized; }}
               onDockToggle={toggleTermDock}
               dock={termDock}
               onClose={() => { terminalOpen = false; termMinimized = false; }}
@@ -1108,8 +1108,9 @@
   }
   .plus-caret {
     padding: 0 0.4rem;
-    font-size: 9px;
-    border-left: 1px solid rgba(255,255,255,0.04);
+    font-size: 11px;
+    border-left: 1px solid rgba(255,255,255,0.10);
+    opacity: 0.55;
   }
   .new-tab-menu {
     position: absolute;
