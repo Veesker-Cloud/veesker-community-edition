@@ -958,6 +958,9 @@
       {getColumns}
       env={meta.env}
       connectionName={meta.name}
+      connectionUser={info?.user ?? null}
+      connectionService={info?.serviceName ?? null}
+      isProductionLocked={meta.psdpmMode ?? (meta.env === "prod" || meta.env === "staging")}
     />
   </div>
   {#if showPalette}

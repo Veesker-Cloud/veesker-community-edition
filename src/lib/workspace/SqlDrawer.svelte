@@ -26,6 +26,7 @@
   import ObjectVersionFlyout from "./ObjectVersionFlyout.svelte";
   import PlsqlOutline from "./PlsqlOutline.svelte";
   import TerminalPanel from "./TerminalPanel.svelte";
+  import CommandWindow from "./CommandWindow.svelte";
   import { resultPanel } from "$lib/stores/result-panel.svelte";
   import PlanTab from "./PlanTab.svelte";
   import OutputTab from "./OutputTab.svelte";
@@ -38,8 +39,22 @@
     getColumns?: (table: string, owner: string | null) => Promise<string[]>;
     env?: "dev" | "staging" | "prod";
     connectionName?: string;
+    connectionUser?: string | null;
+    connectionService?: string | null;
+    isProductionLocked?: boolean;
   };
-  let { onCancel, onExplainWithAI, onAnalyze, completionSchema, getColumns, env, connectionName }: Props = $props();
+  let {
+    onCancel,
+    onExplainWithAI,
+    onAnalyze,
+    completionSchema,
+    getColumns,
+    env,
+    connectionName,
+    connectionUser = null,
+    connectionService = null,
+    isProductionLocked = false,
+  }: Props = $props();
 
   // ── Refs ────────────────────────────────────────────────────────────────────
   let drawerEl: HTMLDivElement | undefined = $state();
@@ -179,10 +194,47 @@
 
   function _onGlobalKeyDown(e: KeyboardEvent) {
     if ((e.ctrlKey || e.metaKey) && e.key === "`") { e.preventDefault(); toggleTerminal(); }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "n") {
+      e.preventDefault();
+      const connId = sqlEditor.connectionId;
+      if (connId !== null) sqlEditor.openCommandTab(connId);
+    }
   }
 
   onMount(() => window.addEventListener("keydown", _onGlobalKeyDown));
   onDestroy(() => window.removeEventListener("keydown", _onGlobalKeyDown));
+
+  // ── New-tab menu ──────────────────────────────────────────────────────────
+  let newTabMenuOpen = $state(false);
+
+  function openNewSqlTab() {
+    sqlEditor.openBlank();
+    newTabMenuOpen = false;
+  }
+
+  function openNewCommandTab() {
+    const connId = sqlEditor.connectionId;
+    if (connId !== null) sqlEditor.openCommandTab(connId);
+    newTabMenuOpen = false;
+  }
+
+  function toggleNewTabMenu() {
+    newTabMenuOpen = !newTabMenuOpen;
+  }
+
+  function onMenuOutsideClick(e: MouseEvent) {
+    if (!newTabMenuOpen) return;
+    const target = e.target as HTMLElement;
+    if (target.closest(".new-tab-menu") || target.closest(".plus-caret")) return;
+    newTabMenuOpen = false;
+  }
+
+  $effect(() => {
+    if (newTabMenuOpen) {
+      window.addEventListener("click", onMenuOutsideClick);
+      return () => window.removeEventListener("click", onMenuOutsideClick);
+    }
+  });
 
   // ── Perf analyzer ────────────────────────────────────────────────────────────
   const perf = createPerfAnalyzer();
@@ -414,11 +466,13 @@
             role="tab"
             class="tab"
             class:active={sqlEditor.activeId === t.id}
+            class:tab-command={t.kind === "command"}
             tabindex="0"
             onclick={() => sqlEditor.setActive(t.id)}
             onkeydown={(e) => { if (e.key === "Enter") sqlEditor.setActive(t.id); }}
           >
             {#if t.running}<span class="tab-spinner"></span>{/if}
+            {#if t.kind === "command"}<span class="tab-glyph" aria-hidden="true">&gt;_</span>{/if}
             <span class="tab-title">{t.isDirty ? `● ${t.title}` : t.title}</span>
             <button
               class="tab-close"
@@ -427,7 +481,32 @@
             >×</button>
           </div>
         {/each}
-        <button class="plus" aria-label="New query" onclick={() => sqlEditor.openBlank()}>+</button>
+        <div class="plus-group">
+          <button class="plus" aria-label="New query" onclick={() => sqlEditor.openBlank()}>+</button>
+          <button
+            class="plus-caret"
+            aria-label="New tab options"
+            aria-expanded={newTabMenuOpen}
+            onclick={toggleNewTabMenu}
+          >▾</button>
+          {#if newTabMenuOpen}
+            <div class="new-tab-menu" role="menu">
+              <button class="new-tab-item" role="menuitem" onclick={openNewSqlTab}>
+                <span class="new-tab-item-label">New SQL Tab</span>
+                <span class="new-tab-item-shortcut">Ctrl+T</span>
+              </button>
+              <button
+                class="new-tab-item"
+                role="menuitem"
+                disabled={sqlEditor.connectionId === null}
+                onclick={openNewCommandTab}
+              >
+                <span class="new-tab-item-label">New Command Tab</span>
+                <span class="new-tab-item-shortcut">Ctrl+Shift+N</span>
+              </button>
+            </div>
+          {/if}
+        </div>
       </div>
       {#if active?.plsqlMeta}
         {@const badgeMeta = (active.packageActiveTab === "spec" && active.specMeta) ? active.specMeta : active.plsqlMeta}
@@ -516,6 +595,17 @@
         {/if}
         {#if sqlEditor.activeId === null}
           <div class="empty">Click + to open a new query.</div>
+        {:else if sqlEditor.active?.kind === "command"}
+          {@const tab = sqlEditor.active}
+          <div class="command-pane">
+            <CommandWindow
+              connectionId={tab.connectionId ?? sqlEditor.connectionId ?? ""}
+              user={connectionUser}
+              service={connectionService}
+              {isProductionLocked}
+              onExit={() => sqlEditor.closeTab(tab.id)}
+            />
+          </div>
         {:else}
           {@const tab = sqlEditor.active}
           <div bind:this={editorPaneEl} class="editor-pane" class:editor-prod={env === "prod"} style="flex: 0 0 {sqlEditor.editorRatio * 100}%">
@@ -984,7 +1074,15 @@
     border-radius: 3px;
   }
   .tab-close:hover { opacity: 1; background: rgba(255,255,255,0.1); }
-  .plus, .collapse, .history-toggle {
+  .tab-glyph {
+    font-family: "JetBrains Mono", "Cascadia Code", monospace;
+    font-size: 10px;
+    color: #7ec96a;
+    letter-spacing: -1px;
+  }
+  .tab.active .tab-glyph { color: #9fe88a; }
+  .tab-command .tab-title { font-style: italic; }
+  .plus, .plus-caret, .collapse, .history-toggle {
     background: transparent;
     border: none;
     padding: 0 0.7rem;
@@ -994,7 +1092,7 @@
     font-family: "Space Grotesk", sans-serif;
     transition: background 0.1s, color 0.1s;
   }
-  .plus:hover, .collapse:hover, .history-toggle:hover {
+  .plus:hover, .plus-caret:hover, .collapse:hover, .history-toggle:hover {
     background: rgba(255,255,255,0.06);
     color: rgba(255,255,255,0.8);
   }
@@ -1002,6 +1100,64 @@
     font-size: 10px;
     padding: 0 0.6rem;
     border-right: 1px solid rgba(255,255,255,0.05);
+  }
+  .plus-group {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+  }
+  .plus-caret {
+    padding: 0 0.4rem;
+    font-size: 9px;
+    border-left: 1px solid rgba(255,255,255,0.04);
+  }
+  .new-tab-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 50;
+    min-width: 220px;
+    margin-top: 2px;
+    padding: 4px;
+    background: rgba(14, 12, 10, 0.96);
+    backdrop-filter: blur(18px) saturate(160%);
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .new-tab-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.85);
+    font-size: 12px;
+    font-family: "Space Grotesk", sans-serif;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.1s;
+  }
+  .new-tab-item:hover:not(:disabled) { background: rgba(255,255,255,0.08); }
+  .new-tab-item:disabled { opacity: 0.4; cursor: default; }
+  .new-tab-item-shortcut {
+    color: rgba(255,255,255,0.4);
+    font-size: 10px;
+    font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  }
+  .command-pane {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   /* ── 3-pane body layout ─────────────────────────────────────────────────── */
