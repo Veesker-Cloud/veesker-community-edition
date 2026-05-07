@@ -223,6 +223,29 @@ fn add_safety_columns_if_missing(conn: &Connection) -> rusqlite::Result<()> {
                CHECK (auto_explain_mode IN ('manual', 'always', 'when_dml'));",
         )?;
     }
+    // Sprint D Onda D.1 — command_history table for the Command Window REPL.
+    // Encrypted at rest by SQLCipher (Onda 1.B); no per-row crypto. Stores one
+    // row per submitted command line so the user can recall recent inputs with
+    // the up arrow inside `xterm.js`. `origin` and `status` are validated by
+    // CHECK to keep the schema honest if a future code path tries to insert
+    // junk.
+    if !table_exists(conn, "command_history")? {
+        conn.execute_batch(
+            "CREATE TABLE command_history (\
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,\
+                connection_id TEXT NOT NULL,\
+                ts            INTEGER NOT NULL,\
+                command       TEXT NOT NULL,\
+                origin        TEXT NOT NULL DEFAULT 'user_typed' \
+                                CHECK (origin IN ('user_typed', 'script', 'paste')),\
+                status        TEXT NOT NULL DEFAULT 'ok' \
+                                CHECK (status IN ('ok', 'error', 'cancelled')),\
+                duration_ms   INTEGER\
+            );\
+            CREATE INDEX idx_command_history_conn_ts \
+                ON command_history (connection_id, ts DESC);",
+        )?;
+    }
     Ok(())
 }
 
@@ -763,6 +786,84 @@ mod tests {
             row.auto_explain_mode, "manual",
             "auto_explain_mode column should default to 'manual' on legacy rows"
         );
+    }
+
+    #[test]
+    fn migration_creates_command_history_table() {
+        let c = Connection::open_in_memory().unwrap();
+        init_db(&c).unwrap();
+        assert!(table_exists(&c, "command_history").unwrap());
+
+        let cols: Vec<String> = c
+            .prepare("PRAGMA table_info(command_history)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for expected in [
+            "id",
+            "connection_id",
+            "ts",
+            "command",
+            "origin",
+            "status",
+            "duration_ms",
+        ] {
+            assert!(
+                cols.iter().any(|n| n == expected),
+                "missing column {expected} in command_history (got {cols:?})"
+            );
+        }
+
+        // The composite (connection_id, ts DESC) index is the only access path
+        // the REPL relies on, so make sure it really exists.
+        let idx_count: i64 = c
+            .query_row(
+                "SELECT count(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_command_history_conn_ts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            idx_count, 1,
+            "expected idx_command_history_conn_ts to exist"
+        );
+
+        // CHECK constraints must reject bogus origin/status values.
+        let bad_origin = c.execute(
+            "INSERT INTO command_history (connection_id, ts, command, origin, status) \
+             VALUES ('c1', 0, 'x', 'bogus', 'ok')",
+            [],
+        );
+        assert!(bad_origin.is_err(), "origin CHECK should reject 'bogus'");
+
+        let bad_status = c.execute(
+            "INSERT INTO command_history (connection_id, ts, command, origin, status) \
+             VALUES ('c1', 0, 'x', 'user_typed', 'maybe')",
+            [],
+        );
+        assert!(bad_status.is_err(), "status CHECK should reject 'maybe'");
+
+        // A round-trip with defaults for origin/status and a NULL duration_ms
+        // should succeed and read back identically.
+        c.execute(
+            "INSERT INTO command_history (connection_id, ts, command) \
+             VALUES ('c1', 1700000000000, 'select 1 from dual')",
+            [],
+        )
+        .unwrap();
+        let (origin, status, duration): (String, String, Option<i64>) = c
+            .query_row(
+                "SELECT origin, status, duration_ms FROM command_history WHERE connection_id = 'c1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(origin, "user_typed");
+        assert_eq!(status, "ok");
+        assert!(duration.is_none());
     }
 
     #[test]
