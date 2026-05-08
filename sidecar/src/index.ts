@@ -46,7 +46,7 @@ import { aiChat, aiSuggestEndpoint } from "./ai";
 import { resolveApproval } from "./ai-approval-state";
 // L2.1: read session safety (PSDPM flag) and reject embed.batch when active.
 import { getSessionSafety } from "./state";
-import { RpcCodedError, PSDPM_BLOCKED, APPROVAL_UNKNOWN_REQUEST_ID } from "./errors";
+import { RpcCodedError, PSDPM_BLOCKED, APPROVAL_UNKNOWN_REQUEST_ID, ENV_REQUIRED } from "./errors";
 import { chartConfigure, chartReset } from "./chart";
 import { ordsDetect, ordsModulesList, ordsModuleGet, ordsEnableSchema, ordsModuleExportSql, ordsRolesList, ordsGenerateSql, ordsApply, ordsClientsList, ordsClientsCreate, ordsClientsRevoke } from "./ords";
 import {
@@ -70,6 +70,17 @@ import { tablesStats } from "./perf-stats";
 const handlers: HandlerMap = {
   "connection.test": (params) => connectionTest(params as any),
   "workspace.open": async (params) => {
+    // Security item #1: every connection must declare an env before connecting.
+    // The sidecar is the last line of defence — the UI should never call this
+    // without an env, but we enforce it here so no UI bypass is possible.
+    const envValue = (params as any)?.env;
+    const validEnvs = ["dev", "staging", "prod", "local"];
+    if (!envValue || !validEnvs.includes(envValue)) {
+      throw new RpcCodedError(
+        ENV_REQUIRED,
+        "Connection has no environment tag. Set env to dev / staging / prod / local before connecting."
+      );
+    }
     const result = await openSession(params as any);
     // L3.3 — wire DBMS_OUTPUT on every fresh session so PUT_LINE works without
     // a separate user gesture. Best-effort: failures here never break the open.

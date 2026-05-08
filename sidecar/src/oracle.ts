@@ -394,7 +394,7 @@ export type ConnectionTestParams =
       username: string;
       password: string;
       // Safety fields (flattened) — present on saved-connection params, absent on test
-      env?: "dev" | "staging" | "prod";
+      env?: "dev" | "staging" | "prod" | "local";
       readOnly?: boolean;
       statementTimeoutMs?: number;
       warnUnsafeDml?: boolean;
@@ -408,7 +408,7 @@ export type ConnectionTestParams =
       connectAlias: string;
       username: string;
       password: string;
-      env?: "dev" | "staging" | "prod";
+      env?: "dev" | "staging" | "prod" | "local";
       readOnly?: boolean;
       statementTimeoutMs?: number;
       warnUnsafeDml?: boolean;

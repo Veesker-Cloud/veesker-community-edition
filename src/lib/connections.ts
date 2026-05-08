@@ -4,7 +4,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-export type ConnectionEnv = "dev" | "staging" | "prod";
+export type ConnectionEnv = "dev" | "staging" | "prod" | "local";
 
 export type ConnectionSafety = {
   /** "dev" | "staging" | "prod" — undefined = unspecified */

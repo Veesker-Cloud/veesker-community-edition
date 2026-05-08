@@ -241,14 +241,15 @@ pub(crate) fn resolve_auto_explain_default(env: Option<&str>, explicit: Option<&
 }
 
 fn validate_env(env: &Option<String>) -> Result<(), ConnectionError> {
-    if let Some(e) = env
-        && !matches!(e.as_str(), "dev" | "staging" | "prod")
-    {
-        return Err(ConnectionError::invalid(
-            "env must be 'dev', 'staging', or 'prod'",
-        ));
+    match env.as_deref() {
+        Some("dev") | Some("staging") | Some("prod") | Some("local") => Ok(()),
+        Some(other) => Err(ConnectionError::invalid(format!(
+            "env '{other}' is not valid; must be dev / staging / prod / local"
+        ))),
+        None => Err(ConnectionError::invalid(
+            "env is required — set dev / staging / prod / local before saving",
+        )),
     }
-    Ok(())
 }
 
 // HIGH-002 (audit 2026-04-30): reject any character that has meaning in Oracle
@@ -729,13 +730,25 @@ impl ConnectionService {
                         "cannot change auth type — delete and recreate the connection",
                     ));
                 }
-                // F2 (Sprint C): env is immutable after save. To change env,
-                // delete and recreate the connection. Defense against trivial
-                // env-override that would bypass the prod hard-lock.
-                if existing.env != safety.env {
-                    return Err(ConnectionError::invalid(
-                        "env is immutable after save — delete and recreate the connection to change env",
-                    ));
+                // F2 (Sprint C, updated): env change rules —
+                //   UNTAGGED (None) → any: allowed (first-time tagging)
+                //   non-prod → prod: allowed one-way upgrade (UI shows double-confirm)
+                //   prod → any other: blocked unconditionally
+                //   lateral moves (dev↔staging, etc.): blocked
+                match (existing.env.as_deref(), safety.env.as_deref()) {
+                    (a, b) if a == b => {}
+                    (None, _) => {}
+                    (Some("dev") | Some("staging") | Some("local"), Some("prod")) => {}
+                    (Some("prod"), _) => {
+                        return Err(ConnectionError::invalid(
+                            "env cannot be changed from prod — delete and recreate the connection",
+                        ));
+                    }
+                    _ => {
+                        return Err(ConnectionError::invalid(
+                            "only upgrading to prod is allowed — delete and recreate to switch between non-prod envs",
+                        ));
+                    }
                 }
                 Ok(ConnectionRow {
                     id: existing.id,
@@ -809,11 +822,20 @@ impl ConnectionService {
                         "cannot change auth type — delete and recreate the connection",
                     ));
                 }
-                // F2 (Sprint C): env is immutable after save.
-                if existing.env != safety.env {
-                    return Err(ConnectionError::invalid(
-                        "env is immutable after save — delete and recreate the connection to change env",
-                    ));
+                match (existing.env.as_deref(), safety.env.as_deref()) {
+                    (a, b) if a == b => {}
+                    (None, _) => {}
+                    (Some("dev") | Some("staging") | Some("local"), Some("prod")) => {}
+                    (Some("prod"), _) => {
+                        return Err(ConnectionError::invalid(
+                            "env cannot be changed from prod — delete and recreate the connection",
+                        ));
+                    }
+                    _ => {
+                        return Err(ConnectionError::invalid(
+                            "only upgrading to prod is allowed — delete and recreate to switch between non-prod envs",
+                        ));
+                    }
                 }
                 Ok(ConnectionRow {
                     id: existing.id,

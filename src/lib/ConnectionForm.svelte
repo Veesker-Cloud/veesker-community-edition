@@ -122,7 +122,7 @@
   );
   const previewLines = $derived((() => {
     const lines: Array<{ text: string; accent?: string }> = [];
-    if (env) lines.push({ text: `${env.toUpperCase()} badge on tabs`, accent: env === "prod" ? "#f5a08a" : env === "staging" ? "#e8c87e" : "#6aa0f5" });
+    if (env) lines.push({ text: `${env.toUpperCase()} badge on tabs`, accent: env === "prod" ? "#e05c3a" : env === "staging" ? "#e8c87e" : env === "local" ? "#3fb950" : "#6aa0f5" });
     if (readOnly) lines.push({ text: "DML/DDL blocked", accent: "#7ec96a" });
     if (warnUnsafeDml) lines.push({ text: "EXPLAIN before unsafe DML", accent: "#6acfe8" });
     if (!autoPerfAnalysis) lines.push({ text: "No background cost analysis" });
@@ -143,6 +143,31 @@
         : { kind: "none" }
     )
   );
+
+  const isUntagged = $derived(isEdit && !initial.safety?.env);
+  const isProdUpgrade = $derived(
+    isEdit && !!initial.safety?.env && initial.safety.env !== "prod" && env === "prod"
+  );
+  let prodUpgradeConfirmed = $state(false);
+  const canSave = $derived(env !== "" && (!isProdUpgrade || prodUpgradeConfirmed));
+
+  const envMismatch = $derived((() => {
+    if (!env || authType !== "basic") return null;
+    const h = host.toLowerCase();
+    const sn = serviceName.toLowerCase();
+    const looksLikeProd = ["prd", "prod", "production"].some(p => h.includes(p) || sn.includes(p));
+    const looksLikeLocal = h === "localhost" || h === "127.0.0.1" || h === "::1";
+    const looksLikeNonProd = ["dev", "development", "stg", "staging", "homolog", "uat", "test"].some(
+      p => h.includes(p) || sn.includes(p),
+    );
+    if (looksLikeProd && env !== "prod")
+      return `Host/service looks like PROD but env is ${env.toUpperCase()} — verify before connecting.`;
+    if (looksLikeLocal && env === "prod")
+      return "Host is localhost/127.0.0.1 but env is PROD — verify this is intentional.";
+    if (looksLikeNonProd && env === "prod")
+      return "Host/service name suggests non-production but env is PROD — verify before connecting.";
+    return null;
+  })());
 
   let testState = $state<TestState>({ kind: "idle" });
   let saveState = $state<SaveState>({ kind: "idle" });
@@ -357,13 +382,17 @@
   <button
     type="button"
     class="safety-toggle"
+    class:safety-toggle-prod={env === "prod"}
+    class:safety-toggle-local={env === "local"}
+    class:safety-toggle-staging={env === "staging"}
+    class:safety-toggle-dev={env === "dev"}
     aria-expanded={showSafety}
     onclick={() => (showSafety = !showSafety)}
   >
-    {showSafety ? "▼" : "▶"} Safety guards
+    {showSafety ? "▼" : "▶"} Safety guards {#if !canSave}<span class="env-required-mark">⚠ env required</span>{/if}
     {#if onCount > 0}
       <span class="safety-summary">
-        {#if env}<span class="badge badge-{env}">{env}</span>{/if}
+        {#if env}<span class="badge badge-{env}">{env === "staging" ? "HOMOLOG" : env}</span>{/if}
         {#if readOnly}<span class="badge badge-ro">read-only</span>{/if}
         {#if statementTimeoutSec}<span class="badge">{statementTimeoutSec}s</span>{/if}
         {#if warnUnsafeDml}<span class="badge badge-warn">warn DML</span>{/if}
@@ -384,16 +413,30 @@
           <div class="sg-group-label">Connection</div>
           <div class="sg-field">
             <div class="sg-field-header">
-              <span class="sg-field-name">Environment</span>
-              {#if env}<span class="sg-immutable">⚠ IMMUTABLE</span>{/if}
+              <span class="sg-field-name">Environment <span class="env-required-mark">*</span></span>
+              {#if isEdit && initial.safety?.env === "prod"}<span class="sg-immutable">⚠ IMMUTABLE</span>{/if}
             </div>
-            <select bind:value={env} disabled={isEdit}>
-              <option value="">— unspecified —</option>
-              <option value="dev">dev</option>
-              <option value="staging">staging</option>
-              <option value="prod">prod (red badge)</option>
+            {#if isUntagged && env === ""}
+              <div class="env-untagged-warning">⚠ UNTAGGED — select an environment before connecting</div>
+            {/if}
+            <select bind:value={env} disabled={isEdit && initial.safety?.env === "prod"} class:env-select-prod={env === "prod"} class:env-select-local={env === "local"} class:env-select-staging={env === "staging"} class:env-select-dev={env === "dev"}>
+              {#if !env}<option value="">— select environment —</option>{/if}
+              {#if !isEdit || !initial.safety?.env || initial.safety.env === "dev"}<option value="dev">DEV — development / local</option>{/if}
+              {#if !isEdit || !initial.safety?.env || initial.safety.env === "local"}<option value="local">LOCAL — Oracle XE / local dev</option>{/if}
+              {#if !isEdit || !initial.safety?.env || initial.safety.env === "staging"}<option value="staging">HOMOLOG — staging / QA</option>{/if}
+              <option value="prod">PROD — production{#if isEdit && initial.safety?.env && initial.safety.env !== "prod"} — upgrade, permanent{/if}</option>
             </select>
-            {#if isEdit}<small>Delete and recreate this connection to change env.</small>{/if}
+            {#if isEdit && initial.safety?.env === "prod"}<small>Delete and recreate this connection to change env.</small>{/if}
+            {#if envMismatch}<div class="env-mismatch-warning">⚠ {envMismatch}</div>{/if}
+            {#if isProdUpgrade}
+              <div class="env-prod-upgrade-warning">
+                ⚠ Upgrading to PROD is PERMANENT — air-gap and PSDPM will be hard-locked on this connection.
+                <label class="env-prod-upgrade-confirm">
+                  <input type="checkbox" bind:checked={prodUpgradeConfirmed} />
+                  I understand this cannot be undone without deleting this connection
+                </label>
+              </div>
+            {/if}
           </div>
           <div class="sg-field">
             <div class="sg-field-header"><span class="sg-field-name">Timeout (seconds)</span></div>
@@ -471,7 +514,7 @@
       {testState.kind === "running" ? "Testing…" : "Test"}
     </button>
     <button type="button" class="ghost" onclick={onCancel}>Cancel</button>
-    <button type="submit" disabled={saveState.kind === "running"}>
+    <button type="submit" disabled={saveState.kind === "running" || !canSave}>
       {saveState.kind === "running" ? "Saving…" : submitLabel}
     </button>
   </div>
@@ -493,6 +536,17 @@
     <div class="status err">
       <strong>Save failed.</strong>
       <span>{saveState.message}</span>
+    </div>
+  {/if}
+  {#if !canSave && env === ""}
+    <div class="status err">
+      <strong>Environment required.</strong>
+      <span>Open Safety guards and select an environment (dev / local / staging / prod) before saving.</span>
+    </div>
+  {:else if !canSave && isProdUpgrade}
+    <div class="status err">
+      <strong>Confirm PROD upgrade.</strong>
+      <span>Check the confirmation checkbox in Safety guards to upgrade to PROD.</span>
     </div>
   {/if}
   {#if showDisclaimer}
@@ -591,12 +645,23 @@
     border-radius: 6px; cursor: pointer; text-align: left;
   }
   .safety-toggle:hover { background: var(--row-hover); color: var(--text-primary); border-color: var(--border-strong); }
+  .safety-toggle-prod { border-color: rgba(192,32,16,0.6) !important; background: rgba(192,32,16,0.08) !important; color: #e84c30 !important; }
+  .safety-toggle-local { border-color: rgba(46,160,67,0.45) !important; background: rgba(46,160,67,0.06) !important; }
+  .safety-toggle-staging { border-color: rgba(217,153,42,0.45) !important; background: rgba(217,153,42,0.06) !important; }
+  .safety-toggle-dev { border-color: rgba(74,158,218,0.35) !important; }
   .safety-summary { display: flex; gap: 0.3rem; flex-wrap: wrap; margin-left: auto; }
   .safety-hint { margin-left: auto; font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: normal; color: var(--text-muted); }
   .badge { display: inline-block; padding: 1px 7px; border-radius: 3px; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; background: var(--bg-surface-raised); color: var(--text-primary); border: 1px solid var(--border); }
-  .badge-prod { background: rgba(179,62,31,0.18); color: #d36b4f; border-color: rgba(179,62,31,0.4); }
+  .badge-prod { background: rgba(192,32,16,0.22); color: #e84c30; border-color: rgba(192,32,16,0.55); font-weight: 700; }
   .badge-staging { background: rgba(217,153,42,0.18); color: #d99c2a; border-color: rgba(217,153,42,0.4); }
   .badge-dev { background: rgba(74,158,218,0.18); color: #4a9eda; border-color: rgba(74,158,218,0.4); }
+  .badge-local { background: rgba(46,160,67,0.18); color: #3fb950; border-color: rgba(46,160,67,0.4); }
+  .env-required-mark { color: #e84c30; font-weight: 700; }
+  .env-untagged-warning { font-family: "Inter", sans-serif; font-size: 11px; font-weight: 600; color: #e84c30; background: rgba(192,32,16,0.1); border: 1px solid rgba(192,32,16,0.35); border-radius: 4px; padding: 4px 8px; }
+  .env-select-prod { border-color: rgba(192,32,16,0.6) !important; color: #e84c30 !important; font-weight: 600; }
+  .env-select-local { border-color: rgba(46,160,67,0.5) !important; color: #3fb950 !important; }
+  .env-select-staging { border-color: rgba(217,153,42,0.5) !important; color: #d99c2a !important; }
+  .env-select-dev { border-color: rgba(74,158,218,0.5) !important; color: #4a9eda !important; }
   .badge-ro { background: rgba(106,110,119,0.2); color: var(--text-secondary); }
   .badge-warn { background: rgba(217,153,42,0.18); color: #d99c2a; border-color: rgba(217,153,42,0.4); }
   .badge-airgap { background: rgba(20,24,32,0.85); color: #f6f1e8; border-color: rgba(20,24,32,1); }
@@ -630,4 +695,8 @@
   .sg-preview-title { font-family: "Inter", sans-serif; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.4rem; }
   .sg-preview-empty { font-family: "Inter", sans-serif; font-size: 11px; color: var(--text-muted); font-style: italic; }
   .sg-preview-line { font-family: "JetBrains Mono", monospace; font-size: 11px; color: var(--text-secondary); line-height: 1.65; }
+  .env-mismatch-warning { font-family: "Inter", sans-serif; font-size: 11px; font-weight: 500; color: #d99c2a; background: rgba(217,153,42,0.1); border: 1px solid rgba(217,153,42,0.35); border-radius: 4px; padding: 4px 8px; }
+  .env-prod-upgrade-warning { font-family: "Inter", sans-serif; font-size: 11px; font-weight: 500; color: #e84c30; background: rgba(192,32,16,0.08); border: 1px solid rgba(192,32,16,0.35); border-radius: 4px; padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; }
+  .env-prod-upgrade-confirm { display: flex; align-items: flex-start; gap: 6px; cursor: pointer; font-weight: 600; font-size: 11px; color: inherit; text-transform: none; letter-spacing: normal; }
+  .env-prod-upgrade-confirm input { flex-shrink: 0; margin: 1px 0 0 0; cursor: pointer; }
 </style>

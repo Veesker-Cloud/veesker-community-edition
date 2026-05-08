@@ -36,6 +36,11 @@ export const SESSION_SELF_NOT_FOUND = -32035;
 // (already resolved, never registered, or already timed out).
 export const APPROVAL_UNKNOWN_REQUEST_ID = -32036;
 
+// Security item #1: workspace.open refused because the connection has no env
+// tag. All connections must declare dev / staging / prod / local before
+// any Oracle session is allowed to open.
+export const ENV_REQUIRED = -32037;
+
 export class RpcCodedError extends Error {
   code: number;
   data?: Record<string, unknown>;

@@ -44,7 +44,7 @@ pub struct ConnectionRow {
     pub username: String,
     pub created_at: String,
     pub updated_at: String,
-    /// dev / staging / prod / null
+    /// dev / staging / prod / local / null
     pub env: Option<String>,
     /// when true, sidecar refuses DML/DDL on this connection
     pub read_only: bool,
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS connections (
     created_at           TEXT NOT NULL,
     updated_at           TEXT NOT NULL,
     env                  TEXT
-                           CHECK (env IS NULL OR env IN ('dev', 'staging', 'prod')),
+                           CHECK (env IS NULL OR env IN ('dev', 'staging', 'prod', 'local')),
     read_only            INTEGER NOT NULL DEFAULT 0
                            CHECK (read_only IN (0, 1)),
     statement_timeout_ms INTEGER
@@ -132,7 +132,7 @@ CREATE TABLE connections_new (
     created_at           TEXT NOT NULL,
     updated_at           TEXT NOT NULL,
     env                  TEXT
-                           CHECK (env IS NULL OR env IN ('dev', 'staging', 'prod')),
+                           CHECK (env IS NULL OR env IN ('dev', 'staging', 'prod', 'local')),
     read_only            INTEGER NOT NULL DEFAULT 0
                            CHECK (read_only IN (0, 1)),
     statement_timeout_ms INTEGER
@@ -168,7 +168,7 @@ fn add_safety_columns_if_missing(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "connections", "env")? {
         conn.execute_batch(
             "ALTER TABLE connections ADD COLUMN env TEXT \
-               CHECK (env IS NULL OR env IN ('dev', 'staging', 'prod'));",
+               CHECK (env IS NULL OR env IN ('dev', 'staging', 'prod', 'local'));",
         )?;
     }
     if !has_column(conn, "connections", "read_only")? {
@@ -246,7 +246,72 @@ fn add_safety_columns_if_missing(conn: &Connection) -> rusqlite::Result<()> {
                 ON command_history (connection_id, ts DESC);",
         )?;
     }
+    // Security item #1 (updated): env CHECK must include 'local'. Full table
+    // rebuild required — SQLite cannot ALTER a CHECK constraint. Also converts
+    // any existing 'sandbox' rows to 'local'.
+    if env_check_needs_local_update(conn)? {
+        migrate_env_add_local(conn)?;
+    }
     Ok(())
+}
+
+fn env_check_needs_local_update(conn: &Connection) -> rusqlite::Result<bool> {
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='connections'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    Ok(!sql.contains("'local'"))
+}
+
+fn migrate_env_add_local(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(r#"
+        BEGIN;
+        CREATE TABLE connections_env_local_mig (
+            id                   TEXT PRIMARY KEY,
+            name                 TEXT NOT NULL,
+            auth_type            TEXT NOT NULL DEFAULT 'basic'
+                                   CHECK (auth_type IN ('basic', 'wallet')),
+            host                 TEXT,
+            port                 INTEGER,
+            service_name         TEXT,
+            connect_alias        TEXT,
+            username             TEXT NOT NULL,
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL,
+            env                  TEXT
+                                   CHECK (env IS NULL OR env IN ('dev', 'staging', 'prod', 'local')),
+            read_only            INTEGER NOT NULL DEFAULT 0
+                                   CHECK (read_only IN (0, 1)),
+            statement_timeout_ms INTEGER
+                                   CHECK (statement_timeout_ms IS NULL OR statement_timeout_ms >= 0),
+            warn_unsafe_dml      INTEGER NOT NULL DEFAULT 0
+                                   CHECK (warn_unsafe_dml IN (0, 1)),
+            auto_perf_analysis   INTEGER NOT NULL DEFAULT 1
+                                   CHECK (auto_perf_analysis IN (0, 1)),
+            airgap_mode          INTEGER NOT NULL DEFAULT 0
+                                   CHECK (airgap_mode IN (0, 1)),
+            psdpm_mode           INTEGER NOT NULL DEFAULT 0
+                                   CHECK (psdpm_mode IN (0, 1)),
+            auto_explain_mode    TEXT NOT NULL DEFAULT 'manual'
+                                   CHECK (auto_explain_mode IN ('manual', 'always', 'when_dml'))
+        );
+        INSERT INTO connections_env_local_mig
+            SELECT id, name, auth_type, host, port, service_name, connect_alias, username,
+                   created_at, updated_at,
+                   CASE WHEN env = 'sandbox' THEN 'local' ELSE env END,
+                   read_only, statement_timeout_ms, warn_unsafe_dml,
+                   auto_perf_analysis, airgap_mode, psdpm_mode, auto_explain_mode
+            FROM connections;
+        DROP TABLE connections;
+        ALTER TABLE connections_env_local_mig RENAME TO connections;
+        DROP INDEX IF EXISTS connections_name_unique;
+        CREATE UNIQUE INDEX connections_name_unique ON connections (LOWER(name));
+        COMMIT;
+    "#)
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
