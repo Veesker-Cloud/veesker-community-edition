@@ -5,6 +5,7 @@
 mod commands;
 mod crypto;
 mod persistence;
+mod pii;
 mod sidecar;
 mod terminal;
 mod tray;
@@ -240,6 +241,7 @@ pub fn run() {
             commands::history_clear,
             commands::command_history_load,
             commands::command_history_append,
+            commands::command_history_clear_inaccessible,
             commands::command_script_read,
             commands::audit_recent,
             commands::compile_errors_get,

@@ -396,6 +396,7 @@ fn map_command_history_err(e: command_history::CommandHistoryError) -> Connectio
             ConnectionError::from(StoreError::from(s))
         }
         command_history::CommandHistoryError::InvalidArg(m) => ConnectionError::invalid(m),
+        command_history::CommandHistoryError::Crypto(m) => ConnectionError::internal(m),
     }
 }
 
@@ -403,6 +404,9 @@ pub struct ConnectionService {
     conn: Mutex<SqliteConnection>,
     wallets_root: PathBuf,
     data_dir: PathBuf,
+    /// None when the OS keychain was unavailable at startup. History recording
+    /// and decryption are disabled for the session — no zero-key fallback.
+    command_history_key: Option<Vec<u8>>,
 }
 
 impl ConnectionService {
@@ -427,11 +431,28 @@ impl ConnectionService {
         })?;
         object_versions::init_db_object_versions(&conn)
             .map_err(|e| ConnectionError::internal(format!("object_versions init: {e}")))?;
+        let command_history_key = crate::crypto::get_or_create_command_history_key();
+        if command_history_key.is_none() {
+            eprintln!("veesker: keychain unavailable — command history disabled for this session");
+        }
+        command_history::encrypt_legacy_rows(&conn, command_history_key.as_deref())
+            .map_err(|e| match e {
+                command_history::CommandHistoryError::Sqlite(s) => {
+                    ConnectionError::from(StoreError::from(s))
+                }
+                command_history::CommandHistoryError::InvalidArg(m) => {
+                    ConnectionError::internal(m)
+                }
+                command_history::CommandHistoryError::Crypto(m) => {
+                    ConnectionError::internal(format!("command_history migrate: {m}"))
+                }
+            })?;
         let data_dir = db_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         Ok(Self {
             conn: Mutex::new(conn),
             wallets_root,
             data_dir,
+            command_history_key,
         })
     }
 
@@ -944,9 +965,10 @@ impl ConnectionService {
         &self,
         connection_id: &str,
         limit: i64,
-    ) -> Result<Vec<command_history::CommandHistoryEntry>, ConnectionError> {
+    ) -> Result<command_history::LoadResult, ConnectionError> {
         let conn = self.lock()?;
-        command_history::load(&conn, connection_id, limit).map_err(map_command_history_err)
+        command_history::load(&conn, connection_id, limit, self.command_history_key.as_deref())
+            .map_err(map_command_history_err)
     }
 
     pub fn command_history_append(
@@ -958,7 +980,13 @@ impl ConnectionService {
         duration_ms: Option<i64>,
     ) -> Result<i64, ConnectionError> {
         let conn = self.lock()?;
-        command_history::append(&conn, connection_id, command, origin, status, duration_ms)
+        command_history::append(&conn, connection_id, command, origin, status, duration_ms, self.command_history_key.as_deref())
+            .map_err(map_command_history_err)
+    }
+
+    pub fn command_history_clear_inaccessible(&self) -> Result<i64, ConnectionError> {
+        let conn = self.lock()?;
+        command_history::clear_inaccessible(&conn, self.command_history_key.as_deref())
             .map_err(map_command_history_err)
     }
 

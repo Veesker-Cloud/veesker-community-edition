@@ -83,7 +83,7 @@ beforeEach(() => {
   appendCommandHistoryMock.mockReset();
   appendCommandHistoryMock.mockResolvedValue(1);
   loadCommandHistoryMock.mockReset();
-  loadCommandHistoryMock.mockResolvedValue([]);
+  loadCommandHistoryMock.mockResolvedValue({ entries: [], inaccessibleCount: 0, historyDisabled: false });
   readCommandScriptMock.mockReset();
   loadScriptMock.mockReset();
 });
@@ -451,21 +451,48 @@ describe("CommandExecutor — reset / loadInitialHistory", () => {
   test("loadInitialHistory populates state.history", async () => {
     const state = new CommandModeState();
     const { ctx } = buildContext();
-    loadCommandHistoryMock.mockResolvedValue([
-      {
-        id: 1,
-        connectionId: "conn-1",
-        ts: 1000,
-        command: "SELECT 1 FROM dual",
-        origin: "user_typed",
-        status: "ok",
-        durationMs: 12,
-      },
-    ]);
+    loadCommandHistoryMock.mockResolvedValue({
+      entries: [
+        {
+          id: 1,
+          connectionId: "conn-1",
+          ts: 1000,
+          command: "SELECT 1 FROM dual",
+          origin: "user_typed",
+          status: "ok",
+          durationMs: 12,
+        },
+      ],
+      inaccessibleCount: 0,
+      historyDisabled: false,
+    });
     const exec = new CommandExecutor(state, ctx);
     await exec.loadInitialHistory();
     expect(state.history.length).toBe(1);
     expect(state.history[0].command).toBe("SELECT 1 FROM dual");
+  });
+
+  test("loadInitialHistory shows alert when inaccessible rows exist", async () => {
+    const state = new CommandModeState();
+    const { ctx } = buildContext();
+    loadCommandHistoryMock.mockResolvedValue({ entries: [], inaccessibleCount: 3, historyDisabled: false });
+    const exec = new CommandExecutor(state, ctx);
+    await exec.loadInitialHistory();
+    const infos = state.transcript.filter((e) => e.kind === "info");
+    expect(infos.length).toBe(1);
+    expect((infos[0] as { kind: "info"; text: string }).text).toContain("3 queries inaccessible");
+  });
+
+  test("loadInitialHistory shows disabled banner when keychain unavailable", async () => {
+    const state = new CommandModeState();
+    const { ctx } = buildContext();
+    loadCommandHistoryMock.mockResolvedValue({ entries: [], inaccessibleCount: 0, historyDisabled: true });
+    const exec = new CommandExecutor(state, ctx);
+    await exec.loadInitialHistory();
+    const infos = state.transcript.filter((e) => e.kind === "info");
+    expect(infos.length).toBe(1);
+    expect((infos[0] as { kind: "info"; text: string }).text).toContain("HISTORY DISABLED");
+    expect((infos[0] as { kind: "info"; text: string }).text).toContain("Keychain unavailable");
   });
 
   test("loadInitialHistory swallows backend errors", async () => {
