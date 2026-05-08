@@ -486,6 +486,11 @@ import {
   setSessionSafety,
   getSessionSafety,
   withSessionLock,
+  getTxState,
+  resetTxState,
+  recordTxModifying,
+  setTxId,
+  type TxModifyingType,
 } from "./state";
 import {
   RpcCodedError,
@@ -1000,6 +1005,45 @@ export type MultiQueryResult = {
   dbmsOutput: string[];
 };
 
+// ── Authoritative TX state sync (Item #4) ──────────────────────────────────
+// Oracle's DBMS_TRANSACTION.LOCAL_TRANSACTION_ID returns the transaction id
+// for the current session, or NULL if no transaction is open. We use it as
+// ground truth after every potentially-modifying statement so DDL implicit
+// commits, anonymous PL/SQL with internal COMMIT, and lost-session recovery
+// all converge on the correct state. Round-trip cost is one extra execute()
+// per dml/ddl/plsql/tcl — SELECT is exempt (per Geraldo's design call).
+async function fetchOracleTxId(conn: oracledb.Connection): Promise<string | null> {
+  try {
+    const r = await conn.execute<{ T: string | null }>(
+      "SELECT DBMS_TRANSACTION.LOCAL_TRANSACTION_ID AS T FROM DUAL",
+      [],
+      { outFormat: oracledb.OUT_FORMAT_OBJECT },
+    );
+    const t = r.rows?.[0]?.T;
+    return typeof t === "string" && t.length > 0 ? t : null;
+  } catch {
+    return null;
+  }
+}
+
+async function syncTxStateAfterStatement(
+  conn: oracledb.Connection,
+  sql: string,
+): Promise<void> {
+  const kind = classifySql(sql);
+  if (kind !== "dml" && kind !== "ddl" && kind !== "plsql" && kind !== "tcl") return;
+  const txId = await fetchOracleTxId(conn);
+  if (txId === null) {
+    resetTxState();
+    return;
+  }
+  if (kind === "dml" || kind === "ddl" || kind === "plsql") {
+    recordTxModifying(kind as TxModifyingType, txId);
+  } else {
+    setTxId(txId);
+  }
+}
+
 // oracledb thin mode detects statement type by first keyword (case-sensitive in some versions).
 // Passing outFormat/maxRows also signals "this is a query" and can cause the driver to strip
 // the trailing `;` from PL/SQL anonymous blocks, producing ORA-06550. Avoid both problems
@@ -1318,7 +1362,9 @@ export async function queryExecute(p: {
           let output: string[] | null = null;
           const qr = await withActiveSession(async (conn) => {
             try {
-              return await executeSingleStatement(conn, stmt, requestId);
+              const result = await executeSingleStatement(conn, stmt, requestId);
+              await syncTxStateAfterStatement(conn, stmt);
+              return result;
             } finally {
               // Drain even on failure so the next statement starts with an
               // empty buffer. drainDbmsOutput is best-effort internally.
@@ -1373,6 +1419,7 @@ export async function queryExecute(p: {
         const base = await executeSingleStatement(conn, p.sql, requestId, p.fetchAll === true);
         const drained = await drainDbmsOutput(conn);
         dbmsOutput = drained ?? [];
+        await syncTxStateAfterStatement(conn, p.sql);
         return { ...base, dbmsOutput };
       } catch (err) {
         // Drain anyway so the buffer is empty for the next query. We can't
@@ -1830,6 +1877,7 @@ export async function tableCountRows(p: {
 export async function connectionCommit(): Promise<{ committed: true }> {
   return withActiveSession(async (conn) => {
     await conn.commit();
+    resetTxState();
     return { committed: true as const };
   });
 }
@@ -1837,8 +1885,66 @@ export async function connectionCommit(): Promise<{ committed: true }> {
 export async function connectionRollback(): Promise<{ rolledBack: true }> {
   return withActiveSession(async (conn) => {
     await conn.rollback();
+    resetTxState();
     return { rolledBack: true as const };
   });
+}
+
+// ── connection.txState (Item #4) ────────────────────────────────────────────
+// Returns the authoritative state of the active session's open transaction.
+// `hasOpenTx` is true iff DBMS_TRANSACTION.LOCAL_TRANSACTION_ID is non-null
+// (consulted live when there is cached pending work to verify, or when caller
+// requests a forced refresh). `pendingStatements` is the count of mutating
+// statements seen since the last commit/rollback/DDL — informational, may
+// over-count if a PL/SQL block did internal commits we couldn't observe.
+//
+// Semantics: callers (window close, tab switch, beforeNavigate) should treat
+// `hasOpenTx === true` as "user must decide" and `pendingStatements` as the
+// count to surface in the modal ("3 statements pending"). The frontend never
+// derives intent from rowCount/columns heuristics — only from this RPC.
+export interface ConnectionTxStateResult {
+  hasOpenTx: boolean;
+  pendingStatements: number;
+  lastTxId: string | null;
+  lastModifyingAt: number | null;
+  lastModifyingType: TxModifyingType | null;
+}
+
+export async function connectionTxState(): Promise<ConnectionTxStateResult> {
+  if (!hasSession()) {
+    return {
+      hasOpenTx: false,
+      pendingStatements: 0,
+      lastTxId: null,
+      lastModifyingAt: null,
+      lastModifyingType: null,
+    };
+  }
+  const cached = getTxState();
+  // If we believe there's pending work, consult Oracle to confirm. The user's
+  // session may have been killed server-side, or a PL/SQL block may have done
+  // an internal COMMIT we didn't observe via classifySql.
+  if (cached.pendingStatements > 0) {
+    try {
+      const txId = await withActiveSession((conn) => fetchOracleTxId(conn));
+      if (txId === null) {
+        resetTxState();
+      } else {
+        setTxId(txId);
+      }
+    } catch {
+      // Best-effort: if the consult fails (e.g. session lost mid-call), fall
+      // back to cached state. SESSION_LOST handling will reset us shortly.
+    }
+  }
+  const fresh = getTxState();
+  return {
+    hasOpenTx: fresh.pendingStatements > 0,
+    pendingStatements: fresh.pendingStatements,
+    lastTxId: fresh.lastTxId,
+    lastModifyingAt: fresh.lastModifyingAt,
+    lastModifyingType: fresh.lastModifyingType,
+  };
 }
 
 export type SearchResult = { owner: string; name: string; type: string };

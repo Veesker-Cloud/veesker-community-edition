@@ -25,6 +25,64 @@ export function clearSession(): void {
   currentSchema = null;
   _sessionSafety = {};
   _sessionParams = null;
+  resetTxState();
+}
+
+// ── Authoritative transaction state (Item #4) ───────────────────────────────
+// Tracks pending uncommitted work for the active Oracle session. The sidecar
+// owns exactly one connection at a time, so this is a single global record —
+// not a per-connection map. The frontend correlates the active connectionId
+// at the tab level. State resets on workspace.open, workspace.close,
+// connection.commit, connection.rollback, and any session loss path.
+//
+// The counter is best-effort and intentionally simple: it increments for every
+// successful dml/ddl/plsql statement, but the AUTHORITATIVE truth is the txId
+// returned by `DBMS_TRANSACTION.LOCAL_TRANSACTION_ID`. If Oracle reports null,
+// `resetTxState()` is called and the counter goes back to 0 — so DDL implicit
+// commits, anonymous PL/SQL blocks containing COMMIT, lost sessions, etc. all
+// converge on the correct state at the next consult.
+export type TxModifyingType = "dml" | "ddl" | "plsql";
+
+export interface TxState {
+  pendingStatements: number;
+  lastTxId: string | null;
+  lastModifyingAt: number | null;
+  lastModifyingType: TxModifyingType | null;
+}
+
+let _txState: TxState = {
+  pendingStatements: 0,
+  lastTxId: null,
+  lastModifyingAt: null,
+  lastModifyingType: null,
+};
+
+export function getTxState(): TxState {
+  return { ..._txState };
+}
+
+export function resetTxState(): void {
+  _txState = {
+    pendingStatements: 0,
+    lastTxId: null,
+    lastModifyingAt: null,
+    lastModifyingType: null,
+  };
+}
+
+export function recordTxModifying(
+  type: TxModifyingType,
+  txId: string | null,
+  at: number = Date.now(),
+): void {
+  _txState.pendingStatements += 1;
+  _txState.lastModifyingType = type;
+  _txState.lastModifyingAt = at;
+  _txState.lastTxId = txId;
+}
+
+export function setTxId(txId: string | null): void {
+  _txState.lastTxId = txId;
 }
 
 export function getActiveSession(): oracledb.Connection {
