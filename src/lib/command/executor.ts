@@ -32,7 +32,7 @@ import { CommandModeState } from "./state.svelte";
 import type { TranscriptEntry } from "./state.svelte";
 import { formatRows, formatStatus } from "./formatter";
 import type { Parsed, CommandSettings, SharedExecResult } from "./types";
-import { appendCommandHistory, loadCommandHistory } from "./history";
+import { appendCommandHistory, clearInaccessibleHistory, loadCommandHistory } from "./history";
 import { loadScript, parseScript } from "./script-runner";
 import type { Result } from "$lib/workspace";
 
@@ -178,8 +178,19 @@ export class CommandExecutor {
 
   async loadInitialHistory(): Promise<void> {
     try {
-      const entries = await loadCommandHistory(this.ctx.connectionId, 1000);
+      const { entries, inaccessibleCount, historyDisabled } = await loadCommandHistory(this.ctx.connectionId, 1000);
       this.state.setHistory(entries);
+      if (historyDisabled) {
+        this.push({
+          kind: "info",
+          text: "[HISTORY DISABLED] Keychain unavailable — command history will not be saved this session.\n",
+        });
+      } else if (inaccessibleCount > 0) {
+        this.push({
+          kind: "info",
+          text: `[SECURITY] ${inaccessibleCount} quer${inaccessibleCount === 1 ? "y" : "ies"} inaccessible — encryption key not available on this machine.\nType: CLEAR HISTORY INACCESSIBLE to remove them.\n`,
+        });
+      }
     } catch (e) {
       console.warn("[CommandExecutor] failed to load history:", e);
     }
@@ -383,6 +394,19 @@ export class CommandExecutor {
         await this.appendHistorySafe(raw, origin, "error", null);
         return;
       case "CLEAR":
+        if (
+          (args[0] ?? "").toUpperCase() === "HISTORY" &&
+          (args[1] ?? "").toUpperCase() === "INACCESSIBLE"
+        ) {
+          try {
+            const deleted = await clearInaccessibleHistory();
+            this.push({ kind: "info", text: `${deleted} inaccessible quer${deleted === 1 ? "y" : "ies"} removed.\n` });
+          } catch (e) {
+            this.push({ kind: "error", code: "SP2-HISTORY-CLEAR", message: `CLEAR HISTORY INACCESSIBLE failed: ${e}` });
+          }
+          await this.appendHistorySafe(raw, origin, "ok", null);
+          return;
+        }
         this.handleClear(args);
         await this.appendHistorySafe(raw, origin, "ok", null);
         return;

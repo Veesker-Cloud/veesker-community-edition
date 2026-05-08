@@ -5,11 +5,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { CommandHistoryEntry } from "./types";
 
+export interface CommandHistoryLoadResult {
+	entries: CommandHistoryEntry[];
+	inaccessibleCount: number;
+	historyDisabled: boolean;
+}
+
 export async function loadCommandHistory(
 	connectionId: string,
 	limit = 1000,
-): Promise<CommandHistoryEntry[]> {
-	return invoke<CommandHistoryEntry[]>("command_history_load", {
+): Promise<CommandHistoryLoadResult> {
+	return invoke<CommandHistoryLoadResult>("command_history_load", {
 		connectionId,
 		limit,
 	});
@@ -29,6 +35,10 @@ export async function appendCommandHistory(
 		status,
 		durationMs,
 	});
+}
+
+export async function clearInaccessibleHistory(): Promise<number> {
+	return invoke<number>("command_history_clear_inaccessible");
 }
 
 export async function readCommandScript(path: string): Promise<string> {

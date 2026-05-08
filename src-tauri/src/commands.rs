@@ -1883,17 +1883,31 @@ pub async fn cloud_api_post(app: AppHandle, path: String, body: Value) -> Result
 //   * `command_history_append` — record one submitted line after execution
 //   * `command_script_read`    — read a `@file.sql` script from disk
 
-use crate::persistence::command_history::CommandHistoryEntry;
+use crate::persistence::command_history::{CommandHistoryEntry, LoadResult as CommandHistoryRaw};
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandHistoryLoadResult {
+    pub entries: Vec<CommandHistoryEntry>,
+    pub inaccessible_count: usize,
+    pub history_disabled: bool,
+}
 
 #[tauri::command]
 pub async fn command_history_load(
     app: AppHandle,
     connection_id: String,
     limit: i64,
-) -> Result<Vec<CommandHistoryEntry>, String> {
+) -> Result<CommandHistoryLoadResult, String> {
     let svc = app.state::<ConnectionService>();
-    svc.command_history_load(&connection_id, limit)
-        .map_err(|e| e.message)
+    let raw: CommandHistoryRaw = svc
+        .command_history_load(&connection_id, limit)
+        .map_err(|e| e.message)?;
+    Ok(CommandHistoryLoadResult {
+        entries: raw.entries,
+        inaccessible_count: raw.inaccessible_count,
+        history_disabled: raw.history_disabled,
+    })
 }
 
 #[tauri::command]
@@ -1907,6 +1921,13 @@ pub async fn command_history_append(
 ) -> Result<i64, String> {
     let svc = app.state::<ConnectionService>();
     svc.command_history_append(&connection_id, &command, &origin, &status, duration_ms)
+        .map_err(|e| e.message)
+}
+
+#[tauri::command]
+pub async fn command_history_clear_inaccessible(app: AppHandle) -> Result<i64, String> {
+    let svc = app.state::<ConnectionService>();
+    svc.command_history_clear_inaccessible()
         .map_err(|e| e.message)
 }
 

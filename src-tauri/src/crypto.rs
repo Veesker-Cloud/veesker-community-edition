@@ -48,6 +48,37 @@ pub fn get_or_create_audit_cipher_key() -> Vec<u8> {
     get_or_create_key(KEY_NAME_AUDIT_CIPHER, "audit-cipher")
 }
 
+/// Returns the AES-256-GCM key for command_history rows, or None when the
+/// keychain is unavailable. Intentionally does NOT fall back to a zeroed key:
+/// a publicly-known zero key provides no protection while making the user
+/// believe their history is encrypted. Callers must disable history recording
+/// for the session when this returns None.
+///
+/// Also returns None when the freshly-generated key cannot be persisted — an
+/// ephemeral key would make every existing row inaccessible on the next
+/// restart, accumulating unrecoverable orphans.
+pub fn get_or_create_command_history_key() -> Option<Vec<u8>> {
+    let entry = Entry::new(KEYCHAIN_SERVICE, "command-history-cipher-key").ok()?;
+    if let Ok(stored) = entry.get_password()
+        && stored.len() == KEY_HEX_LEN
+        && let Ok(bytes) = (0..KEY_BYTES)
+            .map(|i| u8::from_str_radix(&stored[i * 2..i * 2 + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+    {
+        return Some(bytes);
+    }
+    let mut bytes = vec![0u8; KEY_BYTES];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    if entry.set_password(&hex).is_err() {
+        eprintln!(
+            "command-history-cipher: could not persist key to keychain — history disabled for this session"
+        );
+        return None;
+    }
+    Some(bytes)
+}
+
 fn get_or_create_key(keychain_name: &str, log_label: &str) -> Vec<u8> {
     let entry = match Entry::new(KEYCHAIN_SERVICE, keychain_name) {
         Ok(e) => e,
