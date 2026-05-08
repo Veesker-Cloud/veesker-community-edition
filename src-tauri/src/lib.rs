@@ -263,6 +263,7 @@ pub fn run() {
             commands::ai_key_get,
             commands::connection_commit,
             commands::connection_rollback,
+            commands::connection_tx_state,
             commands::driver_mode,
             commands::explain_plan_get,
             commands::proc_describe,

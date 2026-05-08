@@ -7,7 +7,7 @@ import { queryExecute, queryExecuteMulti, queryCancel, type QueryResult, type Sq
 import { splitSql } from "$lib/sql-splitter";
 import { historySave, type HistoryEntry } from "$lib/query-history";
 import { saveAs, saveExisting, openFile } from "$lib/sql-files";
-import { compileErrorsGet, connectionCommit, connectionRollback, explainPlanGet, type ProcExecuteResult, type Result } from "$lib/workspace";
+import { compileErrorsGet, connectionCommit, connectionRollback, connectionTxState, explainPlanGet, type ProcExecuteResult, type Result, type TxStateView } from "$lib/workspace";
 import { detectDestructive, type DestructiveOp } from "$lib/sql-safety";
 import { objectVersionCapture } from "$lib/object-versions";
 import { CloudAuditService } from "$lib/services/CloudAuditService";
@@ -136,8 +136,72 @@ type PendingUnsafeDml = {
 };
 let _pendingUnsafeDml = $state<PendingUnsafeDml | null>(null);
 
-let _pendingTx = $state(false);
+// Authoritative TX state — sourced from sidecar `connection.txState` RPC, which
+// reads `DBMS_TRANSACTION.LOCAL_TRANSACTION_ID`. Replaces the previous boolean
+// heuristic `result.columns.length === 0 && result.rowCount > 0` that mis-classified
+// UPDATE...RETURNING / MERGE OUTPUT / PL/SQL with internal DML / DDL implicit-commit.
+//
+// Optimistic update: when the user runs a modifying statement, we increment
+// pendingStatements locally so the UI feels instant. Right after the exec
+// resolves we reconcile via `reconcileTxState()` which fetches the authoritative
+// state from the sidecar (cached in-memory there, only round-trips Oracle once
+// per modify when needed). If Oracle disagrees (e.g. DDL implicit-commit, PL/SQL
+// internal COMMIT, killed session), the reconcile call corrects the UI state.
+let _txState = $state<TxStateView>({
+  hasOpenTx: false,
+  pendingStatements: 0,
+  lastTxId: null,
+  lastModifyingAt: null,
+  lastModifyingType: null,
+});
 let _editorExpanded = $state(false);
+
+// Lightweight client-side classifier — only used for optimistic updates and
+// to decide whether to bother calling reconcileTxState() after exec. Sidecar's
+// classifySql() is the authoritative version; this is a deliberately narrower
+// match (just leading keyword) since we only need "is this likely modifying?".
+function classifySqlOptimistic(sql: string): "modifying" | "tcl_close" | "other" {
+  const trimmed = sql
+    .replace(/^\s*--[^\n]*\n+/g, "")
+    .replace(/^\s*\/\*[\s\S]*?\*\/\s*/g, "")
+    .trim()
+    .toUpperCase();
+  if (/^(COMMIT|ROLLBACK)\b/.test(trimmed)) return "tcl_close";
+  if (
+    /^(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP|TRUNCATE|RENAME|COMMENT|GRANT|REVOKE|SAVEPOINT|SET\s+TRANSACTION|BEGIN|DECLARE|CALL)\b/.test(
+      trimmed,
+    )
+  ) {
+    return "modifying";
+  }
+  return "other";
+}
+
+function optimisticTxBump(): void {
+  _txState = {
+    ..._txState,
+    pendingStatements: _txState.pendingStatements + 1,
+    lastModifyingAt: Date.now(),
+    hasOpenTx: true,
+  };
+}
+
+function clearTxStateLocal(): void {
+  _txState = {
+    hasOpenTx: false,
+    pendingStatements: 0,
+    lastTxId: null,
+    lastModifyingAt: null,
+    lastModifyingType: null,
+  };
+}
+
+async function reconcileTxState(): Promise<void> {
+  const res = await connectionTxState();
+  if (res.ok) {
+    _txState = res.data;
+  }
+}
 
 // ── Drawer height ────────────────────────────────────────────────────────────
 
@@ -375,8 +439,13 @@ export const sqlEditor = {
       _pendingUnsafeDml = null;
     }
   },
-  get pendingTx() { return _pendingTx; },
-  clearPendingTx(): void { _pendingTx = false; },
+  // Backwards-compat boolean — true iff there's any uncommitted work.
+  get pendingTx() { return _txState.hasOpenTx; },
+  // Authoritative TxState shape for callers that need count / type / age.
+  get txState(): TxStateView { return _txState; },
+  clearPendingTx(): void { clearTxStateLocal(); },
+  /** Force a re-fetch from the sidecar — used by the close-window modal flow. */
+  async refreshTxState(): Promise<void> { await reconcileTxState(); },
 
   // ── Editor expanded (fullscreen mode) ─────────────────────────────────────
   get editorExpanded() { return _editorExpanded; },
@@ -674,8 +743,14 @@ export const sqlEditor = {
           _tabs = [..._tabs];
         });
       }
-      if (tabResult.status === "ok" && tabResult.result !== null && tabResult.result.columns.length === 0 && tabResult.result.rowCount > 0) {
-        _pendingTx = true;
+      if (tabResult.status === "ok") {
+        const kind = classifySqlOptimistic(sql);
+        if (kind === "modifying") {
+          optimisticTxBump();
+          void reconcileTxState();
+        } else if (kind === "tcl_close") {
+          void reconcileTxState();
+        }
       }
       if (tabResult.status === "ok") {
         const compilable = extractCompilable(sql);
@@ -834,8 +909,15 @@ export const sqlEditor = {
       for (let i = 0; i < tabResults.length; i++) {
         pushHistory(res.data.results[i].sql, tabResults[i]);
       }
-      if (tabResults.some((r) => r.status === "ok" && r.result !== null && r.result.columns.length === 0 && r.result.rowCount > 0)) {
-        _pendingTx = true;
+      // Sidecar already synced TxState per statement during multi-exec; just
+      // reconcile if any of the executed SQL was modifying or TCL.
+      if (
+        res.data.results.some((sr) => {
+          const k = classifySqlOptimistic(sr.sql);
+          return k === "modifying" || k === "tcl_close";
+        })
+      ) {
+        void reconcileTxState();
       }
 
       // Post-execution compile check for CREATE statements
@@ -912,8 +994,14 @@ export const sqlEditor = {
       tab.results = [tabResult];
       tab.activeResultId = resultId;
       pushHistory(sql, tabResult);
-      if (tabResult.status === "ok" && tabResult.result !== null && tabResult.result.columns.length === 0 && tabResult.result.rowCount > 0) {
-        _pendingTx = true;
+      if (tabResult.status === "ok") {
+        const kind = classifySqlOptimistic(sql);
+        if (kind === "modifying") {
+          optimisticTxBump();
+          void reconcileTxState();
+        } else if (kind === "tcl_close") {
+          void reconcileTxState();
+        }
       }
     } finally {
       tab.running = false;
@@ -1007,8 +1095,14 @@ export const sqlEditor = {
       tab.results = [tabResult];
       tab.activeResultId = resultId;
       pushHistory(sqlToRun, tabResult);
-      if (tabResult.status === "ok" && tabResult.result !== null && tabResult.result.columns.length === 0 && tabResult.result.rowCount > 0) {
-        _pendingTx = true;
+      if (tabResult.status === "ok") {
+        const kind = classifySqlOptimistic(sqlToRun);
+        if (kind === "modifying") {
+          optimisticTxBump();
+          void reconcileTxState();
+        } else if (kind === "tcl_close") {
+          void reconcileTxState();
+        }
       }
       if (tabResult.status === "ok") {
         const compilable = extractCompilable(sqlToRun);
@@ -1186,7 +1280,7 @@ export const sqlEditor = {
     const t0 = Date.now();
     const res = await connectionCommit();
     if (!res.ok) throw new Error(res.error.message ?? "Commit failed");
-    _pendingTx = false;
+    clearTxStateLocal();
     const idx = _tabs.findIndex((t) => t.id === _activeId);
     if (idx >= 0) {
       const entry: TabResult = {
@@ -1211,7 +1305,7 @@ export const sqlEditor = {
     const t0 = Date.now();
     const res = await connectionRollback();
     if (!res.ok) throw new Error(res.error.message ?? "Rollback failed");
-    _pendingTx = false;
+    clearTxStateLocal();
     const idx = _tabs.findIndex((t) => t.id === _activeId);
     if (idx >= 0) {
       const entry: TabResult = {
@@ -1245,7 +1339,7 @@ export const sqlEditor = {
     _autoExplainMode = "manual";
     _pendingConfirm = null;
     _pendingUnsafeDml = null;
-    _pendingTx = false;
+    clearTxStateLocal();
     _editorExpanded = false;
   },
 };

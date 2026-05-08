@@ -278,6 +278,28 @@ export async function connectionRollback(): Promise<Result<void>> {
   }
 }
 
+export type TxModifyingType = "dml" | "ddl" | "plsql";
+
+export type TxStateView = {
+  hasOpenTx: boolean;
+  pendingStatements: number;
+  lastTxId: string | null;
+  lastModifyingAt: number | null;
+  lastModifyingType: TxModifyingType | null;
+};
+
+// Authoritative TX state — sourced from DBMS_TRANSACTION.LOCAL_TRANSACTION_ID
+// in the sidecar. Replaces the broken frontend heuristic that mis-classified
+// UPDATE...RETURNING / MERGE OUTPUT / PL/SQL with internal DML / DDL implicit-commit.
+export async function connectionTxState(): Promise<Result<TxStateView>> {
+  try {
+    const data = await invoke<TxStateView>("connection_tx_state");
+    return { ok: true, data };
+  } catch (err) {
+    return { ok: false, error: err as WorkspaceError };
+  }
+}
+
 export const driverMode = () =>
   call<{ mode: "thin" | "thick" }>("driver_mode");
 

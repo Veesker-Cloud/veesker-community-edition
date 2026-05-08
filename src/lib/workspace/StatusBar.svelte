@@ -16,6 +16,8 @@
     schema: string;
     serverVersion: string;
     hasPendingTx?: boolean;
+    /** Item #4 Fase B: count of uncommitted statements (DML/DDL/PLSQL/TCL). */
+    pendingTxCount?: number;
     chatOpen?: boolean;
     onToggleChat?: () => void;
     onDisconnect: () => void;
@@ -38,7 +40,7 @@
   };
   let {
     connectionName, userLabel, schema, serverVersion,
-    hasPendingTx = false, chatOpen = false, onToggleChat,
+    hasPendingTx = false, pendingTxCount = 0, chatOpen = false, onToggleChat,
     onDisconnect, onSwitchConnection,
     theme = "light", onToggleTheme,
     env, readOnly = false, airgap = false, psdpm = false,
@@ -100,11 +102,14 @@
       </span>
     {/if}
     {#if hasPendingTx}
-      <span class="tx-badge" title="Uncommitted transaction pending — remember to COMMIT or ROLLBACK">
+      <span
+        class="tx-badge tx-badge-{env ?? 'dev'}"
+        title="{pendingTxCount > 0 ? `${pendingTxCount} uncommitted statement${pendingTxCount === 1 ? '' : 's'}` : 'Uncommitted transaction'} pending — remember to COMMIT or ROLLBACK"
+      >
         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden="true">
-          <circle cx="4" cy="4" r="3.5" fill="#e8c547"/>
+          <circle cx="4" cy="4" r="3.5" fill="currentColor"/>
         </svg>
-        TX
+        TX{pendingTxCount > 0 ? ` ${pendingTxCount}` : ""}
       </span>
     {/if}
     {#if showUserHost}
@@ -380,17 +385,37 @@
     font-size: 9.5px;
     font-weight: 700;
     letter-spacing: 0.06em;
-    color: #e8c547;
-    background: rgba(232,197,71,0.12);
-    border: 1px solid rgba(232,197,71,0.3);
     border-radius: 4px;
     padding: 1px 6px;
     flex-shrink: 0;
     animation: tx-pulse 2s ease-in-out infinite;
+    color: #e8c547;
+    background: rgba(232,197,71,0.12);
+    border: 1px solid rgba(232,197,71,0.3);
+  }
+  .tx-badge-dev {
+    color: #e8c547;
+    background: rgba(232,197,71,0.12);
+    border-color: rgba(232,197,71,0.3);
+  }
+  .tx-badge-staging {
+    color: #ff9933;
+    background: rgba(255,153,51,0.14);
+    border-color: rgba(255,153,51,0.4);
+  }
+  .tx-badge-prod {
+    color: #ff5252;
+    background: rgba(255,82,82,0.16);
+    border-color: rgba(255,82,82,0.5);
+    animation: tx-pulse-prod 1.4s ease-in-out infinite;
   }
   @keyframes tx-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.65; }
+  }
+  @keyframes tx-pulse-prod {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
   }
   .divider {
     width: 1px;

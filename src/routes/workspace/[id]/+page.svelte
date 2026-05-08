@@ -760,6 +760,7 @@
       schema={info.currentSchema}
       serverVersion={info.serverVersion}
       hasPendingTx={sqlEditor.pendingTx}
+      pendingTxCount={sqlEditor.txState.pendingStatements}
       username={info.user ?? ""}
       serviceName={info.serviceName ?? ""}
       onCommit={handleCommit}
