@@ -5,13 +5,47 @@
 import { describe, it, expect, mock, beforeEach, afterAll } from "bun:test";
 
 // ── queuesList + queueDetails + queueDdl unit tests ──────────────────────────
+//
+// Real getSessionSafety / setSessionSafety are passed through the mock so that
+// ai.test.ts (which may load ai.ts after this mock is registered on Linux/macOS
+// CI) continues to see live state updates via setSessionSafety.
+
+import {
+  getSessionSafety,
+  setSessionSafety,
+  clearSession,
+  hasSession,
+  getCurrentSchema,
+  setSession,
+  setSessionParams,
+  getSessionParams,
+  withSessionLock,
+  getTxState,
+  resetTxState,
+  recordTxModifying,
+  setTxId,
+  SESSION_UUID,
+} from "./state";
 
 const mockExecute = mock(() => Promise.resolve({ rows: [] }));
 const mockConn = { execute: mockExecute } as any;
 
 mock.module("./state", () => ({
   getActiveSession: () => mockConn,
-  getSessionSafety: () => ({ env: "dev", readOnly: false, psdpm: false, warnUnsafeDml: false }),
+  getSessionSafety,
+  setSessionSafety,
+  clearSession,
+  hasSession,
+  getCurrentSchema,
+  setSession,
+  setSessionParams,
+  getSessionParams,
+  withSessionLock,
+  getTxState,
+  resetTxState,
+  recordTxModifying,
+  setTxId,
+  SESSION_UUID,
 }));
 
 afterAll(() => mock.restore());
