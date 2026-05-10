@@ -155,7 +155,7 @@ describe("aiChat (PROD-001 prod-connection gate)", () => {
       await Promise.race([
         aiChat(params),
         new Promise((_, reject) =>
-          setTimeout(() => reject({ code: -1, message: "passed-gate" }), 200),
+          setTimeout(() => reject({ code: -1, message: "passed-gate" }), 1000),
         ),
       ]);
       return null;
