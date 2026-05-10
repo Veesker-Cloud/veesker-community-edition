@@ -50,6 +50,9 @@ import {
   dbLinkDdl,
   directoriesList,
   directoryDetails,
+  queuesList,
+  queueDetails,
+  queueDdl,
 } from "./oracle";
 import { aiChat, aiSuggestEndpoint } from "./ai";
 import { resolveApproval } from "./ai-approval-state";
@@ -112,6 +115,9 @@ const handlers: HandlerMap = {
   "objects.list.dblinks": (params) => dbLinksList(params as any),
   "objects.list.directories": () => directoriesList(),
   "directory.details": (params) => directoryDetails(params as any),
+  "objects.list.queues": (params) => queuesList(params as any),
+  "queue.details": (params) => queueDetails(params as any),
+  "queue.ddl": (params) => queueDdl(params as any),
   "mview.details": (params) => mviewDetails(params as any),
   "mview.refresh": (params) => mviewRefresh(params as any),
   "synonym.details": (params) => synonymDetails(params as any),

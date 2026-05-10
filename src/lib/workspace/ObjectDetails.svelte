@@ -5,8 +5,8 @@
 -->
 
 <script lang="ts">
-  import type { TableDetails, TableRelated, ObjectKind, Loadable, DataFlowResult, VectorIndex, VectorSearchResult, EmbedConfig, EmbedProvider, MViewDetails, SynonymDetails, DbLinkRow, DirectoryDetail } from "$lib/workspace";
-  import { tableCountRows, vectorIndexList, vectorSearch, vectorIndexCreate, vectorIndexDrop, embedCountPending, embedBatch, aiKeyGet, aiKeySave, mviewDetailsGet, mviewRefreshRpc, synonymDetailsGet, dbLinkDdlGet, directoryDetailsGet } from "$lib/workspace";
+  import type { TableDetails, TableRelated, ObjectKind, Loadable, DataFlowResult, VectorIndex, VectorSearchResult, EmbedConfig, EmbedProvider, MViewDetails, SynonymDetails, DbLinkRow, DirectoryDetail, QueueRow } from "$lib/workspace";
+  import { tableCountRows, vectorIndexList, vectorSearch, vectorIndexCreate, vectorIndexDrop, embedCountPending, embedBatch, aiKeyGet, aiKeySave, mviewDetailsGet, mviewRefreshRpc, synonymDetailsGet, dbLinkDdlGet, directoryDetailsGet, queueDetailsGet, queueDdlGet } from "$lib/workspace";
   import { sqlEditor } from "$lib/stores/sql-editor.svelte";
   import DataFlow from "./DataFlow.svelte";
   import VectorScatter from "./VectorScatter.svelte";
@@ -66,7 +66,7 @@
   }
 
   // Reset live count + column search + empty-section toggles when object changes
-  $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); mviewData = null; synonymData = null; dbLinkDdlText = null; dbLinkDdlLoading = false; directoryData = null; directoryLoading = false; });
+  $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); mviewData = null; synonymData = null; dbLinkDdlText = null; dbLinkDdlLoading = false; directoryData = null; directoryLoading = false; queueData = null; queueDataLoading = false; queueDdlText = null; queueDdlLoading = false; });
 
   // ── MView inspector state ──────────────────────────────────────────────────
   let mviewData = $state<MViewDetails | null>(null);
@@ -161,6 +161,37 @@
     const res = await directoryDetailsGet(selected.name);
     directoryLoading = false;
     if (res.ok) directoryData = res.data.detail;
+  }
+
+  // ── Queue inspector state ──────────────────────────────────────────────────
+  let queueData = $state<QueueRow | null>(null);
+  let queueDataLoading = $state(false);
+  let queueDdlText = $state<string | null>(null);
+  let queueDdlLoading = $state(false);
+
+  $effect(() => {
+    if (selected?.kind === "QUEUE") {
+      void loadQueueDetails();
+    }
+  });
+
+  async function loadQueueDetails() {
+    if (!selected) return;
+    queueDataLoading = true;
+    queueData = null;
+    const res = await queueDetailsGet(selected.owner, selected.name);
+    queueDataLoading = false;
+    if (res.ok) queueData = res.data.queue;
+    void loadQueueDdl();
+  }
+
+  async function loadQueueDdl() {
+    if (!selected) return;
+    queueDdlLoading = true;
+    queueDdlText = null;
+    const res = await queueDdlGet(selected.owner, selected.name);
+    queueDdlLoading = false;
+    if (res.ok) queueDdlText = res.data.ddl;
   }
 
   type Tab = "overview" | "columns" | "indexes" | "related" | "dataflow" | "vectors" | "details";
@@ -373,7 +404,8 @@
       selected?.kind === "MATERIALIZED_VIEW" ||
       selected?.kind === "SYNONYM" ||
       selected?.kind === "DB_LINK" ||
-      selected?.kind === "DIRECTORY"
+      selected?.kind === "DIRECTORY" ||
+      selected?.kind === "QUEUE"
     ) {
       activeTab = "details";
     } else {
@@ -410,6 +442,9 @@
     if (selected.kind === "DIRECTORY") {
       return [{ id: "details" as Tab, label: "Info" }];
     }
+    if (selected.kind === "QUEUE") {
+      return [{ id: "details" as Tab, label: "Info" }];
+    }
     return [{ id: "dataflow", label: "Graph" }];
   });
 
@@ -427,6 +462,7 @@
     TRIGGER: "#e74c3c", TYPE: "#3498db",
     MATERIALIZED_VIEW: "#1a9ca6", SYNONYM: "#7d5fa7", DB_LINK: "#d4770a",
     DIRECTORY: "hsl(45 90% 48%)",
+    QUEUE: "hsl(260 55% 58%)",
   };
   const KIND_LABEL: Record<string, string> = {
     TABLE: "TABLE", VIEW: "VIEW", SEQUENCE: "SEQ",
@@ -434,6 +470,7 @@
     TRIGGER: "TRG", TYPE: "TYPE",
     MATERIALIZED_VIEW: "MV", SYNONYM: "SYN", DB_LINK: "DBL",
     DIRECTORY: "DIR",
+    QUEUE: "Q",
   };
 
   function kindColor(k: string) { return KIND_COLOR[k?.toUpperCase()] ?? "#888"; }
@@ -1458,6 +1495,50 @@
             {/if}
           {:else}
             <div class="empty-section">Directory details not available (requires SELECT on DBA_DIRECTORIES).</div>
+          {/if}
+        </div>
+
+      {:else if activeTab === "details" && selected.kind === "QUEUE"}
+        <div class="detail-panel">
+          {#if queueDataLoading}
+            <div class="loading-row"><span class="spinner"></span> Loading…</div>
+          {:else if queueData}
+            <div class="detail-grid">
+              <span class="detail-key">Queue Table</span>
+              <span class="detail-val">{queueData.queueTable}</span>
+              <span class="detail-key">Type</span>
+              <span class="detail-val">{queueData.queueType}</span>
+              {#if queueData.payloadType}
+                <span class="detail-key">Payload Type</span>
+                <span class="detail-val">{queueData.payloadType}</span>
+              {/if}
+              {#if queueData.maxRetries !== null}
+                <span class="detail-key">Max Retries</span>
+                <span class="detail-val">{queueData.maxRetries}</span>
+              {/if}
+              {#if queueData.retryDelay !== null}
+                <span class="detail-key">Retry Delay (s)</span>
+                <span class="detail-val">{queueData.retryDelay}</span>
+              {/if}
+              {#if queueData.retention !== null}
+                <span class="detail-key">Retention (s)</span>
+                <span class="detail-val">{queueData.retention}</span>
+              {/if}
+              {#if queueData.userComment}
+                <span class="detail-key">Comment</span>
+                <span class="detail-val">{queueData.userComment}</span>
+              {/if}
+            </div>
+            <div class="detail-section-label">DDL (informational)</div>
+            {#if queueDdlLoading}
+              <div class="loading-row"><span class="spinner"></span> Loading DDL…</div>
+            {:else if queueDdlText}
+              <pre class="detail-ddl">{queueDdlText}</pre>
+            {:else}
+              <div class="empty-section">DDL not available.</div>
+            {/if}
+          {:else}
+            <div class="empty-section">Queue details not available (requires ALL_QUEUES access).</div>
           {/if}
         </div>
 

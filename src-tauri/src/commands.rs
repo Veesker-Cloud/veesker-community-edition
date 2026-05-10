@@ -2061,7 +2061,7 @@ pub async fn command_script_read(app: AppHandle, path: String) -> Result<String,
         .map_err(|e| format!("SP2-0310: unable to read file \"{path}\": {e}"))
 }
 
-// ── Item #1A — MViews, Synonyms, DB Links ─────────────────────────────────────
+// ── Item #1A — MViews, Synonyms, DB Links — T1A ──────────────────────────────
 
 #[tauri::command]
 pub async fn mview_details(
@@ -2135,5 +2135,53 @@ pub async fn object_ddl_dblink(
         json!({ "name": name }),
     )
     .await?;
+    Ok(res)
+}
+
+// ── Item #1B — Directories, Queues — T1B.2 / T1B.3 ───────────────────────────
+
+#[tauri::command]
+pub async fn objects_list_directories(
+    app: AppHandle,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "objects.list.directories", json!({})).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn directory_details(
+    app: AppHandle,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "directory.details", json!({ "name": name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn objects_list_queues(
+    app: AppHandle,
+    owner: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "objects.list.queues", json!({ "owner": owner })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn queue_details(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "queue.details", json!({ "owner": owner, "name": name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn queue_ddl(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "queue.ddl", json!({ "owner": owner, "name": name })).await?;
     Ok(res)
 }

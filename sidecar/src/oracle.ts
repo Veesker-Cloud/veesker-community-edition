@@ -1163,6 +1163,194 @@ export async function directoryDetails(p: {
   });
 }
 
+// ── Queues (AQ) ───────────────────────────────────────────────────────────────
+
+export type QueueRow = {
+  name: string;
+  owner: string;
+  queueTable: string;
+  queueType: string;
+  maxRetries: number | null;
+  retryDelay: number | null;
+  retention: number | null;
+  userComment: string | null;
+  // from ALL_QUEUE_TABLES join
+  payloadType: string | null;
+};
+
+export async function queuesList(p: {
+  owner: string;
+}): Promise<{ queues: QueueRow[] }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<{
+        OWNER: string;
+        NAME: string;
+        QUEUE_TABLE: string;
+        QUEUE_TYPE: string;
+        MAX_RETRIES: number | null;
+        RETRY_DELAY: number | null;
+        RETENTION: number | null;
+        USER_COMMENT: string | null;
+        PAYLOAD_TYPE: string | null;
+      }>(
+        `SELECT q.owner, q.name, q.queue_table, q.queue_type,
+                q.max_retries, q.retry_delay, q.retention, q.user_comment,
+                qt.type AS payload_type
+           FROM all_queues q
+           LEFT JOIN all_queue_tables qt
+             ON qt.owner = q.owner AND qt.queue_table = q.queue_table
+          WHERE q.owner = :owner
+            AND q.queue_type != 'EXCEPTION_QUEUE'
+          ORDER BY q.name`,
+        { owner: p.owner },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      log.info("[schema] queues source=ALL_QUEUES");
+      return {
+        queues: (res.rows ?? []).map((r) => ({
+          name: r.NAME,
+          owner: r.OWNER,
+          queueTable: r.QUEUE_TABLE,
+          queueType: r.QUEUE_TYPE,
+          maxRetries: r.MAX_RETRIES,
+          retryDelay: r.RETRY_DELAY,
+          retention: r.RETENTION,
+          userComment: r.USER_COMMENT,
+          payloadType: r.PAYLOAD_TYPE,
+        })),
+      };
+    } catch (e: any) {
+      if (e.errorNum === 942) {
+        log.info("[schema] ALL_QUEUES not accessible (ORA-00942)");
+        return { queues: [] };
+      }
+      throw e;
+    }
+  });
+}
+
+export async function queueDetails(p: {
+  owner: string;
+  name: string;
+}): Promise<{ queue: QueueRow | null }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<{
+        OWNER: string;
+        NAME: string;
+        QUEUE_TABLE: string;
+        QUEUE_TYPE: string;
+        MAX_RETRIES: number | null;
+        RETRY_DELAY: number | null;
+        RETENTION: number | null;
+        USER_COMMENT: string | null;
+        PAYLOAD_TYPE: string | null;
+      }>(
+        `SELECT q.owner, q.name, q.queue_table, q.queue_type,
+                q.max_retries, q.retry_delay, q.retention, q.user_comment,
+                qt.type AS payload_type
+           FROM all_queues q
+           LEFT JOIN all_queue_tables qt
+             ON qt.owner = q.owner AND qt.queue_table = q.queue_table
+          WHERE q.owner = UPPER(:owner) AND q.name = UPPER(:name)`,
+        { owner: p.owner, name: p.name },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const r = res.rows?.[0];
+      if (!r) return { queue: null };
+      return {
+        queue: {
+          name: r.NAME,
+          owner: r.OWNER,
+          queueTable: r.QUEUE_TABLE,
+          queueType: r.QUEUE_TYPE,
+          maxRetries: r.MAX_RETRIES,
+          retryDelay: r.RETRY_DELAY,
+          retention: r.RETENTION,
+          userComment: r.USER_COMMENT,
+          payloadType: r.PAYLOAD_TYPE,
+        },
+      };
+    } catch (e: any) {
+      if (e.errorNum === 942) return { queue: null };
+      throw e;
+    }
+  });
+}
+
+export async function queueDdl(p: {
+  owner: string;
+  name: string;
+}): Promise<{ ddl: string }> {
+  return withActiveSession(async (conn) => {
+    // Attempt DBMS_METADATA first — may fail with ORA-39200 for system queues.
+    try {
+      const res = await conn.execute<{ DDL: string }>(
+        `SELECT DBMS_METADATA.GET_DDL('AQ_QUEUE', UPPER(:name), UPPER(:owner)) AS ddl FROM dual`,
+        { name: p.name, owner: p.owner },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const ddl = res.rows?.[0]?.DDL;
+      if (ddl) return { ddl: String(ddl) };
+    } catch (e: any) {
+      // ORA-39200 (not supported), ORA-31603 (object not found) — fall through to reconstruction
+      if (e.errorNum !== 39200 && e.errorNum !== 31603 && e.errorNum !== 942) throw e;
+    }
+
+    // Reconstruct DDL from ALL_QUEUES metadata
+    let meta: {
+      QUEUE_TABLE: string; QUEUE_TYPE: string;
+      MAX_RETRIES: number | null; RETRY_DELAY: number | null;
+      RETENTION: number | null; PAYLOAD_TYPE: string | null;
+    } | null = null;
+    try {
+      const mRes = await conn.execute<{
+        QUEUE_TABLE: string;
+        QUEUE_TYPE: string;
+        MAX_RETRIES: number | null;
+        RETRY_DELAY: number | null;
+        RETENTION: number | null;
+        PAYLOAD_TYPE: string | null;
+      }>(
+        `SELECT q.queue_table, q.queue_type, q.max_retries, q.retry_delay,
+                q.retention, qt.type AS payload_type
+           FROM all_queues q
+           LEFT JOIN all_queue_tables qt
+             ON qt.owner = q.owner AND qt.queue_table = q.queue_table
+          WHERE q.owner = UPPER(:owner) AND q.name = UPPER(:name)`,
+        { owner: p.owner, name: p.name },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      meta = mRes.rows?.[0] ?? null;
+    } catch (e: any) {
+      if (e.errorNum !== 942) throw e;
+    }
+
+    if (!meta) {
+      return {
+        ddl: `-- Queue ${p.owner}.${p.name}: DDL not available (DBMS_METADATA failed and ALL_QUEUES not accessible).`,
+      };
+    }
+
+    const lines: string[] = [
+      `-- Note: DBMS_METADATA.GET_DDL not available. Reconstructed from ALL_QUEUES metadata.`,
+      `BEGIN`,
+      `  DBMS_AQADM.CREATE_QUEUE(`,
+      `    queue_name         => '${p.owner}.${p.name}',`,
+      `    queue_table        => '${p.owner}.${meta.QUEUE_TABLE}',`,
+    ];
+    if (meta.MAX_RETRIES !== null) lines.push(`    max_retries        => ${meta.MAX_RETRIES},`);
+    if (meta.RETRY_DELAY !== null) lines.push(`    retry_delay        => ${meta.RETRY_DELAY},`);
+    if (meta.RETENTION !== null) lines.push(`    retention_time     => ${meta.RETENTION},`);
+    lines.push(`    queue_type         => DBMS_AQADM.${meta.QUEUE_TYPE}`);
+    lines.push(`  );`);
+    lines.push(`END;`);
+    if (meta.PAYLOAD_TYPE) lines.push(`-- Payload type: ${meta.PAYLOAD_TYPE}`);
+    return { ddl: lines.join("\n") };
+  });
+}
+
 export async function tableDescribe(p: {
   owner: string;
   name: string;
