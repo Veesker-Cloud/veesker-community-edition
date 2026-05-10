@@ -1050,6 +1050,119 @@ export async function dbLinkDdl(p: {
   });
 }
 
+// ── Directories ───────────────────────────────────────────────────────────────
+
+export type DirectoryRow = {
+  name: string;
+  owner: string;
+  path: string;
+};
+
+export async function directoriesList(): Promise<{ directories: DirectoryRow[] }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<{
+        DIRECTORY_NAME: string;
+        OWNER: string;
+        DIRECTORY_PATH: string;
+      }>(
+        `SELECT directory_name, owner, directory_path
+           FROM dba_directories
+          ORDER BY directory_name`,
+        {},
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      log.info("[schema] directories source=DBA_DIRECTORIES");
+      return {
+        directories: (res.rows ?? []).map((r) => ({
+          name: r.DIRECTORY_NAME,
+          owner: r.OWNER,
+          path: r.DIRECTORY_PATH,
+        })),
+      };
+    } catch (e: any) {
+      if (e.errorNum === 942) {
+        log.info("[schema] DBA_DIRECTORIES not accessible (ORA-00942), fallback to ALL_DIRECTORIES");
+        const res = await conn.execute<{
+          DIRECTORY_NAME: string;
+          OWNER: string;
+          DIRECTORY_PATH: string;
+        }>(
+          `SELECT directory_name, owner, directory_path
+             FROM all_directories
+            ORDER BY directory_name`,
+          {},
+          { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        return {
+          directories: (res.rows ?? []).map((r) => ({
+            name: r.DIRECTORY_NAME,
+            owner: r.OWNER,
+            path: r.DIRECTORY_PATH,
+          })),
+        };
+      }
+      throw e;
+    }
+  });
+}
+
+export type DirectoryGrant = {
+  grantee: string;
+  privilege: string;
+};
+
+export async function directoryDetails(p: {
+  name: string;
+}): Promise<{ detail: { name: string; owner: string; path: string; grants: DirectoryGrant[] } | null }> {
+  return withActiveSession(async (conn) => {
+    let base: { name: string; owner: string; path: string } | null = null;
+    try {
+      const res = await conn.execute<{
+        DIRECTORY_NAME: string;
+        OWNER: string;
+        DIRECTORY_PATH: string;
+      }>(
+        `SELECT directory_name, owner, directory_path
+           FROM dba_directories
+          WHERE directory_name = :name`,
+        { name: p.name.toUpperCase() },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const r = res.rows?.[0];
+      if (!r) return { detail: null };
+      base = { name: r.DIRECTORY_NAME, owner: r.OWNER, path: r.DIRECTORY_PATH };
+    } catch (e: any) {
+      if (e.errorNum === 942) return { detail: null };
+      throw e;
+    }
+
+    let grants: DirectoryGrant[] = [];
+    try {
+      const gRes = await conn.execute<{
+        GRANTEE: string;
+        PRIVILEGE: string;
+      }>(
+        `SELECT grantee, privilege
+           FROM dba_tab_privs
+          WHERE table_schema = 'SYS'
+            AND table_name = :name
+          ORDER BY grantee, privilege`,
+        { name: p.name.toUpperCase() },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      grants = (gRes.rows ?? []).map((r) => ({
+        grantee: r.GRANTEE,
+        privilege: r.PRIVILEGE,
+      }));
+    } catch (e: any) {
+      if (e.errorNum !== 942) throw e;
+    }
+
+    return { detail: { ...base, grants } };
+  });
+}
+
 export async function tableDescribe(p: {
   owner: string;
   name: string;

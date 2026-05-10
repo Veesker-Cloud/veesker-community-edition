@@ -16,7 +16,8 @@ export type ObjectKind =
   | "TABLE" | "VIEW" | "SEQUENCE"
   | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "TYPE"
   | "REST_MODULE"
-  | "MATERIALIZED_VIEW" | "SYNONYM" | "DB_LINK";
+  | "MATERIALIZED_VIEW" | "SYNONYM" | "DB_LINK"
+  | "DIRECTORY";
 export type ObjectRef = { name: string };
 export type ObjectRefWithStatus = { name: string; status: string };
 export type Column = {
@@ -838,3 +839,29 @@ export const dbLinkDdlGet = (name: string) =>
 // map it to the ObjectKind 'MATERIALIZED_VIEW' on the frontend side.
 // DB_LINK counts are not in ALL_OBJECTS; the count badge is omitted for now
 // and will appear only after the section is expanded.
+
+// ── Item #1B — Directories ────────────────────────────────────────────────────
+
+export type DirectoryRow = {
+  name: string;
+  owner: string;
+  path: string;
+};
+
+export type DirectoryGrant = {
+  grantee: string;
+  privilege: string;
+};
+
+export type DirectoryDetail = {
+  name: string;
+  owner: string;
+  path: string;
+  grants: DirectoryGrant[];
+};
+
+export const directoriesListGet = () =>
+  call<{ directories: DirectoryRow[] }>("objects_list_directories", {});
+
+export const directoryDetailsGet = (name: string) =>
+  call<{ detail: DirectoryDetail | null }>("directory_details", { name });

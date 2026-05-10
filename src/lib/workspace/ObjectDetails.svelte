@@ -5,8 +5,8 @@
 -->
 
 <script lang="ts">
-  import type { TableDetails, TableRelated, ObjectKind, Loadable, DataFlowResult, VectorIndex, VectorSearchResult, EmbedConfig, EmbedProvider, MViewDetails, SynonymDetails, DbLinkRow } from "$lib/workspace";
-  import { tableCountRows, vectorIndexList, vectorSearch, vectorIndexCreate, vectorIndexDrop, embedCountPending, embedBatch, aiKeyGet, aiKeySave, mviewDetailsGet, mviewRefreshRpc, synonymDetailsGet, dbLinkDdlGet } from "$lib/workspace";
+  import type { TableDetails, TableRelated, ObjectKind, Loadable, DataFlowResult, VectorIndex, VectorSearchResult, EmbedConfig, EmbedProvider, MViewDetails, SynonymDetails, DbLinkRow, DirectoryDetail } from "$lib/workspace";
+  import { tableCountRows, vectorIndexList, vectorSearch, vectorIndexCreate, vectorIndexDrop, embedCountPending, embedBatch, aiKeyGet, aiKeySave, mviewDetailsGet, mviewRefreshRpc, synonymDetailsGet, dbLinkDdlGet, directoryDetailsGet } from "$lib/workspace";
   import { sqlEditor } from "$lib/stores/sql-editor.svelte";
   import DataFlow from "./DataFlow.svelte";
   import VectorScatter from "./VectorScatter.svelte";
@@ -66,7 +66,7 @@
   }
 
   // Reset live count + column search + empty-section toggles when object changes
-  $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); mviewData = null; synonymData = null; dbLinkDdlText = null; dbLinkDdlLoading = false; });
+  $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); mviewData = null; synonymData = null; dbLinkDdlText = null; dbLinkDdlLoading = false; directoryData = null; directoryLoading = false; });
 
   // ── MView inspector state ──────────────────────────────────────────────────
   let mviewData = $state<MViewDetails | null>(null);
@@ -142,6 +142,25 @@
     const res = await dbLinkDdlGet(selected.name);
     dbLinkDdlLoading = false;
     if (res.ok) dbLinkDdlText = res.data.ddl;
+  }
+
+  // ── Directory inspector state ──────────────────────────────────────────────
+  let directoryData = $state<DirectoryDetail | null>(null);
+  let directoryLoading = $state(false);
+
+  $effect(() => {
+    if (selected?.kind === "DIRECTORY") {
+      void loadDirectoryDetails();
+    }
+  });
+
+  async function loadDirectoryDetails() {
+    if (!selected) return;
+    directoryLoading = true;
+    directoryData = null;
+    const res = await directoryDetailsGet(selected.name);
+    directoryLoading = false;
+    if (res.ok) directoryData = res.data.detail;
   }
 
   type Tab = "overview" | "columns" | "indexes" | "related" | "dataflow" | "vectors" | "details";
@@ -353,7 +372,8 @@
     } else if (
       selected?.kind === "MATERIALIZED_VIEW" ||
       selected?.kind === "SYNONYM" ||
-      selected?.kind === "DB_LINK"
+      selected?.kind === "DB_LINK" ||
+      selected?.kind === "DIRECTORY"
     ) {
       activeTab = "details";
     } else {
@@ -387,6 +407,9 @@
     if (selected.kind === "DB_LINK") {
       return [{ id: "details" as Tab, label: "Info" }];
     }
+    if (selected.kind === "DIRECTORY") {
+      return [{ id: "details" as Tab, label: "Info" }];
+    }
     return [{ id: "dataflow", label: "Graph" }];
   });
 
@@ -403,12 +426,14 @@
     PROCEDURE: "#e67e22", FUNCTION: "#f39c12", PACKAGE: "#9b59b6",
     TRIGGER: "#e74c3c", TYPE: "#3498db",
     MATERIALIZED_VIEW: "#1a9ca6", SYNONYM: "#7d5fa7", DB_LINK: "#d4770a",
+    DIRECTORY: "hsl(45 90% 48%)",
   };
   const KIND_LABEL: Record<string, string> = {
     TABLE: "TABLE", VIEW: "VIEW", SEQUENCE: "SEQ",
     PROCEDURE: "PROC", FUNCTION: "FN", PACKAGE: "PKG",
     TRIGGER: "TRG", TYPE: "TYPE",
     MATERIALIZED_VIEW: "MV", SYNONYM: "SYN", DB_LINK: "DBL",
+    DIRECTORY: "DIR",
   };
 
   function kindColor(k: string) { return KIND_COLOR[k?.toUpperCase()] ?? "#888"; }
@@ -1401,6 +1426,38 @@
             <pre class="detail-ddl">{dbLinkDdlText}</pre>
           {:else}
             <div class="empty-section">No DB Link DDL available for this user.</div>
+          {/if}
+        </div>
+
+      {:else if activeTab === "details" && selected.kind === "DIRECTORY"}
+        <div class="detail-panel">
+          {#if directoryLoading}
+            <div class="loading-row"><span class="spinner"></span> Loading…</div>
+          {:else if directoryData}
+            <div class="detail-grid">
+              <span class="detail-key">Name</span>
+              <span class="detail-val">{directoryData.name}</span>
+              <span class="detail-key">Owner</span>
+              <span class="detail-val">{directoryData.owner}</span>
+              <span class="detail-key">OS Path</span>
+              <span class="detail-val detail-val-mono">{directoryData.path}</span>
+            </div>
+            {#if directoryData.grants.length > 0}
+              <div class="detail-section-label">Grants</div>
+              <table class="detail-table">
+                <thead><tr><th>Grantee</th><th>Privilege</th></tr></thead>
+                <tbody>
+                  {#each directoryData.grants as g}
+                    <tr><td>{g.grantee}</td><td>{g.privilege}</td></tr>
+                  {/each}
+                </tbody>
+              </table>
+            {:else}
+              <div class="detail-section-label">Grants</div>
+              <div class="empty-section">No grants found (or DBA_TAB_PRIVS not accessible).</div>
+            {/if}
+          {:else}
+            <div class="empty-section">Directory details not available (requires SELECT on DBA_DIRECTORIES).</div>
           {/if}
         </div>
 
@@ -2685,6 +2742,33 @@
     color: var(--text-primary);
     font-size: 12px;
     font-family: "JetBrains Mono", monospace;
+  }
+  .detail-val-mono {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    word-break: break-all;
+  }
+  .detail-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11.5px;
+    margin-top: 0.25rem;
+  }
+  .detail-table th {
+    color: var(--text-muted);
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    text-align: left;
+    padding: 0.2rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .detail-table td {
+    padding: 0.2rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-primary);
   }
   .detail-section-label {
     color: var(--text-muted);
