@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0
 // https://github.com/veesker-cloud/veesker-community-edition
 
-import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { describe, it, expect, mock, beforeEach, afterAll } from "bun:test";
 
 // ── objectsList type mapping ──────────────────────────────────────────────────
 // The typeMap inside objectsList converts MATERIALIZED_VIEW → 'MATERIALIZED VIEW'
@@ -18,6 +18,8 @@ mock.module("./state", () => ({
   getActiveSession: () => mockConn,
   getSessionSafety: () => ({ env: _mockEnv, readOnly: false, psdpm: false, warnUnsafeDml: false }),
 }));
+
+afterAll(() => mock.restore());
 
 import { objectsList } from "./oracle";
 
