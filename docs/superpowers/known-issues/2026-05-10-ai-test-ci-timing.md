@@ -2,7 +2,7 @@
 
 ## Status
 
-Open. Investigation scheduled as T1B.0 before Item #1B implementation begins.
+**RESOLVED** — Fixed in PR #47 (merge commit `0497cd0`, 2026-05-10).
 
 ## Summary
 
