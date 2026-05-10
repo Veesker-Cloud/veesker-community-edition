@@ -59,6 +59,16 @@ export const MVIEW_REFRESH_PROD_REQUIRES_CONFIRMATION = -32043;
 // -32044 is reserved for Item #1B scheduler (jobs/programs — not yet assigned).
 export const QUEUE_DDL_UNSUPPORTED = -32045;
 
+// Item #1B T1B.1: Scheduler Jobs actions.
+// -32044 is reserved for scheduler (noted in QUEUE_DDL_UNSUPPORTED comment).
+// -32046: run job on prod requires confirmation.
+// -32047: reserved (enable prod-confirm removed by design decision).
+// -32048: disable job on prod requires confirmation.
+// -32049: identifier failed Oracle name validation in server-side defense-in-depth.
+export const JOB_RUN_PROD_REQUIRES_CONFIRMATION    = -32046;
+export const JOB_DISABLE_PROD_REQUIRES_CONFIRMATION = -32048;
+export const INVALID_IDENTIFIER                     = -32049;
+
 export class RpcCodedError extends Error {
   code: number;
   data?: Record<string, unknown>;

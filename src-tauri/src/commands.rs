@@ -2185,3 +2185,140 @@ pub async fn queue_ddl(
     let res = call_sidecar(&app, "queue.ddl", json!({ "owner": owner, "name": name })).await?;
     Ok(res)
 }
+
+// ── Item #1B T1B.1 — Scheduler Jobs ──────────────────────────────────────────
+
+#[tauri::command]
+pub async fn objects_list_scheduler_jobs(
+    app: AppHandle,
+    owner: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "objects.list.scheduler_jobs", json!({ "owner": owner })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_details(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.job.details", json!({ "owner": owner, "name": name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn legacy_job_details(
+    app: AppHandle,
+    job_id: i64,
+    owner: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.job.details.legacy", json!({ "jobId": job_id, "owner": owner })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_ddl(
+    app: AppHandle,
+    owner: String,
+    name: String,
+    legacy: Option<bool>,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.job.ddl", json!({ "owner": owner, "name": name, "legacy": legacy })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_program_details(
+    app: AppHandle,
+    owner: String,
+    program_name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.program.details", json!({ "owner": owner, "programName": program_name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_schedule_details(
+    app: AppHandle,
+    owner: String,
+    schedule_name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.schedule.details", json!({ "owner": owner, "scheduleName": schedule_name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_priv_check(
+    app: AppHandle,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.job.priv_check", json!({})).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_run(
+    app: AppHandle,
+    owner: String,
+    name: String,
+    confirmed_prod_run: Option<bool>,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "scheduler.job.run",
+        json!({ "owner": owner, "name": name, "confirmedProdRun": confirmed_prod_run }),
+    ).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_enable(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.job.enable", json!({ "owner": owner, "name": name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_disable(
+    app: AppHandle,
+    owner: String,
+    name: String,
+    confirmed_prod_disable: Option<bool>,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "scheduler.job.disable",
+        json!({ "owner": owner, "name": name, "confirmedProdDisable": confirmed_prod_disable }),
+    ).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn dbms_job_run(
+    app: AppHandle,
+    job_id: i64,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "dbms_job.run", json!({ "jobId": job_id })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn dbms_job_broken(
+    app: AppHandle,
+    job_id: i64,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "dbms_job.broken", json!({ "jobId": job_id })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn dbms_job_unbroken(
+    app: AppHandle,
+    job_id: i64,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "dbms_job.unbroken", json!({ "jobId": job_id })).await?;
+    Ok(res)
+}

@@ -18,7 +18,8 @@ export type ObjectKind =
   | "REST_MODULE"
   | "MATERIALIZED_VIEW" | "SYNONYM" | "DB_LINK"
   | "DIRECTORY"
-  | "QUEUE";
+  | "QUEUE"
+  | "SCHEDULER_JOB";
 export type ObjectRef = { name: string };
 export type ObjectRefWithStatus = { name: string; status: string };
 export type Column = {
@@ -889,3 +890,133 @@ export const queueDetailsGet = (owner: string, name: string) =>
 
 export const queueDdlGet = (owner: string, name: string) =>
   call<{ ddl: string }>("queue_ddl", { owner, name });
+
+// ── Item #1B T1B.1 — Scheduler Jobs ──────────────────────────────────────────
+
+export type SchedulerJobRow = {
+  owner: string;
+  name: string;
+  jobType: string | null;
+  state: string;
+  enabled: boolean;
+  runCount: number;
+  failureCount: number;
+  nextRunDate: string | null;
+  scheduleName: string | null;
+  programName: string | null;
+  comments: string | null;
+};
+
+export type LegacyJobRow = {
+  jobId: number;
+  owner: string;
+  jobAction: string | null;
+  nextDate: string | null;
+  broken: boolean;
+  failures: number;
+  interval: string | null;
+};
+
+export type SchedulerJobDetails = {
+  owner: string;
+  name: string;
+  jobType: string | null;
+  jobAction: string | null;
+  state: string;
+  enabled: boolean;
+  runCount: number;
+  failureCount: number;
+  maxFailures: number | null;
+  retryCount: number | null;
+  maxRuns: number | null;
+  lastRunDuration: string | null;
+  nextRunDate: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  scheduleName: string | null;
+  scheduleType: string | null;
+  repeatInterval: string | null;
+  programName: string | null;
+  programType: string | null;
+  jobClass: string | null;
+  restartable: boolean;
+  loggingLevel: string | null;
+  comments: string | null;
+};
+
+export type LegacyJobDetails = {
+  jobId: number;
+  owner: string;
+  jobAction: string | null;
+  nextDate: string | null;
+  nextSec: string | null;
+  broken: boolean;
+  failures: number;
+  interval: string | null;
+  lastDate: string | null;
+  lastSec: string | null;
+};
+
+export type SchedulerProgramDetails = {
+  owner: string;
+  programName: string;
+  programType: string;
+  programAction: string;
+  numberOfArguments: number;
+  enabled: boolean;
+  comments: string | null;
+};
+
+export type SchedulerScheduleDetails = {
+  owner: string;
+  scheduleName: string;
+  scheduleType: string;
+  startDate: string | null;
+  repeatInterval: string | null;
+  endDate: string | null;
+  comments: string | null;
+};
+
+export type SchedulerJobPrivs = {
+  hasCreateAnyJob: boolean;
+  hasManageScheduler: boolean;
+};
+
+export const schedulerJobsListGet = (owner: string) =>
+  call<{ jobs: SchedulerJobRow[]; legacyJobs: LegacyJobRow[] }>("objects_list_scheduler_jobs", { owner });
+
+export const schedulerJobDetailsGet = (owner: string, name: string) =>
+  call<{ job: SchedulerJobDetails | null }>("scheduler_job_details", { owner, name });
+
+export const legacyJobDetailsGet = (jobId: number, owner: string) =>
+  call<{ job: LegacyJobDetails | null }>("legacy_job_details", { jobId, owner });
+
+export const schedulerJobDdlGet = (owner: string, name: string, legacy?: boolean) =>
+  call<{ ddl: string }>("scheduler_job_ddl", { owner, name, legacy });
+
+export const schedulerProgramDetailsGet = (owner: string, programName: string) =>
+  call<{ program: SchedulerProgramDetails | null }>("scheduler_program_details", { owner, programName });
+
+export const schedulerScheduleDetailsGet = (owner: string, scheduleName: string) =>
+  call<{ schedule: SchedulerScheduleDetails | null }>("scheduler_schedule_details", { owner, scheduleName });
+
+export const schedulerJobPrivCheckGet = () =>
+  call<SchedulerJobPrivs>("scheduler_job_priv_check", {});
+
+export const schedulerJobRunRpc = (owner: string, name: string, confirmedProdRun?: boolean) =>
+  call<{ ok: true; durationMs: number }>("scheduler_job_run", { owner, name, confirmedProdRun });
+
+export const schedulerJobEnableRpc = (owner: string, name: string) =>
+  call<{ ok: true }>("scheduler_job_enable", { owner, name });
+
+export const schedulerJobDisableRpc = (owner: string, name: string, confirmedProdDisable?: boolean) =>
+  call<{ ok: true }>("scheduler_job_disable", { owner, name, confirmedProdDisable });
+
+export const dbmsJobRunRpc = (jobId: number) =>
+  call<{ ok: true }>("dbms_job_run", { jobId });
+
+export const dbmsJobBrokenRpc = (jobId: number) =>
+  call<{ ok: true }>("dbms_job_broken", { jobId });
+
+export const dbmsJobUnbrokenRpc = (jobId: number) =>
+  call<{ ok: true }>("dbms_job_unbroken", { jobId });
