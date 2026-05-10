@@ -54,6 +54,11 @@ export const TRUNCATE_PROD_BLOCKED   = -32040;
 // -32041 and -32042 are reserved for DDL/DCL modal (Item #1E, not yet implemented).
 export const MVIEW_REFRESH_PROD_REQUIRES_CONFIRMATION = -32043;
 
+// Item #1B T1B.3: DBMS_METADATA.GET_DDL('AQ_QUEUE') is not supported for this queue.
+// ORA-39200 or similar → caller shows informational message and manual reconstruction.
+// -32044 is reserved for Item #1B scheduler (jobs/programs — not yet assigned).
+export const QUEUE_DDL_UNSUPPORTED = -32045;
+
 export class RpcCodedError extends Error {
   code: number;
   data?: Record<string, unknown>;

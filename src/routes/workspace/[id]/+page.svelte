@@ -45,6 +45,7 @@
     ordsModuleExportSql,
     dbLinksListGet,
     directoriesListGet,
+    queuesListGet,
     SESSION_LOST,
     type WorkspaceInfo,
     type ObjectKind,
@@ -198,6 +199,7 @@
         SYNONYM: { kind: "idle" },
         DB_LINK: { kind: "idle" },
         DIRECTORY: { kind: "idle" },
+        QUEUE: { kind: "idle" },
         SEQUENCE: { kind: "idle" },
         PROCEDURE: { kind: "idle" },
         FUNCTION: { kind: "idle" },
@@ -243,6 +245,14 @@
           node.kinds[kind] = { kind: "err", message: res.error.message };
         }
       }
+    } else if (kind === "QUEUE") {
+      const res = await queuesListGet(node.name);
+      if (res.ok) {
+        node.kinds[kind] = { kind: "ok", value: res.data.queues.map((q) => ({ name: q.name })) };
+      } else {
+        if (res.error.code === SESSION_LOST) sessionLost = true;
+        node.kinds[kind] = { kind: "err", message: res.error.message };
+      }
     } else if (PLSQL_KINDS.includes(kind)) {
       const res = await objectsListPlsql(node.name, kind);
       if (res.ok) {
@@ -265,7 +275,7 @@
 
   function expandIfNeeded(node: SchemaNode): void {
     const kinds: ObjectKind[] = [
-      "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "SEQUENCE",
+      "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SEQUENCE",
       "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE",
       "REST_MODULE",
     ];
@@ -409,7 +419,7 @@
       details = { kind: "idle" };
       return;
     }
-    if (kind === "MATERIALIZED_VIEW" || kind === "SYNONYM" || kind === "DB_LINK" || kind === "DIRECTORY") {
+    if (kind === "MATERIALIZED_VIEW" || kind === "SYNONYM" || kind === "DB_LINK" || kind === "DIRECTORY" || kind === "QUEUE") {
       details = { kind: "idle" };
       return;
     }
@@ -475,7 +485,7 @@
     selectObject(prev.owner, prev.name, prev.kind);
   }
 
-  const NO_DETAIL_KINDS: ObjectKind[] = ["SEQUENCE", "REST_MODULE", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY"];
+  const NO_DETAIL_KINDS: ObjectKind[] = ["SEQUENCE", "REST_MODULE", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE"];
 
   function onRetryDetails(): void {
     if (selected && !NO_DETAIL_KINDS.includes(selected.kind) && !PLSQL_KINDS.includes(selected.kind)) {

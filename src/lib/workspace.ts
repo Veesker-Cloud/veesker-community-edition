@@ -17,7 +17,8 @@ export type ObjectKind =
   | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "TYPE"
   | "REST_MODULE"
   | "MATERIALIZED_VIEW" | "SYNONYM" | "DB_LINK"
-  | "DIRECTORY";
+  | "DIRECTORY"
+  | "QUEUE";
 export type ObjectRef = { name: string };
 export type ObjectRefWithStatus = { name: string; status: string };
 export type Column = {
@@ -865,3 +866,26 @@ export const directoriesListGet = () =>
 
 export const directoryDetailsGet = (name: string) =>
   call<{ detail: DirectoryDetail | null }>("directory_details", { name });
+
+// ── Item #1B — Queues (AQ) ────────────────────────────────────────────────────
+
+export type QueueRow = {
+  name: string;
+  owner: string;
+  queueTable: string;
+  queueType: string;
+  maxRetries: number | null;
+  retryDelay: number | null;
+  retention: number | null;
+  userComment: string | null;
+  payloadType: string | null;
+};
+
+export const queuesListGet = (owner: string) =>
+  call<{ queues: QueueRow[] }>("objects_list_queues", { owner });
+
+export const queueDetailsGet = (owner: string, name: string) =>
+  call<{ queue: QueueRow | null }>("queue_details", { owner, name });
+
+export const queueDdlGet = (owner: string, name: string) =>
+  call<{ ddl: string }>("queue_ddl", { owner, name });

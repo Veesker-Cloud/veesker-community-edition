@@ -52,6 +52,7 @@
     REST_MODULE: "REST Modules",
     MATERIALIZED_VIEW: "Materialized Views", SYNONYM: "Synonyms", DB_LINK: "DB Links",
     DIRECTORY: "Directories",
+    QUEUE: "Queues",
   };
 
   const KIND_SHORT: Record<ObjectKind, string> = {
@@ -61,6 +62,7 @@
     REST_MODULE: "API",
     MATERIALIZED_VIEW: "MV", SYNONYM: "Syn", DB_LINK: "DBL",
     DIRECTORY: "Dir",
+    QUEUE: "Q",
   };
 
   function toggleKind(kind: ObjectKind) {
@@ -71,7 +73,7 @@
   }
 
   const KIND_ORDER: ObjectKind[] = [
-    "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "SEQUENCE",
+    "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SEQUENCE",
     "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE",
     "REST_MODULE",
   ];
@@ -90,6 +92,7 @@
     SYNONYM:           "#7d5fa7",
     DB_LINK:           "#d4770a",
     DIRECTORY:         "hsl(45 90% 48%)",
+    QUEUE:             "hsl(260 55% 58%)",
   };
 
   function isSystemSchema(name: string): boolean {
