@@ -2060,3 +2060,80 @@ pub async fn command_script_read(app: AppHandle, path: String) -> Result<String,
     std::fs::read_to_string(&canon)
         .map_err(|e| format!("SP2-0310: unable to read file \"{path}\": {e}"))
 }
+
+// ── Item #1A — MViews, Synonyms, DB Links ─────────────────────────────────────
+
+#[tauri::command]
+pub async fn mview_details(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "mview.details",
+        json!({ "owner": owner, "name": name }),
+    )
+    .await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn mview_refresh(
+    app: AppHandle,
+    owner: String,
+    name: String,
+    method: String,
+    env: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "mview.refresh",
+        json!({ "owner": owner, "name": name, "method": method, "env": env }),
+    )
+    .await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn synonym_details(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "synonym.details",
+        json!({ "owner": owner, "name": name }),
+    )
+    .await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn objects_list_dblinks(
+    app: AppHandle,
+    owner: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "objects.list.dblinks",
+        json!({ "owner": owner }),
+    )
+    .await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn object_ddl_dblink(
+    app: AppHandle,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "object.ddl.dblink",
+        json!({ "name": name }),
+    )
+    .await?;
+    Ok(res)
+}

@@ -5,8 +5,8 @@
 -->
 
 <script lang="ts">
-  import type { TableDetails, TableRelated, ObjectKind, Loadable, DataFlowResult, VectorIndex, VectorSearchResult, EmbedConfig, EmbedProvider } from "$lib/workspace";
-  import { tableCountRows, vectorIndexList, vectorSearch, vectorIndexCreate, vectorIndexDrop, embedCountPending, embedBatch, aiKeyGet, aiKeySave } from "$lib/workspace";
+  import type { TableDetails, TableRelated, ObjectKind, Loadable, DataFlowResult, VectorIndex, VectorSearchResult, EmbedConfig, EmbedProvider, MViewDetails, SynonymDetails, DbLinkRow } from "$lib/workspace";
+  import { tableCountRows, vectorIndexList, vectorSearch, vectorIndexCreate, vectorIndexDrop, embedCountPending, embedBatch, aiKeyGet, aiKeySave, mviewDetailsGet, mviewRefreshRpc, synonymDetailsGet, dbLinkDdlGet } from "$lib/workspace";
   import { sqlEditor } from "$lib/stores/sql-editor.svelte";
   import DataFlow from "./DataFlow.svelte";
   import VectorScatter from "./VectorScatter.svelte";
@@ -64,7 +64,82 @@
   }
 
   // Reset live count + column search + empty-section toggles when object changes
-  $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); });
+  $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); mviewData = null; synonymData = null; dbLinkDdlText = null; dbLinkDdlLoading = false; });
+
+  // ── MView inspector state ──────────────────────────────────────────────────
+  let mviewData = $state<MViewDetails | null>(null);
+  let mviewLoading = $state(false);
+  let refreshMethod = $state<"FAST" | "COMPLETE" | "FORCE">("FORCE");
+  let confirmingRefresh = $state(false);
+  let refreshRunning = $state(false);
+  let refreshResult = $state<{ ok: boolean; durationMs?: number; error?: string } | null>(null);
+
+  $effect(() => {
+    if (selected?.kind === "MATERIALIZED_VIEW") {
+      void loadMviewDetails();
+    }
+  });
+
+  async function loadMviewDetails() {
+    if (!selected) return;
+    mviewLoading = true;
+    mviewData = null;
+    const res = await mviewDetailsGet(selected.owner, selected.name);
+    mviewLoading = false;
+    if (res.ok) mviewData = res.data.detail;
+  }
+
+  async function doRefresh() {
+    if (!selected) return;
+    refreshRunning = true;
+    const res = await mviewRefreshRpc(selected.owner, selected.name, refreshMethod, "");
+    refreshRunning = false;
+    confirmingRefresh = false;
+    if (res.ok) {
+      refreshResult = { ok: true, durationMs: res.data.durationMs };
+      void loadMviewDetails();
+    } else {
+      refreshResult = { ok: false, error: res.error.message };
+    }
+  }
+
+  // ── Synonym inspector state ────────────────────────────────────────────────
+  let synonymData = $state<SynonymDetails | null>(null);
+  let synonymLoading = $state(false);
+
+  $effect(() => {
+    if (selected?.kind === "SYNONYM") {
+      void loadSynonymDetails();
+    }
+  });
+
+  async function loadSynonymDetails() {
+    if (!selected) return;
+    synonymLoading = true;
+    synonymData = null;
+    const res = await synonymDetailsGet(selected.owner, selected.name);
+    synonymLoading = false;
+    if (res.ok) synonymData = res.data.detail;
+  }
+
+  // ── DB Link inspector state ────────────────────────────────────────────────
+  let dbLinkDdlText = $state<string | null>(null);
+  let dbLinkDdlLoading = $state(false);
+
+  $effect(() => {
+    if (selected?.kind === "DB_LINK") {
+      void loadDbLinkDdl();
+    }
+  });
+
+  async function loadDbLinkDdl() {
+    if (!selected) return;
+    dbLinkDdlLoading = true;
+    dbLinkDdlText = null;
+    const res = await dbLinkDdlGet(selected.name);
+    dbLinkDdlLoading = false;
+    if (res.ok) dbLinkDdlText = res.data.ddl;
+  }
 
   type Tab = "overview" | "columns" | "indexes" | "related" | "dataflow" | "vectors" | "details";
   let activeTab = $state<Tab>("columns");
@@ -1221,6 +1296,103 @@
             {/if}
           </div>
         </div>
+      {:else if activeTab === "details" && selected.kind === "MATERIALIZED_VIEW"}
+        <div class="detail-panel">
+          {#if mviewLoading}
+            <div class="loading-row"><span class="spinner"></span> Loading…</div>
+          {:else if mviewData}
+            <div class="detail-grid">
+              <span class="detail-key">Refresh Method</span>
+              <span class="detail-val">{mviewData.refreshMethod}</span>
+              <span class="detail-key">Refresh Mode</span>
+              <span class="detail-val">{mviewData.refreshMode}</span>
+              <span class="detail-key">Staleness</span>
+              <span class="detail-val">
+                <span class="staleness-badge" class:fresh={mviewData.staleness === "FRESH"} class:stale={mviewData.staleness === "STALE"} class:unusable={mviewData.staleness === "UNUSABLE"}>
+                  {mviewData.staleness}
+                </span>
+              </span>
+              <span class="detail-key">Last Refresh</span>
+              <span class="detail-val">{mviewData.lastRefreshDate ? new Date(mviewData.lastRefreshDate).toLocaleString() : "—"}</span>
+            </div>
+            {#if mviewData.query}
+              <div class="detail-section-label">Defining Query</div>
+              <pre class="detail-ddl">{mviewData.query}</pre>
+            {/if}
+            <div class="detail-refresh-row">
+              <span class="detail-key">Refresh As</span>
+              <select class="detail-select" bind:value={refreshMethod}>
+                <option value="FORCE">FORCE</option>
+                <option value="COMPLETE">COMPLETE</option>
+                <option value="FAST">FAST</option>
+              </select>
+              {#if !confirmingRefresh}
+                <button class="detail-action-btn" disabled={refreshRunning} onclick={() => confirmingRefresh = true}>
+                  Refresh MV
+                </button>
+              {:else}
+                <div class="refresh-confirm">
+                  <span class="confirm-text">Refresh {selected.owner}.{selected.name} using {refreshMethod}?</span>
+                  <button class="detail-cancel-btn" onclick={() => confirmingRefresh = false}>Cancel</button>
+                  <button class="detail-action-btn" disabled={refreshRunning} onclick={doRefresh}>
+                    {#if refreshRunning}<span class="spinner-xs"></span>{/if} Execute
+                  </button>
+                </div>
+              {/if}
+            </div>
+            {#if refreshResult}
+              {#if refreshResult.ok}
+                <div class="banner banner-ok">Refresh completed in {refreshResult.durationMs}ms.</div>
+              {:else}
+                <div class="banner banner-err">{refreshResult.error}</div>
+              {/if}
+            {/if}
+          {:else}
+            <div class="empty-section">No materialized view metadata found.</div>
+          {/if}
+        </div>
+
+      {:else if activeTab === "details" && selected.kind === "SYNONYM"}
+        <div class="detail-panel">
+          {#if synonymLoading}
+            <div class="loading-row"><span class="spinner"></span> Loading…</div>
+          {:else if synonymData}
+            <div class="detail-grid">
+              <span class="detail-key">Owner</span>
+              <span class="detail-val">{synonymData.owner}</span>
+              <span class="detail-key">Target</span>
+              <span class="detail-val">
+                {#if onNavigate}
+                  <button class="detail-link" onclick={() => onNavigate!(synonymData!.targetSchema, "TABLE", synonymData!.targetObject)}>
+                    {synonymData.targetSchema}.{synonymData.targetObject}
+                  </button>
+                {:else}
+                  {synonymData.targetSchema}.{synonymData.targetObject}
+                {/if}
+              </span>
+              <span class="detail-key">DB Link</span>
+              <span class="detail-val">{synonymData.targetDbLink ?? "—"}</span>
+            </div>
+            <div class="detail-section-label">DDL</div>
+            <pre class="detail-ddl">{synonymData.ddl}</pre>
+          {:else}
+            <div class="empty-section">No synonym metadata found.</div>
+          {/if}
+        </div>
+
+      {:else if activeTab === "details" && selected.kind === "DB_LINK"}
+        <div class="detail-panel">
+          {#if dbLinkDdlLoading}
+            <div class="loading-row"><span class="spinner"></span> Loading…</div>
+          {:else if dbLinkDdlText}
+            <div class="banner banner-warn">Password not available via Oracle metadata. Replace &lt;&lt;REPLACE_WITH_ACTUAL_PASSWORD&gt;&gt; before executing this DDL.</div>
+            <div class="detail-section-label">DDL (informational)</div>
+            <pre class="detail-ddl">{dbLinkDdlText}</pre>
+          {:else}
+            <div class="empty-section">No DB Link DDL available for this user.</div>
+          {/if}
+        </div>
+
       {/if}
     </div>
   {/if}
@@ -2476,4 +2648,128 @@
   :global([data-tier="cloud"]) .back-btn:hover { color: #2bb4ee; }
   :global([data-tier="cloud"]) .spinner { border-top-color: #2bb4ee; }
   :global([data-tier="cloud"]) .spinner-xs { border-top-color: #2bb4ee; }
+
+  /* ── Detail panel (MView / Synonym / DB Link) ───────────────────────────── */
+  .detail-panel {
+    padding: 0.8rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    overflow-y: auto;
+  }
+  .detail-grid {
+    display: grid;
+    grid-template-columns: 130px 1fr;
+    gap: 0.25rem 0.8rem;
+    align-items: baseline;
+  }
+  .detail-key {
+    color: var(--text-muted);
+    font-size: 10.5px;
+    font-family: "Space Grotesk", sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .detail-val {
+    color: var(--text-primary);
+    font-size: 12px;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .detail-section-label {
+    color: var(--text-muted);
+    font-size: 10px;
+    font-family: "Space Grotesk", sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 0.4rem;
+  }
+  .detail-ddl {
+    background: var(--bg-surface-alt);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.6rem 0.8rem;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px;
+    color: var(--text-primary);
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+  }
+  .staleness-badge {
+    font-size: 11px;
+    font-family: "JetBrains Mono", monospace;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--row-alt);
+    color: var(--text-muted);
+  }
+  .staleness-badge.fresh { background: rgba(39, 174, 96, 0.15); color: #27ae60; }
+  .staleness-badge.stale { background: rgba(243, 156, 18, 0.15); color: #f39c12; }
+  .staleness-badge.unusable { background: rgba(231, 76, 60, 0.15); color: #e74c3c; }
+  .detail-refresh-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .detail-select {
+    background: var(--bg-surface-alt);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-size: 11px;
+    padding: 2px 6px;
+    cursor: pointer;
+  }
+  .detail-action-btn {
+    background: rgba(179, 62, 31, 0.15);
+    border: 1px solid rgba(179, 62, 31, 0.4);
+    color: #f5a08a;
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .detail-action-btn:hover { background: rgba(179, 62, 31, 0.25); }
+  .detail-action-btn:disabled { opacity: 0.4; cursor: default; }
+  .detail-cancel-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .refresh-confirm {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+  .confirm-text {
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .detail-link {
+    background: transparent;
+    border: none;
+    color: #4a9eda;
+    font-size: 12px;
+    font-family: "JetBrains Mono", monospace;
+    cursor: pointer;
+    padding: 0;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .detail-link:hover { color: #6ab4ef; }
+  .banner-ok {
+    background: rgba(39, 174, 96, 0.12);
+    border: 1px solid rgba(39, 174, 96, 0.3);
+    color: #27ae60;
+    border-radius: 4px;
+    padding: 0.4rem 0.7rem;
+    font-size: 11px;
+  }
 </style>

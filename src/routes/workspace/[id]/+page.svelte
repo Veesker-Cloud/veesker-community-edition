@@ -43,6 +43,7 @@
     ordsApply,
     ordsEnableSchema,
     ordsModuleExportSql,
+    dbLinksListGet,
     SESSION_LOST,
     type WorkspaceInfo,
     type ObjectKind,
@@ -192,6 +193,9 @@
       kinds: {
         TABLE: { kind: "idle" },
         VIEW: { kind: "idle" },
+        MATERIALIZED_VIEW: { kind: "idle" },
+        SYNONYM: { kind: "idle" },
+        DB_LINK: { kind: "idle" },
         SEQUENCE: { kind: "idle" },
         PROCEDURE: { kind: "idle" },
         FUNCTION: { kind: "idle" },
@@ -210,6 +214,15 @@
       const res = await ordsModulesList(node.name);
       if (res.ok) {
         node.kinds[kind] = { kind: "ok", value: res.data.map((m) => ({ name: m.name })) };
+      } else {
+        if (res.error.code === SESSION_LOST) sessionLost = true;
+        node.kinds[kind] = { kind: "err", message: res.error.message };
+      }
+    } else if (kind === "DB_LINK") {
+      // DB Links are not in ALL_OBJECTS — use the dedicated sidecar RPC
+      const res = await dbLinksListGet(node.name);
+      if (res.ok) {
+        node.kinds[kind] = { kind: "ok", value: res.data.objects.map((l) => ({ name: l.name })) };
       } else {
         if (res.error.code === SESSION_LOST) sessionLost = true;
         node.kinds[kind] = { kind: "err", message: res.error.message };
@@ -236,7 +249,7 @@
 
   function expandIfNeeded(node: SchemaNode): void {
     const kinds: ObjectKind[] = [
-      "TABLE", "VIEW", "SEQUENCE",
+      "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "SEQUENCE",
       "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE",
       "REST_MODULE",
     ];
@@ -374,6 +387,10 @@
       details = { kind: "idle" };
       return;
     }
+    if (kind === "MATERIALIZED_VIEW" || kind === "SYNONYM" || kind === "DB_LINK") {
+      details = { kind: "idle" };
+      return;
+    }
     void loadDetails(owner, name, kind);
   }
 
@@ -436,8 +453,10 @@
     selectObject(prev.owner, prev.name, prev.kind);
   }
 
+  const NO_DETAIL_KINDS: ObjectKind[] = ["SEQUENCE", "REST_MODULE", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK"];
+
   function onRetryDetails(): void {
-    if (selected && selected.kind !== "SEQUENCE" && !PLSQL_KINDS.includes(selected.kind)) {
+    if (selected && !NO_DETAIL_KINDS.includes(selected.kind) && !PLSQL_KINDS.includes(selected.kind)) {
       void loadDetails(selected.owner, selected.name, selected.kind);
     }
   }

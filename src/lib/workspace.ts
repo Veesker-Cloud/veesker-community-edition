@@ -785,3 +785,56 @@ export type DmlPreviewResult = {
 
 export const dmlPreviewRpc = (sql: string) =>
   call<DmlPreviewResult>("dml_preview", { sql });
+
+// ── Item #1A — MViews, Synonyms, DB Links ─────────────────────────────────────
+
+export type MViewDetails = {
+  name: string;
+  owner: string;
+  refreshMethod: string;
+  refreshMode: string;
+  lastRefreshDate: string | null;
+  staleness: string;
+  query: string | null;
+};
+
+export const mviewDetailsGet = (owner: string, name: string) =>
+  call<{ detail: MViewDetails | null }>("mview_details", { owner, name });
+
+export const mviewRefreshRpc = (
+  owner: string,
+  name: string,
+  method: "FAST" | "COMPLETE" | "FORCE",
+  env: string,
+) => call<{ ok: true; durationMs: number }>("mview_refresh", { owner, name, method, env });
+
+export type SynonymDetails = {
+  name: string;
+  owner: string;
+  targetSchema: string;
+  targetObject: string;
+  targetDbLink: string | null;
+  ddl: string;
+};
+
+export const synonymDetailsGet = (owner: string, name: string) =>
+  call<{ detail: SynonymDetails | null }>("synonym_details", { owner, name });
+
+export type DbLinkRow = {
+  name: string;
+  owner: string;
+  username: string | null;
+  host: string | null;
+  created: string | null;
+};
+
+export const dbLinksListGet = (owner: string) =>
+  call<{ objects: DbLinkRow[] }>("objects_list_dblinks", { owner });
+
+export const dbLinkDdlGet = (name: string) =>
+  call<{ ddl: string }>("object_ddl_dblink", { name });
+
+// schemaKindCounts returns 'MATERIALIZED VIEW' (with space) for the key —
+// map it to the ObjectKind 'MATERIALIZED_VIEW' on the frontend side.
+// DB_LINK counts are not in ALL_OBJECTS; the count badge is omitted for now
+// and will appear only after the section is expanded.
