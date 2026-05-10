@@ -31,6 +31,7 @@
     onNavigateDataflow?: (owner: string, objectType: string, name: string) => void;
     onNavigate?: (owner: string, kind: string, name: string) => void;
     onViewDdl?: (owner: string, kind: string, name: string) => void;
+    connectionEnv?: string;
   };
   let {
     selected,
@@ -49,6 +50,7 @@
     onNavigateDataflow,
     onNavigate,
     onViewDdl,
+    connectionEnv = "",
   }: Props = $props();
 
   let liveCount = $state<number | null>(null);
@@ -92,7 +94,7 @@
   async function doRefresh() {
     if (!selected) return;
     refreshRunning = true;
-    const res = await mviewRefreshRpc(selected.owner, selected.name, refreshMethod, "");
+    const res = await mviewRefreshRpc(selected.owner, selected.name, refreshMethod, connectionEnv);
     refreshRunning = false;
     confirmingRefresh = false;
     if (res.ok) {
@@ -1330,6 +1332,14 @@
                 <button class="detail-action-btn" disabled={refreshRunning} onclick={() => confirmingRefresh = true}>
                   Refresh MV
                 </button>
+              {:else if connectionEnv === "prod"}
+                <div class="refresh-confirm prod-confirm">
+                  <span class="confirm-text warn">Refresh {selected.owner}.{selected.name} in PROD using {refreshMethod}. May take minutes and cause locking/contention.</span>
+                  <button class="detail-cancel-btn" onclick={() => confirmingRefresh = false}>Cancel</button>
+                  <button class="detail-action-btn prod-confirm-btn" disabled={refreshRunning} onclick={doRefresh}>
+                    {#if refreshRunning}<span class="spinner-xs"></span>{/if} Yes, refresh in PROD
+                  </button>
+                </div>
               {:else}
                 <div class="refresh-confirm">
                   <span class="confirm-text">Refresh {selected.owner}.{selected.name} using {refreshMethod}?</span>
@@ -2752,6 +2762,21 @@
     font-size: 11px;
     color: var(--text-secondary);
   }
+  .confirm-text.warn {
+    color: #f39c12;
+  }
+  .prod-confirm {
+    background: rgba(231, 76, 60, 0.08);
+    border: 1px solid rgba(231, 76, 60, 0.25);
+    border-radius: 4px;
+    padding: 0.4rem 0.6rem;
+  }
+  .prod-confirm-btn {
+    background: rgba(231, 76, 60, 0.2);
+    border-color: rgba(231, 76, 60, 0.5);
+    color: #e74c3c;
+  }
+  .prod-confirm-btn:hover { background: rgba(231, 76, 60, 0.3); }
   .detail-link {
     background: transparent;
     border: none;

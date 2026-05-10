@@ -261,7 +261,13 @@
     if (!node.kindCounts) {
       void schemaKindCounts(node.name).then((res) => {
         if (res.ok) {
-          node.kindCounts = res.data.counts;
+          // ALL_OBJECTS uses 'MATERIALIZED VIEW' (with space); map to the ObjectKind key
+          const counts = { ...res.data.counts };
+          if ("MATERIALIZED VIEW" in counts) {
+            counts["MATERIALIZED_VIEW"] = counts["MATERIALIZED VIEW"];
+            delete counts["MATERIALIZED VIEW"];
+          }
+          node.kindCounts = counts;
           schemas = [...schemas];
         }
       });
@@ -889,6 +895,7 @@
               canGoBack={navHistory.length > 0}
               backLabel={navHistory.length > 0 ? navHistory[navHistory.length - 1].name : undefined}
               onBack={onBack}
+              connectionEnv={meta?.env ?? ""}
               onNavigateDataflow={(owner, objectType, name) => onSelect(owner, name, objectType as ObjectKind)}
               onNavigate={(owner, kind, name) => onSelect(owner, name, kind as ObjectKind)}
               onViewDdl={async (owner, kind, name) => {
