@@ -53,6 +53,7 @@
     MATERIALIZED_VIEW: "Materialized Views", SYNONYM: "Synonyms", DB_LINK: "DB Links",
     DIRECTORY: "Directories",
     QUEUE: "Queues",
+    SCHEDULER_JOB: "Jobs",
   };
 
   const KIND_SHORT: Record<ObjectKind, string> = {
@@ -63,6 +64,7 @@
     MATERIALIZED_VIEW: "MV", SYNONYM: "Syn", DB_LINK: "DBL",
     DIRECTORY: "Dir",
     QUEUE: "Q",
+    SCHEDULER_JOB: "JOB",
   };
 
   function toggleKind(kind: ObjectKind) {
@@ -73,7 +75,7 @@
   }
 
   const KIND_ORDER: ObjectKind[] = [
-    "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SEQUENCE",
+    "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB", "SEQUENCE",
     "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE",
     "REST_MODULE",
   ];
@@ -93,6 +95,7 @@
     DB_LINK:           "#d4770a",
     DIRECTORY:         "hsl(45 90% 48%)",
     QUEUE:             "hsl(260 55% 58%)",
+    SCHEDULER_JOB:     "hsl(200 70% 45%)",
   };
 
   function isSystemSchema(name: string): boolean {
@@ -275,6 +278,9 @@
                           {/if}
                           {#if o.status && o.status !== "VALID"}
                             <span class="invalid-dot" title="{o.status}" aria-label="invalid"></span>
+                          {/if}
+                          {#if kind === "SCHEDULER_JOB" && /^LEGACY_\d+$/.test(o.name)}
+                            <span class="legacy-badge" title="DBMS_JOB legacy">Legacy</span>
                           {/if}
                         </button>
                         {#if (kind === "PROCEDURE" || kind === "FUNCTION") && onExecuteProc}
@@ -610,6 +616,17 @@
     width: 5px; height: 5px;
     border-radius: 50%;
     background: #e74c3c;
+    flex-shrink: 0;
+  }
+  .legacy-badge {
+    font-size: 8px;
+    font-weight: 600;
+    color: hsl(35 80% 55%);
+    background: hsl(35 80% 55% / 0.12);
+    border: 1px solid hsl(35 80% 55% / 0.3);
+    border-radius: 3px;
+    padding: 0 3px;
+    line-height: 1.4;
     flex-shrink: 0;
   }
   .vector-dot {

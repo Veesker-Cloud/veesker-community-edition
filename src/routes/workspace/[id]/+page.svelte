@@ -46,6 +46,7 @@
     dbLinksListGet,
     directoriesListGet,
     queuesListGet,
+    schedulerJobsListGet,
     SESSION_LOST,
     type WorkspaceInfo,
     type ObjectKind,
@@ -200,6 +201,7 @@
         DB_LINK: { kind: "idle" },
         DIRECTORY: { kind: "idle" },
         QUEUE: { kind: "idle" },
+        SCHEDULER_JOB: { kind: "idle" },
         SEQUENCE: { kind: "idle" },
         PROCEDURE: { kind: "idle" },
         FUNCTION: { kind: "idle" },
@@ -253,6 +255,16 @@
         if (res.error.code === SESSION_LOST) sessionLost = true;
         node.kinds[kind] = { kind: "err", message: res.error.message };
       }
+    } else if (kind === "SCHEDULER_JOB") {
+      const res = await schedulerJobsListGet(node.name);
+      if (res.ok) {
+        const schedulerItems = res.data.jobs.map((j) => ({ name: j.name, status: j.state }));
+        const legacyItems = res.data.legacyJobs.map((j) => ({ name: `LEGACY_${j.jobId}` }));
+        node.kinds[kind] = { kind: "ok", value: [...schedulerItems, ...legacyItems] };
+      } else {
+        if (res.error.code === SESSION_LOST) sessionLost = true;
+        node.kinds[kind] = { kind: "err", message: res.error.message };
+      }
     } else if (PLSQL_KINDS.includes(kind)) {
       const res = await objectsListPlsql(node.name, kind);
       if (res.ok) {
@@ -275,7 +287,7 @@
 
   function expandIfNeeded(node: SchemaNode): void {
     const kinds: ObjectKind[] = [
-      "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SEQUENCE",
+      "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB", "SEQUENCE",
       "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE",
       "REST_MODULE",
     ];
@@ -419,7 +431,7 @@
       details = { kind: "idle" };
       return;
     }
-    if (kind === "MATERIALIZED_VIEW" || kind === "SYNONYM" || kind === "DB_LINK" || kind === "DIRECTORY" || kind === "QUEUE") {
+    if (kind === "MATERIALIZED_VIEW" || kind === "SYNONYM" || kind === "DB_LINK" || kind === "DIRECTORY" || kind === "QUEUE" || kind === "SCHEDULER_JOB") {
       details = { kind: "idle" };
       return;
     }
@@ -485,7 +497,7 @@
     selectObject(prev.owner, prev.name, prev.kind);
   }
 
-  const NO_DETAIL_KINDS: ObjectKind[] = ["SEQUENCE", "REST_MODULE", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE"];
+  const NO_DETAIL_KINDS: ObjectKind[] = ["SEQUENCE", "REST_MODULE", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB"];
 
   function onRetryDetails(): void {
     if (selected && !NO_DETAIL_KINDS.includes(selected.kind) && !PLSQL_KINDS.includes(selected.kind)) {

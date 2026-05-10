@@ -507,6 +507,9 @@ import {
   SESSION_SELF_TRANSIENT,
   SESSION_SELF_NOT_FOUND,
   MVIEW_REFRESH_PROD_REQUIRES_CONFIRMATION,
+  JOB_RUN_PROD_REQUIRES_CONFIRMATION,
+  JOB_DISABLE_PROD_REQUIRES_CONFIRMATION,
+  INVALID_IDENTIFIER,
 } from "./errors";
 import { classifySql, isReadOnlySafe, isUnsafeBulkDml, isMergeSql, isTruncateSql, extractTableFromSql } from "./sql-kind";
 
@@ -3319,4 +3322,590 @@ export async function querySessionSelf(): Promise<SessionSelfRow> {
   }
 
   return out;
+}
+
+// ── Item #1B T1B.1 — Scheduler Jobs ──────────────────────────────────────────
+
+export type SchedulerJobRow = {
+  owner: string;
+  name: string;
+  jobType: string | null;
+  state: string;
+  enabled: boolean;
+  runCount: number;
+  failureCount: number;
+  nextRunDate: string | null;
+  scheduleName: string | null;
+  programName: string | null;
+  comments: string | null;
+};
+
+export type LegacyJobRow = {
+  jobId: number;
+  owner: string;
+  jobAction: string | null;
+  nextDate: string | null;
+  broken: boolean;
+  failures: number;
+  interval: string | null;
+};
+
+export type SchedulerJobDetails = {
+  owner: string;
+  name: string;
+  jobType: string | null;
+  jobAction: string | null;
+  state: string;
+  enabled: boolean;
+  runCount: number;
+  failureCount: number;
+  maxFailures: number | null;
+  retryCount: number | null;
+  maxRuns: number | null;
+  lastRunDuration: string | null;
+  nextRunDate: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  scheduleName: string | null;
+  scheduleType: string | null;
+  repeatInterval: string | null;
+  programName: string | null;
+  programType: string | null;
+  jobClass: string | null;
+  restartable: boolean;
+  loggingLevel: string | null;
+  comments: string | null;
+};
+
+export type LegacyJobDetails = {
+  jobId: number;
+  owner: string;
+  jobAction: string | null;
+  nextDate: string | null;
+  nextSec: string | null;
+  broken: boolean;
+  failures: number;
+  interval: string | null;
+  lastDate: string | null;
+  lastSec: string | null;
+};
+
+export type SchedulerProgramDetails = {
+  owner: string;
+  programName: string;
+  programType: string;
+  programAction: string;
+  numberOfArguments: number;
+  enabled: boolean;
+  comments: string | null;
+};
+
+export type SchedulerScheduleDetails = {
+  owner: string;
+  scheduleName: string;
+  scheduleType: string;
+  startDate: string | null;
+  repeatInterval: string | null;
+  endDate: string | null;
+  comments: string | null;
+};
+
+export type SchedulerJobPrivs = {
+  hasCreateAnyJob: boolean;
+  hasManageScheduler: boolean;
+};
+
+export async function schedulerJobsList(p: {
+  owner: string;
+}): Promise<{ jobs: SchedulerJobRow[]; legacyJobs: LegacyJobRow[] }> {
+  return withActiveSession(async (conn) => {
+    const [schedulerResult, legacyResult] = await Promise.allSettled([
+      (async (): Promise<SchedulerJobRow[]> => {
+        let res: { rows: Record<string, unknown>[] };
+        try {
+          res = await conn.execute<Record<string, unknown>>(
+            `SELECT j.OWNER, j.JOB_NAME, j.JOB_TYPE, j.STATE,
+                    j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
+                    j.NEXT_RUN_DATE, j.SCHEDULE_NAME, j.PROGRAM_NAME,
+                    j.COMMENTS
+             FROM DBA_SCHEDULER_JOBS j
+             WHERE j.OWNER = :owner
+             ORDER BY j.JOB_NAME
+             FETCH FIRST 500 ROWS ONLY`,
+            { owner: p.owner },
+          );
+        } catch (err: unknown) {
+          const oraNum = (err as { errorNum?: number }).errorNum;
+          if (oraNum === 942) {
+            log.info("[schema] DBA_SCHEDULER_JOBS not accessible (ORA-00942), trying ALL_SCHEDULER_JOBS");
+            res = await conn.execute<Record<string, unknown>>(
+              `SELECT j.OWNER, j.JOB_NAME, j.JOB_TYPE, j.STATE,
+                      j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
+                      j.NEXT_RUN_DATE, j.SCHEDULE_NAME, j.PROGRAM_NAME,
+                      j.COMMENTS
+               FROM ALL_SCHEDULER_JOBS j
+               WHERE j.OWNER = :owner
+               ORDER BY j.JOB_NAME
+               FETCH FIRST 500 ROWS ONLY`,
+              { owner: p.owner },
+            );
+          } else {
+            throw err;
+          }
+        }
+        return (res.rows ?? []).map((r) => ({
+          owner: String(r.OWNER),
+          name: String(r.JOB_NAME),
+          jobType: r.JOB_TYPE != null ? String(r.JOB_TYPE) : null,
+          state: String(r.STATE),
+          enabled: r.ENABLED === "TRUE" || r.ENABLED === true,
+          runCount: Number(r.RUN_COUNT ?? 0),
+          failureCount: Number(r.FAILURE_COUNT ?? 0),
+          nextRunDate: r.NEXT_RUN_DATE != null ? String(r.NEXT_RUN_DATE) : null,
+          scheduleName: r.SCHEDULE_NAME != null ? String(r.SCHEDULE_NAME) : null,
+          programName: r.PROGRAM_NAME != null ? String(r.PROGRAM_NAME) : null,
+          comments: r.COMMENTS != null ? String(r.COMMENTS) : null,
+        }));
+      })(),
+      (async (): Promise<LegacyJobRow[]> => {
+        let res: { rows: Record<string, unknown>[] };
+        try {
+          res = await conn.execute<Record<string, unknown>>(
+            `SELECT JOB, SCHEMA_USER AS OWNER, WHAT AS JOB_ACTION,
+                    NEXT_DATE, BROKEN, FAILURES, INTERVAL
+             FROM DBA_JOBS
+             WHERE SCHEMA_USER = :owner
+             ORDER BY JOB
+             FETCH FIRST 500 ROWS ONLY`,
+            { owner: p.owner },
+          );
+        } catch (err: unknown) {
+          const oraNum = (err as { errorNum?: number }).errorNum;
+          if (oraNum === 942) {
+            log.info("[schema] DBA_JOBS not accessible (ORA-00942), trying USER_JOBS");
+            try {
+              res = await conn.execute<Record<string, unknown>>(
+                `SELECT JOB, :owner AS OWNER, WHAT AS JOB_ACTION,
+                        NEXT_DATE, BROKEN, FAILURES, INTERVAL
+                 FROM USER_JOBS
+                 ORDER BY JOB
+                 FETCH FIRST 500 ROWS ONLY`,
+                { owner: p.owner },
+              );
+            } catch {
+              log.info("[schema] USER_JOBS also not accessible, legacy jobs silently empty");
+              return [];
+            }
+          } else {
+            throw err;
+          }
+        }
+        return (res.rows ?? []).map((r) => ({
+          jobId: Number(r.JOB),
+          owner: String(r.OWNER),
+          jobAction: r.JOB_ACTION != null ? String(r.JOB_ACTION) : null,
+          nextDate: r.NEXT_DATE != null ? String(r.NEXT_DATE) : null,
+          broken: r.BROKEN === "Y" || r.BROKEN === true,
+          failures: Number(r.FAILURES ?? 0),
+          interval: r.INTERVAL != null ? String(r.INTERVAL) : null,
+        }));
+      })(),
+    ]);
+
+    const jobs = schedulerResult.status === "fulfilled" ? schedulerResult.value : [];
+    const legacyJobs = legacyResult.status === "fulfilled" ? legacyResult.value : [];
+
+    if (schedulerResult.status === "rejected") {
+      log.warn(`[schema] schedulerJobsList scheduler query failed: ${schedulerResult.reason}`);
+    }
+    if (legacyResult.status === "rejected") {
+      log.warn(`[schema] schedulerJobsList legacy query failed: ${legacyResult.reason}`);
+    }
+
+    return { jobs, legacyJobs };
+  });
+}
+
+export async function schedulerJobDetails(p: {
+  owner: string;
+  name: string;
+}): Promise<{ job: SchedulerJobDetails | null }> {
+  return withActiveSession(async (conn) => {
+    let res: { rows: Record<string, unknown>[] };
+    try {
+      res = await conn.execute<Record<string, unknown>>(
+        `SELECT j.OWNER, j.JOB_NAME, j.JOB_TYPE, j.JOB_ACTION,
+                j.STATE, j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
+                j.MAX_FAILURES, j.RETRY_COUNT, j.MAX_RUNS,
+                j.LAST_RUN_DURATION, j.NEXT_RUN_DATE,
+                j.START_DATE, j.END_DATE,
+                j.SCHEDULE_NAME, j.SCHEDULE_TYPE, j.REPEAT_INTERVAL,
+                j.PROGRAM_NAME, j.PROGRAM_TYPE,
+                j.JOB_CLASS, j.RESTARTABLE, j.LOGGING_LEVEL, j.COMMENTS
+         FROM DBA_SCHEDULER_JOBS j
+         WHERE j.OWNER = :owner AND j.JOB_NAME = :name`,
+        { owner: p.owner, name: p.name },
+      );
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942) {
+        res = await conn.execute<Record<string, unknown>>(
+          `SELECT j.OWNER, j.JOB_NAME, j.JOB_TYPE, j.JOB_ACTION,
+                  j.STATE, j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
+                  j.MAX_FAILURES, j.RETRY_COUNT, j.MAX_RUNS,
+                  j.LAST_RUN_DURATION, j.NEXT_RUN_DATE,
+                  j.START_DATE, j.END_DATE,
+                  j.SCHEDULE_NAME, j.SCHEDULE_TYPE, j.REPEAT_INTERVAL,
+                  j.PROGRAM_NAME, j.PROGRAM_TYPE,
+                  j.JOB_CLASS, j.RESTARTABLE, j.LOGGING_LEVEL, j.COMMENTS
+           FROM ALL_SCHEDULER_JOBS j
+           WHERE j.OWNER = :owner AND j.JOB_NAME = :name`,
+          { owner: p.owner, name: p.name },
+        );
+      } else {
+        throw new RpcCodedError(ORACLE_ERR, (err as Error)?.message ?? "Oracle error querying scheduler job details");
+      }
+    }
+
+    const r = res.rows?.[0];
+    if (!r) return { job: null };
+
+    return {
+      job: {
+        owner: String(r.OWNER),
+        name: String(r.JOB_NAME),
+        jobType: r.JOB_TYPE != null ? String(r.JOB_TYPE) : null,
+        jobAction: r.JOB_ACTION != null ? String(r.JOB_ACTION) : null,
+        state: String(r.STATE),
+        enabled: r.ENABLED === "TRUE" || r.ENABLED === true,
+        runCount: Number(r.RUN_COUNT ?? 0),
+        failureCount: Number(r.FAILURE_COUNT ?? 0),
+        maxFailures: r.MAX_FAILURES != null ? Number(r.MAX_FAILURES) : null,
+        retryCount: r.RETRY_COUNT != null ? Number(r.RETRY_COUNT) : null,
+        maxRuns: r.MAX_RUNS != null ? Number(r.MAX_RUNS) : null,
+        lastRunDuration: r.LAST_RUN_DURATION != null ? String(r.LAST_RUN_DURATION) : null,
+        nextRunDate: r.NEXT_RUN_DATE != null ? String(r.NEXT_RUN_DATE) : null,
+        startDate: r.START_DATE != null ? String(r.START_DATE) : null,
+        endDate: r.END_DATE != null ? String(r.END_DATE) : null,
+        scheduleName: r.SCHEDULE_NAME != null ? String(r.SCHEDULE_NAME) : null,
+        scheduleType: r.SCHEDULE_TYPE != null ? String(r.SCHEDULE_TYPE) : null,
+        repeatInterval: r.REPEAT_INTERVAL != null ? String(r.REPEAT_INTERVAL) : null,
+        programName: r.PROGRAM_NAME != null ? String(r.PROGRAM_NAME) : null,
+        programType: r.PROGRAM_TYPE != null ? String(r.PROGRAM_TYPE) : null,
+        jobClass: r.JOB_CLASS != null ? String(r.JOB_CLASS) : null,
+        restartable: r.RESTARTABLE === "TRUE" || r.RESTARTABLE === true,
+        loggingLevel: r.LOGGING_LEVEL != null ? String(r.LOGGING_LEVEL) : null,
+        comments: r.COMMENTS != null ? String(r.COMMENTS) : null,
+      },
+    };
+  });
+}
+
+export async function legacyJobDetails(p: {
+  jobId: number;
+  owner: string;
+}): Promise<{ job: LegacyJobDetails | null }> {
+  return withActiveSession(async (conn) => {
+    let res: { rows: Record<string, unknown>[] };
+    try {
+      res = await conn.execute<Record<string, unknown>>(
+        `SELECT JOB, SCHEMA_USER AS OWNER, WHAT AS JOB_ACTION,
+                NEXT_DATE, NEXT_SEC, BROKEN, FAILURES,
+                INTERVAL, LAST_DATE, LAST_SEC
+         FROM DBA_JOBS
+         WHERE JOB = :job_id`,
+        { job_id: p.jobId },
+      );
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942) {
+        res = await conn.execute<Record<string, unknown>>(
+          `SELECT JOB, :owner AS OWNER, WHAT AS JOB_ACTION,
+                  NEXT_DATE, NEXT_SEC, BROKEN, FAILURES,
+                  INTERVAL, LAST_DATE, LAST_SEC
+           FROM USER_JOBS
+           WHERE JOB = :job_id`,
+          { owner: p.owner, job_id: p.jobId },
+        );
+      } else {
+        throw new RpcCodedError(ORACLE_ERR, (err as Error)?.message ?? "Oracle error querying legacy job details");
+      }
+    }
+
+    const r = res.rows?.[0];
+    if (!r) return { job: null };
+
+    return {
+      job: {
+        jobId: Number(r.JOB),
+        owner: String(r.OWNER),
+        jobAction: r.JOB_ACTION != null ? String(r.JOB_ACTION) : null,
+        nextDate: r.NEXT_DATE != null ? String(r.NEXT_DATE) : null,
+        nextSec: r.NEXT_SEC != null ? String(r.NEXT_SEC) : null,
+        broken: r.BROKEN === "Y" || r.BROKEN === true,
+        failures: Number(r.FAILURES ?? 0),
+        interval: r.INTERVAL != null ? String(r.INTERVAL) : null,
+        lastDate: r.LAST_DATE != null ? String(r.LAST_DATE) : null,
+        lastSec: r.LAST_SEC != null ? String(r.LAST_SEC) : null,
+      },
+    };
+  });
+}
+
+export async function schedulerJobDdl(p: {
+  owner: string;
+  name: string;
+  legacy?: boolean;
+}): Promise<{ ddl: string }> {
+  if (p.legacy) {
+    return {
+      ddl: `-- Legacy DBMS_JOB — DDL not available.\n-- DBMS_JOB jobs are not supported by DBMS_METADATA.\n-- Job ID: ${p.name.replace(/^LEGACY_/, "")}`,
+    };
+  }
+
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<{ DDL: string }>(
+        `SELECT DBMS_METADATA.GET_DDL('PROCOBJ', UPPER(:name), UPPER(:owner)) AS ddl FROM dual`,
+        { name: p.name, owner: p.owner },
+      );
+      const ddl = res.rows?.[0]?.DDL;
+      if (!ddl) {
+        return { ddl: `-- ${p.owner}.${p.name}: DDL not available (DBMS_METADATA returned empty).` };
+      }
+      return { ddl };
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 31603 || oraNum === 39200 || oraNum === 31604) {
+        return {
+          ddl: `-- ${p.owner}.${p.name}: DDL not available via DBMS_METADATA (ORA-${oraNum}).\n-- The job may not be supported by DBMS_METADATA on this Oracle version.`,
+        };
+      }
+      throw new RpcCodedError(ORACLE_ERR, (err as Error)?.message ?? "Oracle error fetching job DDL");
+    }
+  });
+}
+
+export async function schedulerProgramDetails(p: {
+  owner: string;
+  programName: string;
+}): Promise<{ program: SchedulerProgramDetails | null }> {
+  return withActiveSession(async (conn) => {
+    let res: { rows: Record<string, unknown>[] };
+    try {
+      res = await conn.execute<Record<string, unknown>>(
+        `SELECT OWNER, PROGRAM_NAME, PROGRAM_TYPE, PROGRAM_ACTION,
+                NUMBER_OF_ARGUMENTS, ENABLED, COMMENTS
+         FROM DBA_SCHEDULER_PROGRAMS
+         WHERE OWNER = :owner AND PROGRAM_NAME = :program_name`,
+        { owner: p.owner, program_name: p.programName },
+      );
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942) {
+        try {
+          res = await conn.execute<Record<string, unknown>>(
+            `SELECT OWNER, PROGRAM_NAME, PROGRAM_TYPE, PROGRAM_ACTION,
+                    NUMBER_OF_ARGUMENTS, ENABLED, COMMENTS
+             FROM ALL_SCHEDULER_PROGRAMS
+             WHERE OWNER = :owner AND PROGRAM_NAME = :program_name`,
+            { owner: p.owner, program_name: p.programName },
+          );
+        } catch {
+          return { program: null };
+        }
+      } else {
+        throw new RpcCodedError(ORACLE_ERR, (err as Error)?.message ?? "Oracle error querying scheduler program");
+      }
+    }
+
+    const r = res.rows?.[0];
+    if (!r) return { program: null };
+
+    return {
+      program: {
+        owner: String(r.OWNER),
+        programName: String(r.PROGRAM_NAME),
+        programType: String(r.PROGRAM_TYPE),
+        programAction: String(r.PROGRAM_ACTION),
+        numberOfArguments: Number(r.NUMBER_OF_ARGUMENTS ?? 0),
+        enabled: r.ENABLED === "TRUE" || r.ENABLED === true,
+        comments: r.COMMENTS != null ? String(r.COMMENTS) : null,
+      },
+    };
+  });
+}
+
+export async function schedulerScheduleDetails(p: {
+  owner: string;
+  scheduleName: string;
+}): Promise<{ schedule: SchedulerScheduleDetails | null }> {
+  return withActiveSession(async (conn) => {
+    let res: { rows: Record<string, unknown>[] };
+    try {
+      res = await conn.execute<Record<string, unknown>>(
+        `SELECT OWNER, SCHEDULE_NAME, SCHEDULE_TYPE,
+                START_DATE, REPEAT_INTERVAL, END_DATE, COMMENTS
+         FROM DBA_SCHEDULER_SCHEDULES
+         WHERE OWNER = :owner AND SCHEDULE_NAME = :schedule_name`,
+        { owner: p.owner, schedule_name: p.scheduleName },
+      );
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942) {
+        try {
+          res = await conn.execute<Record<string, unknown>>(
+            `SELECT OWNER, SCHEDULE_NAME, SCHEDULE_TYPE,
+                    START_DATE, REPEAT_INTERVAL, END_DATE, COMMENTS
+             FROM ALL_SCHEDULER_SCHEDULES
+             WHERE OWNER = :owner AND SCHEDULE_NAME = :schedule_name`,
+            { owner: p.owner, schedule_name: p.scheduleName },
+          );
+        } catch {
+          return { schedule: null };
+        }
+      } else {
+        throw new RpcCodedError(ORACLE_ERR, (err as Error)?.message ?? "Oracle error querying scheduler schedule");
+      }
+    }
+
+    const r = res.rows?.[0];
+    if (!r) return { schedule: null };
+
+    return {
+      schedule: {
+        owner: String(r.OWNER),
+        scheduleName: String(r.SCHEDULE_NAME),
+        scheduleType: String(r.SCHEDULE_TYPE),
+        startDate: r.START_DATE != null ? String(r.START_DATE) : null,
+        repeatInterval: r.REPEAT_INTERVAL != null ? String(r.REPEAT_INTERVAL) : null,
+        endDate: r.END_DATE != null ? String(r.END_DATE) : null,
+        comments: r.COMMENTS != null ? String(r.COMMENTS) : null,
+      },
+    };
+  });
+}
+
+export async function schedulerJobPrivCheck(): Promise<SchedulerJobPrivs> {
+  return withActiveSession(async (conn) => {
+    const res = await conn.execute<{ HAS_CREATE_ANY_JOB: number; HAS_MANAGE_SCHEDULER: number }>(
+      `SELECT
+         MAX(CASE WHEN PRIVILEGE = 'CREATE ANY JOB'   THEN 1 ELSE 0 END) AS has_create_any_job,
+         MAX(CASE WHEN PRIVILEGE = 'MANAGE SCHEDULER' THEN 1 ELSE 0 END) AS has_manage_scheduler
+       FROM SESSION_PRIVS
+       WHERE PRIVILEGE IN ('CREATE ANY JOB', 'MANAGE SCHEDULER')`,
+    );
+    const r = res.rows?.[0];
+    return {
+      hasCreateAnyJob: Number(r?.HAS_CREATE_ANY_JOB ?? 0) === 1,
+      hasManageScheduler: Number(r?.HAS_MANAGE_SCHEDULER ?? 0) === 1,
+    };
+  });
+}
+
+function validateOracleIdentifier(value: string, label: string): void {
+  if (!/^[A-Z][A-Z0-9_$#]{0,127}$/.test(value)) {
+    throw new RpcCodedError(INVALID_IDENTIFIER, `Invalid ${label}: ${JSON.stringify(value)}`);
+  }
+}
+
+export async function schedulerJobRun(p: {
+  owner: string;
+  name: string;
+  confirmedProdRun?: boolean;
+}): Promise<{ ok: true; durationMs: number }> {
+  validateOracleIdentifier(p.owner, "owner");
+  validateOracleIdentifier(p.name, "job name");
+
+  return withActiveSession(async (conn) => {
+    const safety = getSessionSafety();
+    const envReal = (safety.env as string | undefined) ?? "unknown";
+
+    if (envReal === "prod" && !p.confirmedProdRun) {
+      throw new RpcCodedError(
+        JOB_RUN_PROD_REQUIRES_CONFIRMATION,
+        `scheduler.job.run on prod requires confirmedProdRun=true. ` +
+        `The UI must display the PROD confirmation dialog before calling this RPC.`,
+      );
+    }
+
+    const start = Date.now();
+    await conn.execute(
+      `BEGIN DBMS_SCHEDULER.RUN_JOB(:owner || '.' || :name, use_current_session => FALSE); END;`,
+      { owner: p.owner, name: p.name },
+    );
+    const durationMs = Date.now() - start;
+    log.info(`[scheduler] run_job owner=${p.owner} name=${p.name} env=${envReal} durationMs=${durationMs}`);
+    return { ok: true, durationMs };
+  });
+}
+
+export async function schedulerJobEnable(p: {
+  owner: string;
+  name: string;
+}): Promise<{ ok: true }> {
+  validateOracleIdentifier(p.owner, "owner");
+  validateOracleIdentifier(p.name, "job name");
+
+  return withActiveSession(async (conn) => {
+    await conn.execute(
+      `BEGIN DBMS_SCHEDULER.ENABLE(:owner || '.' || :name); END;`,
+      { owner: p.owner, name: p.name },
+    );
+    log.info(`[scheduler] enable owner=${p.owner} name=${p.name}`);
+    return { ok: true };
+  });
+}
+
+export async function schedulerJobDisable(p: {
+  owner: string;
+  name: string;
+  confirmedProdDisable?: boolean;
+}): Promise<{ ok: true }> {
+  validateOracleIdentifier(p.owner, "owner");
+  validateOracleIdentifier(p.name, "job name");
+
+  return withActiveSession(async (conn) => {
+    const safety = getSessionSafety();
+    const envReal = (safety.env as string | undefined) ?? "unknown";
+
+    if (envReal === "prod" && !p.confirmedProdDisable) {
+      throw new RpcCodedError(
+        JOB_DISABLE_PROD_REQUIRES_CONFIRMATION,
+        `scheduler.job.disable on prod requires confirmedProdDisable=true. ` +
+        `The UI must display the PROD confirmation dialog before calling this RPC.`,
+      );
+    }
+
+    await conn.execute(
+      `BEGIN DBMS_SCHEDULER.DISABLE(:owner || '.' || :name); END;`,
+      { owner: p.owner, name: p.name },
+    );
+    log.info(`[scheduler] disable owner=${p.owner} name=${p.name} env=${envReal}`);
+    return { ok: true };
+  });
+}
+
+export async function dbmsJobRun(p: { jobId: number }): Promise<{ ok: true }> {
+  return withActiveSession(async (conn) => {
+    await conn.execute(`BEGIN DBMS_JOB.RUN(:job_id); END;`, { job_id: p.jobId });
+    log.info(`[scheduler] dbms_job.run jobId=${p.jobId}`);
+    return { ok: true };
+  });
+}
+
+export async function dbmsJobBroken(p: { jobId: number }): Promise<{ ok: true }> {
+  return withActiveSession(async (conn) => {
+    await conn.execute(`BEGIN DBMS_JOB.BROKEN(:job_id, TRUE); END;`, { job_id: p.jobId });
+    log.info(`[scheduler] dbms_job.broken jobId=${p.jobId}`);
+    return { ok: true };
+  });
+}
+
+export async function dbmsJobUnbroken(p: { jobId: number }): Promise<{ ok: true }> {
+  return withActiveSession(async (conn) => {
+    await conn.execute(`BEGIN DBMS_JOB.BROKEN(:job_id, FALSE, SYSDATE); END;`, { job_id: p.jobId });
+    log.info(`[scheduler] dbms_job.unbroken jobId=${p.jobId}`);
+    return { ok: true };
+  });
 }

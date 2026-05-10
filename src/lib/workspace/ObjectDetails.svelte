@@ -5,8 +5,8 @@
 -->
 
 <script lang="ts">
-  import type { TableDetails, TableRelated, ObjectKind, Loadable, DataFlowResult, VectorIndex, VectorSearchResult, EmbedConfig, EmbedProvider, MViewDetails, SynonymDetails, DbLinkRow, DirectoryDetail, QueueRow } from "$lib/workspace";
-  import { tableCountRows, vectorIndexList, vectorSearch, vectorIndexCreate, vectorIndexDrop, embedCountPending, embedBatch, aiKeyGet, aiKeySave, mviewDetailsGet, mviewRefreshRpc, synonymDetailsGet, dbLinkDdlGet, directoryDetailsGet, queueDetailsGet, queueDdlGet } from "$lib/workspace";
+  import type { TableDetails, TableRelated, ObjectKind, Loadable, DataFlowResult, VectorIndex, VectorSearchResult, EmbedConfig, EmbedProvider, MViewDetails, SynonymDetails, DbLinkRow, DirectoryDetail, QueueRow, SchedulerJobDetails, LegacyJobDetails, SchedulerProgramDetails, SchedulerScheduleDetails, SchedulerJobPrivs } from "$lib/workspace";
+  import { tableCountRows, vectorIndexList, vectorSearch, vectorIndexCreate, vectorIndexDrop, embedCountPending, embedBatch, aiKeyGet, aiKeySave, mviewDetailsGet, mviewRefreshRpc, synonymDetailsGet, dbLinkDdlGet, directoryDetailsGet, queueDetailsGet, queueDdlGet, schedulerJobDetailsGet, legacyJobDetailsGet, schedulerJobDdlGet, schedulerProgramDetailsGet, schedulerScheduleDetailsGet, schedulerJobPrivCheckGet, schedulerJobRunRpc, schedulerJobEnableRpc, schedulerJobDisableRpc, dbmsJobRunRpc, dbmsJobBrokenRpc, dbmsJobUnbrokenRpc } from "$lib/workspace";
   import { sqlEditor } from "$lib/stores/sql-editor.svelte";
   import DataFlow from "./DataFlow.svelte";
   import VectorScatter from "./VectorScatter.svelte";
@@ -66,7 +66,7 @@
   }
 
   // Reset live count + column search + empty-section toggles when object changes
-  $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); mviewData = null; synonymData = null; dbLinkDdlText = null; dbLinkDdlLoading = false; directoryData = null; directoryLoading = false; queueData = null; queueDataLoading = false; queueDdlText = null; queueDdlLoading = false; });
+  $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); mviewData = null; synonymData = null; dbLinkDdlText = null; dbLinkDdlLoading = false; directoryData = null; directoryLoading = false; queueData = null; queueDataLoading = false; queueDdlText = null; queueDdlLoading = false; schedulerJobData = null; schedulerJobLoading = false; schedulerJobDdlText = null; schedulerJobDdlLoading = false; legacyJobData = null; legacyJobLoading = false; schedulerJobPrivs = null; expandedProgram = null; expandedSchedule = null; jobActionResult = null; confirmingProdJobAction = null; });
 
   // ── MView inspector state ──────────────────────────────────────────────────
   let mviewData = $state<MViewDetails | null>(null);
@@ -192,6 +192,179 @@
     const res = await queueDdlGet(selected.owner, selected.name);
     queueDdlLoading = false;
     if (res.ok) queueDdlText = res.data.ddl;
+  }
+
+  // ── Scheduler Job inspector state ─────────────────────────────────────────
+  let schedulerJobData = $state<SchedulerJobDetails | null>(null);
+  let schedulerJobLoading = $state(false);
+  let schedulerJobDdlText = $state<string | null>(null);
+  let schedulerJobDdlLoading = $state(false);
+  let legacyJobData = $state<LegacyJobDetails | null>(null);
+  let legacyJobLoading = $state(false);
+  let schedulerJobPrivs = $state<SchedulerJobPrivs | null>(null);
+  let expandedProgram = $state<SchedulerProgramDetails | null>(null);
+  let expandedProgramLoading = $state(false);
+  let expandedSchedule = $state<SchedulerScheduleDetails | null>(null);
+  let expandedScheduleLoading = $state(false);
+  let jobActionRunning = $state(false);
+  let jobActionResult = $state<{ ok: boolean; message?: string } | null>(null);
+  let confirmingProdJobAction = $state<"run" | "disable" | null>(null);
+
+  $effect(() => {
+    if (selected?.kind === "SCHEDULER_JOB") {
+      void loadSchedulerJobInspector();
+    }
+  });
+
+  async function loadSchedulerJobInspector() {
+    if (!selected) return;
+    const isLegacy = /^LEGACY_\d+$/.test(selected.name);
+    expandedProgram = null;
+    expandedSchedule = null;
+    jobActionResult = null;
+    if (isLegacy) {
+      const jobId = Number(selected.name.replace("LEGACY_", ""));
+      legacyJobLoading = true;
+      legacyJobData = null;
+      const res = await legacyJobDetailsGet(jobId, selected.owner);
+      legacyJobLoading = false;
+      if (res.ok) legacyJobData = res.data.job;
+    } else {
+      schedulerJobLoading = true;
+      schedulerJobData = null;
+      const res = await schedulerJobDetailsGet(selected.owner, selected.name);
+      schedulerJobLoading = false;
+      if (res.ok) schedulerJobData = res.data.job;
+      void loadSchedulerJobDdl();
+    }
+    void loadSchedulerJobPrivs();
+  }
+
+  async function loadSchedulerJobDdl() {
+    if (!selected) return;
+    schedulerJobDdlLoading = true;
+    schedulerJobDdlText = null;
+    const isLegacy = /^LEGACY_\d+$/.test(selected.name);
+    const res = await schedulerJobDdlGet(selected.owner, selected.name, isLegacy);
+    schedulerJobDdlLoading = false;
+    if (res.ok) schedulerJobDdlText = res.data.ddl;
+  }
+
+  async function loadSchedulerJobPrivs() {
+    const res = await schedulerJobPrivCheckGet();
+    if (res.ok) schedulerJobPrivs = res.data;
+  }
+
+  async function loadExpandedProgram() {
+    if (!schedulerJobData?.programName || !selected) return;
+    expandedProgramLoading = true;
+    expandedProgram = null;
+    const res = await schedulerProgramDetailsGet(selected.owner, schedulerJobData.programName);
+    expandedProgramLoading = false;
+    if (res.ok) expandedProgram = res.data.program;
+  }
+
+  async function loadExpandedSchedule() {
+    if (!schedulerJobData?.scheduleName || !selected) return;
+    expandedScheduleLoading = true;
+    expandedSchedule = null;
+    const res = await schedulerScheduleDetailsGet(selected.owner, schedulerJobData.scheduleName);
+    expandedScheduleLoading = false;
+    if (res.ok) expandedSchedule = res.data.schedule;
+  }
+
+  const hasJobPriv = $derived(
+    schedulerJobPrivs !== null &&
+    (schedulerJobPrivs.hasCreateAnyJob || schedulerJobPrivs.hasManageScheduler)
+  );
+
+  async function doJobRun() {
+    if (!selected || jobActionRunning) return;
+    jobActionRunning = true;
+    jobActionResult = null;
+    const res = await schedulerJobRunRpc(selected.owner, selected.name, connectionEnv === "prod" ? true : undefined);
+    jobActionRunning = false;
+    confirmingProdJobAction = null;
+    if (res.ok) {
+      jobActionResult = { ok: true, message: `Job dispatched (${res.data.durationMs}ms)` };
+      void loadSchedulerJobInspector();
+    } else {
+      jobActionResult = { ok: false, message: res.error.message };
+    }
+  }
+
+  async function doJobEnable() {
+    if (!selected || jobActionRunning) return;
+    jobActionRunning = true;
+    jobActionResult = null;
+    const res = await schedulerJobEnableRpc(selected.owner, selected.name);
+    jobActionRunning = false;
+    if (res.ok) {
+      jobActionResult = { ok: true, message: "Job enabled" };
+      void loadSchedulerJobInspector();
+    } else {
+      jobActionResult = { ok: false, message: res.error.message };
+    }
+  }
+
+  async function doJobDisable() {
+    if (!selected || jobActionRunning) return;
+    jobActionRunning = true;
+    jobActionResult = null;
+    const res = await schedulerJobDisableRpc(selected.owner, selected.name, connectionEnv === "prod" ? true : undefined);
+    jobActionRunning = false;
+    confirmingProdJobAction = null;
+    if (res.ok) {
+      jobActionResult = { ok: true, message: "Job disabled" };
+      void loadSchedulerJobInspector();
+    } else {
+      jobActionResult = { ok: false, message: res.error.message };
+    }
+  }
+
+  async function doLegacyJobRun() {
+    if (!selected || jobActionRunning) return;
+    const jobId = Number(selected.name.replace("LEGACY_", ""));
+    jobActionRunning = true;
+    jobActionResult = null;
+    const res = await dbmsJobRunRpc(jobId);
+    jobActionRunning = false;
+    if (res.ok) {
+      jobActionResult = { ok: true, message: "DBMS_JOB.RUN called" };
+      void loadSchedulerJobInspector();
+    } else {
+      jobActionResult = { ok: false, message: res.error.message };
+    }
+  }
+
+  async function doLegacyJobBroken() {
+    if (!selected || jobActionRunning) return;
+    const jobId = Number(selected.name.replace("LEGACY_", ""));
+    jobActionRunning = true;
+    jobActionResult = null;
+    const res = await dbmsJobBrokenRpc(jobId);
+    jobActionRunning = false;
+    if (res.ok) {
+      jobActionResult = { ok: true, message: "Job marked broken" };
+      void loadSchedulerJobInspector();
+    } else {
+      jobActionResult = { ok: false, message: res.error.message };
+    }
+  }
+
+  async function doLegacyJobUnbroken() {
+    if (!selected || jobActionRunning) return;
+    const jobId = Number(selected.name.replace("LEGACY_", ""));
+    jobActionRunning = true;
+    jobActionResult = null;
+    const res = await dbmsJobUnbrokenRpc(jobId);
+    jobActionRunning = false;
+    if (res.ok) {
+      jobActionResult = { ok: true, message: "Job resumed" };
+      void loadSchedulerJobInspector();
+    } else {
+      jobActionResult = { ok: false, message: res.error.message };
+    }
   }
 
   type Tab = "overview" | "columns" | "indexes" | "related" | "dataflow" | "vectors" | "details";
@@ -405,7 +578,8 @@
       selected?.kind === "SYNONYM" ||
       selected?.kind === "DB_LINK" ||
       selected?.kind === "DIRECTORY" ||
-      selected?.kind === "QUEUE"
+      selected?.kind === "QUEUE" ||
+      selected?.kind === "SCHEDULER_JOB"
     ) {
       activeTab = "details";
     } else {
@@ -445,6 +619,9 @@
     if (selected.kind === "QUEUE") {
       return [{ id: "details" as Tab, label: "Info" }];
     }
+    if (selected.kind === "SCHEDULER_JOB") {
+      return [{ id: "details" as Tab, label: "Job" }];
+    }
     return [{ id: "dataflow", label: "Graph" }];
   });
 
@@ -461,8 +638,9 @@
     PROCEDURE: "#e67e22", FUNCTION: "#f39c12", PACKAGE: "#9b59b6",
     TRIGGER: "#e74c3c", TYPE: "#3498db",
     MATERIALIZED_VIEW: "#1a9ca6", SYNONYM: "#7d5fa7", DB_LINK: "#d4770a",
-    DIRECTORY: "hsl(45 90% 48%)",
-    QUEUE: "hsl(260 55% 58%)",
+    DIRECTORY:     "hsl(45 90% 48%)",
+    QUEUE:         "hsl(260 55% 58%)",
+    SCHEDULER_JOB: "hsl(200 70% 45%)",
   };
   const KIND_LABEL: Record<string, string> = {
     TABLE: "TABLE", VIEW: "VIEW", SEQUENCE: "SEQ",
@@ -471,6 +649,7 @@
     MATERIALIZED_VIEW: "MV", SYNONYM: "SYN", DB_LINK: "DBL",
     DIRECTORY: "DIR",
     QUEUE: "Q",
+    SCHEDULER_JOB: "JOB",
   };
 
   function kindColor(k: string) { return KIND_COLOR[k?.toUpperCase()] ?? "#888"; }
@@ -1539,6 +1718,227 @@
             {/if}
           {:else}
             <div class="empty-section">Queue details not available (requires ALL_QUEUES access).</div>
+          {/if}
+        </div>
+
+      {:else if activeTab === "details" && selected.kind === "SCHEDULER_JOB"}
+        {@const isLegacy = /^LEGACY_\d+$/.test(selected.name)}
+        <div class="detail-panel">
+          {#if isLegacy}
+            {#if legacyJobLoading}
+              <div class="loading-row"><span class="spinner"></span> Loading…</div>
+            {:else if legacyJobData}
+              <div class="banner banner-warn">Legacy DBMS_JOB — limited management via DBMS_JOB package.</div>
+              <div class="detail-grid">
+                <span class="detail-key">Job ID</span>
+                <span class="detail-val">{legacyJobData.jobId}</span>
+                <span class="detail-key">Owner</span>
+                <span class="detail-val">{legacyJobData.owner}</span>
+                {#if legacyJobData.jobAction}
+                  <span class="detail-key">What (PL/SQL)</span>
+                  <span class="detail-val detail-val-mono">{legacyJobData.jobAction}</span>
+                {/if}
+                <span class="detail-key">Broken</span>
+                <span class="detail-val">{legacyJobData.broken ? "Yes" : "No"}</span>
+                <span class="detail-key">Failures</span>
+                <span class="detail-val">{legacyJobData.failures}</span>
+                {#if legacyJobData.interval}
+                  <span class="detail-key">Interval</span>
+                  <span class="detail-val detail-val-mono">{legacyJobData.interval}</span>
+                {/if}
+                {#if legacyJobData.nextDate}
+                  <span class="detail-key">Next Date</span>
+                  <span class="detail-val">{legacyJobData.nextDate}</span>
+                {/if}
+                {#if legacyJobData.lastDate}
+                  <span class="detail-key">Last Date</span>
+                  <span class="detail-val">{legacyJobData.lastDate}</span>
+                {/if}
+              </div>
+              {#if hasJobPriv}
+                <div class="detail-section-label">Legacy DBMS_JOB Actions</div>
+                <div class="job-actions">
+                  <button class="detail-action-btn" disabled={jobActionRunning} onclick={doLegacyJobRun}>
+                    {#if jobActionRunning}<span class="spinner-xs"></span>{/if} Run
+                  </button>
+                  {#if !legacyJobData.broken}
+                    <button class="detail-action-btn" disabled={jobActionRunning} onclick={doLegacyJobBroken}>
+                      Mark Broken
+                    </button>
+                  {:else}
+                    <button class="detail-action-btn" disabled={jobActionRunning} onclick={doLegacyJobUnbroken}>
+                      Unmark Broken
+                    </button>
+                  {/if}
+                </div>
+                {#if jobActionResult}
+                  <div class="job-action-result" class:action-ok={jobActionResult.ok} class:action-err={!jobActionResult.ok}>
+                    {jobActionResult.message}
+                  </div>
+                {/if}
+              {/if}
+            {:else}
+              <div class="empty-section">Legacy job details not available (requires DBA_JOBS or USER_JOBS access).</div>
+            {/if}
+          {:else}
+            {#if schedulerJobLoading}
+              <div class="loading-row"><span class="spinner"></span> Loading…</div>
+            {:else if schedulerJobData}
+              <div class="detail-grid">
+                <span class="detail-key">Owner</span>
+                <span class="detail-val">{schedulerJobData.owner}</span>
+                <span class="detail-key">State</span>
+                <span class="detail-val">{schedulerJobData.state}</span>
+                <span class="detail-key">Enabled</span>
+                <span class="detail-val">{schedulerJobData.enabled ? "Yes" : "No"}</span>
+                {#if schedulerJobData.jobType}
+                  <span class="detail-key">Job Type</span>
+                  <span class="detail-val">{schedulerJobData.jobType}</span>
+                {/if}
+                {#if schedulerJobData.jobAction}
+                  <span class="detail-key">Action</span>
+                  <span class="detail-val detail-val-mono">{schedulerJobData.jobAction}</span>
+                {/if}
+                <span class="detail-key">Run Count</span>
+                <span class="detail-val">{schedulerJobData.runCount}</span>
+                <span class="detail-key">Failure Count</span>
+                <span class="detail-val">{schedulerJobData.failureCount}</span>
+                {#if schedulerJobData.maxFailures !== null}
+                  <span class="detail-key">Max Failures</span>
+                  <span class="detail-val">{schedulerJobData.maxFailures}</span>
+                {/if}
+                {#if schedulerJobData.nextRunDate}
+                  <span class="detail-key">Next Run</span>
+                  <span class="detail-val">{schedulerJobData.nextRunDate}</span>
+                {/if}
+                {#if schedulerJobData.lastRunDuration}
+                  <span class="detail-key">Last Duration</span>
+                  <span class="detail-val">{schedulerJobData.lastRunDuration}</span>
+                {/if}
+                {#if schedulerJobData.startDate}
+                  <span class="detail-key">Start Date</span>
+                  <span class="detail-val">{schedulerJobData.startDate}</span>
+                {/if}
+                {#if schedulerJobData.repeatInterval}
+                  <span class="detail-key">Repeat Interval</span>
+                  <span class="detail-val detail-val-mono">{schedulerJobData.repeatInterval}</span>
+                {/if}
+                {#if schedulerJobData.jobClass}
+                  <span class="detail-key">Job Class</span>
+                  <span class="detail-val">{schedulerJobData.jobClass}</span>
+                {/if}
+                {#if schedulerJobData.loggingLevel}
+                  <span class="detail-key">Logging Level</span>
+                  <span class="detail-val">{schedulerJobData.loggingLevel}</span>
+                {/if}
+                {#if schedulerJobData.comments}
+                  <span class="detail-key">Comments</span>
+                  <span class="detail-val">{schedulerJobData.comments}</span>
+                {/if}
+              </div>
+
+              {#if schedulerJobData.programName}
+                <div class="detail-section-label">
+                  Program
+                  <button class="expand-link" onclick={loadExpandedProgram} disabled={expandedProgramLoading}>
+                    {expandedProgram ? "▲ hide" : "▼ " + schedulerJobData.programName}
+                  </button>
+                </div>
+                {#if expandedProgramLoading}
+                  <div class="loading-row"><span class="spinner"></span> Loading…</div>
+                {:else if expandedProgram}
+                  <div class="detail-grid indent">
+                    <span class="detail-key">Type</span>
+                    <span class="detail-val">{expandedProgram.programType}</span>
+                    <span class="detail-key">Action</span>
+                    <span class="detail-val detail-val-mono">{expandedProgram.programAction}</span>
+                    <span class="detail-key">Enabled</span>
+                    <span class="detail-val">{expandedProgram.enabled ? "Yes" : "No"}</span>
+                  </div>
+                {/if}
+              {/if}
+
+              {#if schedulerJobData.scheduleName}
+                <div class="detail-section-label">
+                  Schedule
+                  <button class="expand-link" onclick={loadExpandedSchedule} disabled={expandedScheduleLoading}>
+                    {expandedSchedule ? "▲ hide" : "▼ " + schedulerJobData.scheduleName}
+                  </button>
+                </div>
+                {#if expandedScheduleLoading}
+                  <div class="loading-row"><span class="spinner"></span> Loading…</div>
+                {:else if expandedSchedule}
+                  <div class="detail-grid indent">
+                    <span class="detail-key">Type</span>
+                    <span class="detail-val">{expandedSchedule.scheduleType}</span>
+                    {#if expandedSchedule.repeatInterval}
+                      <span class="detail-key">Repeat</span>
+                      <span class="detail-val detail-val-mono">{expandedSchedule.repeatInterval}</span>
+                    {/if}
+                    {#if expandedSchedule.startDate}
+                      <span class="detail-key">Start</span>
+                      <span class="detail-val">{expandedSchedule.startDate}</span>
+                    {/if}
+                  </div>
+                {/if}
+              {/if}
+
+              {#if hasJobPriv}
+                <div class="detail-section-label">Actions</div>
+                {#if connectionEnv === "prod" && (confirmingProdJobAction === "run" || confirmingProdJobAction === "disable")}
+                  <div class="job-confirm prod-confirm">
+                    <span class="confirm-text warn">
+                      {confirmingProdJobAction === "run"
+                        ? `Run ${selected.owner}.${selected.name} in PROD now. Job will execute in a background session.`
+                        : `Disable ${selected.owner}.${selected.name} in PROD. Scheduled executions will stop.`}
+                    </span>
+                    <div class="confirm-btns">
+                      <button class="detail-action-btn prod-confirm-btn" disabled={jobActionRunning}
+                        onclick={confirmingProdJobAction === "run" ? doJobRun : doJobDisable}>
+                        {#if jobActionRunning}<span class="spinner-xs"></span>{/if}
+                        Yes, {confirmingProdJobAction === "run" ? "run" : "disable"} in PROD
+                      </button>
+                      <button class="detail-action-btn" onclick={() => { confirmingProdJobAction = null; }}>Cancel</button>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="job-actions">
+                    <button class="detail-action-btn" disabled={jobActionRunning}
+                      onclick={() => { if (connectionEnv === "prod") { confirmingProdJobAction = "run"; } else { void doJobRun(); } }}>
+                      {#if jobActionRunning}<span class="spinner-xs"></span>{/if} Run Now
+                    </button>
+                    {#if !schedulerJobData.enabled}
+                      <button class="detail-action-btn" disabled={jobActionRunning} onclick={doJobEnable}>
+                        Enable
+                      </button>
+                    {/if}
+                    {#if schedulerJobData.enabled}
+                      <button class="detail-action-btn" disabled={jobActionRunning}
+                        onclick={() => { if (connectionEnv === "prod") { confirmingProdJobAction = "disable"; } else { void doJobDisable(); } }}>
+                        Disable
+                      </button>
+                    {/if}
+                  </div>
+                {/if}
+                {#if jobActionResult}
+                  <div class="job-action-result" class:action-ok={jobActionResult.ok} class:action-err={!jobActionResult.ok}>
+                    {jobActionResult.message}
+                  </div>
+                {/if}
+              {/if}
+
+              <div class="detail-section-label">DDL (informational)</div>
+              {#if schedulerJobDdlLoading}
+                <div class="loading-row"><span class="spinner"></span> Loading DDL…</div>
+              {:else if schedulerJobDdlText}
+                <pre class="detail-ddl">{schedulerJobDdlText}</pre>
+              {:else}
+                <div class="empty-section">DDL not available.</div>
+              {/if}
+
+            {:else}
+              <div class="empty-section">Job details not available (requires DBA_SCHEDULER_JOBS or ALL_SCHEDULER_JOBS access).</div>
+            {/if}
           {/if}
         </div>
 
@@ -2943,6 +3343,43 @@
     color: #e74c3c;
   }
   .prod-confirm-btn:hover { background: rgba(231, 76, 60, 0.3); }
+
+  .job-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0.5rem 0;
+  }
+  .job-confirm {
+    margin: 0.5rem 0;
+    padding: 0.6rem 0.75rem;
+    border-radius: 6px;
+  }
+  .confirm-btns {
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
+  }
+  .job-action-result {
+    font-size: 11px;
+    padding: 0.3rem 0;
+    margin-top: 0.25rem;
+  }
+  .action-ok { color: #27ae60; }
+  .action-err { color: #e74c3c; }
+  .expand-link {
+    background: transparent;
+    border: none;
+    color: hsl(200 70% 55%);
+    font-size: 10px;
+    cursor: pointer;
+    padding: 0 0.3rem;
+    font-family: inherit;
+    text-decoration: underline;
+  }
+  .expand-link:hover { color: hsl(200 70% 70%); }
+  .expand-link:disabled { opacity: 0.5; cursor: default; }
+  .detail-grid.indent { margin-left: 0.75rem; }
   .detail-link {
     background: transparent;
     border: none;
