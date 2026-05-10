@@ -66,7 +66,7 @@
   // Reset live count + column search + empty-section toggles when object changes
   $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); });
 
-  type Tab = "overview" | "columns" | "indexes" | "related" | "dataflow" | "vectors";
+  type Tab = "overview" | "columns" | "indexes" | "related" | "dataflow" | "vectors" | "details";
   let activeTab = $state<Tab>("columns");
 
   // Vector indexes (loaded lazily when Vectors tab is selected)
@@ -272,6 +272,12 @@
     void selected;
     if (selected?.kind === "TABLE" || selected?.kind === "VIEW") {
       activeTab = "columns";
+    } else if (
+      selected?.kind === "MATERIALIZED_VIEW" ||
+      selected?.kind === "SYNONYM" ||
+      selected?.kind === "DB_LINK"
+    ) {
+      activeTab = "details";
     } else {
       activeTab = "dataflow";
     }
@@ -294,6 +300,15 @@
         ...(hasVectorCols ? [{ id: "vectors" as Tab, label: "Vectors" }] : []),
       ];
     }
+    if (selected.kind === "MATERIALIZED_VIEW") {
+      return [{ id: "details" as Tab, label: "Details" }];
+    }
+    if (selected.kind === "SYNONYM") {
+      return [{ id: "details" as Tab, label: "Target" }];
+    }
+    if (selected.kind === "DB_LINK") {
+      return [{ id: "details" as Tab, label: "Info" }];
+    }
     return [{ id: "dataflow", label: "Graph" }];
   });
 
@@ -309,11 +324,13 @@
     TABLE: "#4a9eda", VIEW: "#27ae60", SEQUENCE: "#2ecc71",
     PROCEDURE: "#e67e22", FUNCTION: "#f39c12", PACKAGE: "#9b59b6",
     TRIGGER: "#e74c3c", TYPE: "#3498db",
+    MATERIALIZED_VIEW: "#1a9ca6", SYNONYM: "#7d5fa7", DB_LINK: "#d4770a",
   };
   const KIND_LABEL: Record<string, string> = {
     TABLE: "TABLE", VIEW: "VIEW", SEQUENCE: "SEQ",
     PROCEDURE: "PROC", FUNCTION: "FN", PACKAGE: "PKG",
     TRIGGER: "TRG", TYPE: "TYPE",
+    MATERIALIZED_VIEW: "MV", SYNONYM: "SYN", DB_LINK: "DBL",
   };
 
   function kindColor(k: string) { return KIND_COLOR[k?.toUpperCase()] ?? "#888"; }

@@ -695,7 +695,9 @@ import { splitSql } from "./sql-splitter";
 
 export type SchemaRow = { name: string; isCurrent: boolean };
 export type ObjectRef = { name: string };
-export type ObjectKind = "TABLE" | "VIEW" | "SEQUENCE";
+export type ObjectKind =
+  | "TABLE" | "VIEW" | "SEQUENCE"
+  | "MATERIALIZED_VIEW" | "SYNONYM" | "DB_LINK";
 
 export type ColumnDef = {
   name: string;
@@ -758,15 +760,278 @@ export async function objectsList(p: {
   type: ObjectKind;
 }): Promise<{ objects: ObjectRef[] }> {
   return withActiveSession(async (conn) => {
+    // MATERIALIZED_VIEW in ALL_OBJECTS uses a space, not underscore
+    const typeMap: Partial<Record<ObjectKind, string>> = {
+      MATERIALIZED_VIEW: "MATERIALIZED VIEW",
+    };
+    const oracleType = typeMap[p.type] ?? p.type;
     const res = await conn.execute<{ NAME: string }>(
       `SELECT object_name AS NAME
          FROM all_objects
         WHERE owner = :owner AND object_type = :type
         ORDER BY object_name`,
-      { owner: p.owner, type: p.type },
+      { owner: p.owner, type: oracleType },
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
     return { objects: (res.rows ?? []).map((r) => ({ name: r.NAME })) };
+  });
+}
+
+export type MViewDetails = {
+  name: string;
+  owner: string;
+  refreshMethod: string;
+  refreshMode: string;
+  lastRefreshDate: string | null;
+  staleness: string;
+  query: string | null;
+};
+
+export async function mviewDetails(p: {
+  owner: string;
+  name: string;
+}): Promise<{ detail: MViewDetails | null }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<{
+        MVIEW_NAME: string;
+        OWNER: string;
+        REFRESH_METHOD: string;
+        REFRESH_MODE: string;
+        LAST_REFRESH_DATE: Date | null;
+        STALENESS: string;
+        QUERY: string | null;
+      }>(
+        `SELECT mview_name, owner, refresh_method, refresh_mode,
+                last_refresh_date, staleness, query
+           FROM all_mviews
+          WHERE owner = :owner AND mview_name = :name`,
+        { owner: p.owner, name: p.name },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const r = res.rows?.[0] ?? null;
+      if (!r) return { detail: null };
+      return {
+        detail: {
+          name: r.MVIEW_NAME,
+          owner: r.OWNER,
+          refreshMethod: r.REFRESH_METHOD,
+          refreshMode: r.REFRESH_MODE,
+          lastRefreshDate: r.LAST_REFRESH_DATE ? r.LAST_REFRESH_DATE.toISOString() : null,
+          staleness: r.STALENESS,
+          query: r.QUERY,
+        },
+      };
+    } catch (e: any) {
+      if (e.errorNum === 942) {
+        // ALL_MVIEWS not accessible — fall back to USER_MVIEWS
+        const res = await conn.execute<{
+          MVIEW_NAME: string;
+          REFRESH_METHOD: string;
+          REFRESH_MODE: string;
+          LAST_REFRESH_DATE: Date | null;
+          STALENESS: string;
+          QUERY: string | null;
+        }>(
+          `SELECT mview_name, refresh_method, refresh_mode,
+                  last_refresh_date, staleness, query
+             FROM user_mviews
+            WHERE mview_name = :name`,
+          { name: p.name },
+          { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        const r = res.rows?.[0] ?? null;
+        if (!r) return { detail: null };
+        return {
+          detail: {
+            name: r.MVIEW_NAME,
+            owner: p.owner,
+            refreshMethod: r.REFRESH_METHOD,
+            refreshMode: r.REFRESH_MODE,
+            lastRefreshDate: r.LAST_REFRESH_DATE ? r.LAST_REFRESH_DATE.toISOString() : null,
+            staleness: r.STALENESS,
+            query: r.QUERY,
+          },
+        };
+      }
+      throw e;
+    }
+  });
+}
+
+export async function mviewRefresh(p: {
+  owner: string;
+  name: string;
+  method: "FAST" | "COMPLETE" | "FORCE";
+  env: string;
+}): Promise<{ ok: true; durationMs: number }> {
+  return withActiveSession(async (conn) => {
+    const ownerDotName = `${p.owner}.${p.name}`;
+    const start = Date.now();
+    await conn.execute(
+      `BEGIN DBMS_MVIEW.REFRESH(:mv_name, :method); END;`,
+      { mv_name: ownerDotName, method: p.method }
+    );
+    const durationMs = Date.now() - start;
+    log.info(`[mview] refresh owner=${p.owner} name=${p.name} method=${p.method} env=${p.env} durationMs=${durationMs}`);
+    return { ok: true, durationMs };
+  });
+}
+
+export type SynonymDetails = {
+  name: string;
+  owner: string;
+  targetSchema: string;
+  targetObject: string;
+  targetDbLink: string | null;
+  ddl: string;
+};
+
+export async function synonymDetails(p: {
+  owner: string;
+  name: string;
+}): Promise<{ detail: SynonymDetails | null }> {
+  return withActiveSession(async (conn) => {
+    const res = await conn.execute<{
+      SYNONYM_NAME: string;
+      OWNER: string;
+      TABLE_OWNER: string;
+      TABLE_NAME: string;
+      DB_LINK: string | null;
+      DDL: string;
+    }>(
+      `SELECT syn.synonym_name,
+              syn.owner,
+              syn.table_owner,
+              syn.table_name,
+              syn.db_link,
+              'CREATE '
+                  || CASE WHEN syn.owner = 'PUBLIC' THEN 'PUBLIC ' ELSE '' END
+                  || 'SYNONYM '
+                  || CASE
+                       WHEN syn.owner = 'PUBLIC'
+                            THEN ''
+                       WHEN syn.owner = SYS_CONTEXT('USERENV', 'CURRENT_USER')
+                            THEN ''
+                       ELSE syn.owner || '.'
+                     END
+                  || syn.synonym_name
+                  || ' FOR '
+                  || syn.table_owner || '.' || syn.table_name
+                  || CASE WHEN syn.db_link IS NOT NULL THEN '@' || syn.db_link ELSE '' END
+                  || ';' AS ddl
+         FROM all_synonyms syn
+        WHERE syn.synonym_name = :name
+          AND syn.owner = :owner`,
+      { name: p.name, owner: p.owner },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    const r = res.rows?.[0] ?? null;
+    if (!r) return { detail: null };
+    return {
+      detail: {
+        name: r.SYNONYM_NAME,
+        owner: r.OWNER,
+        targetSchema: r.TABLE_OWNER,
+        targetObject: r.TABLE_NAME,
+        targetDbLink: r.DB_LINK,
+        ddl: r.DDL,
+      },
+    };
+  });
+}
+
+export type DbLinkRow = {
+  name: string;
+  owner: string;
+  username: string | null;
+  host: string | null;
+  created: string | null;
+};
+
+export async function dbLinksList(p: {
+  owner: string;
+}): Promise<{ objects: DbLinkRow[] }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<{
+        DB_LINK: string;
+        OWNER: string;
+        USERNAME: string | null;
+        HOST: string | null;
+        CREATED: Date | null;
+      }>(
+        `SELECT db_link, owner, username, host, created
+           FROM dba_db_links
+          WHERE owner = :owner
+          ORDER BY db_link`,
+        { owner: p.owner },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      log.info("[schema] db_links source=DBA_DB_LINKS");
+      return {
+        objects: (res.rows ?? []).map((r) => ({
+          name: r.DB_LINK,
+          owner: r.OWNER,
+          username: r.USERNAME,
+          host: r.HOST,
+          created: r.CREATED ? r.CREATED.toISOString() : null,
+        })),
+      };
+    } catch (e: any) {
+      if (e.errorNum === 942) {
+        log.info("[schema] DBA_DB_LINKS not accessible (ORA-00942), fallback to USER_DB_LINKS");
+        const res = await conn.execute<{
+          DB_LINK: string;
+          USERNAME: string | null;
+          HOST: string | null;
+          CREATED: Date | null;
+        }>(
+          `SELECT db_link, username, host, created
+             FROM user_db_links
+            ORDER BY db_link`,
+          {},
+          { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+        return {
+          objects: (res.rows ?? []).map((r) => ({
+            name: r.DB_LINK,
+            owner: p.owner,
+            username: r.USERNAME,
+            host: r.HOST,
+            created: r.CREATED ? r.CREATED.toISOString() : null,
+          })),
+        };
+      }
+      throw e;
+    }
+  });
+}
+
+export async function dbLinkDdl(p: {
+  name: string;
+}): Promise<{ ddl: string }> {
+  return withActiveSession(async (conn) => {
+    const res = await conn.execute<{
+      DB_LINK: string;
+      USERNAME: string | null;
+      HOST: string | null;
+    }>(
+      `SELECT db_link, username, host FROM user_db_links WHERE db_link = :name`,
+      { name: p.name },
+      { outFormat: oracledb.OUT_FORMAT_OBJECT }
+    );
+    const r = res.rows?.[0];
+    if (!r) return { ddl: `-- DB Link ${p.name} not found in USER_DB_LINKS` };
+    const lines = [
+      `CREATE DATABASE LINK ${r.DB_LINK}`,
+      `  CONNECT TO ${r.USERNAME ?? "<<USERNAME>>"}`,
+      `  IDENTIFIED BY "<<REPLACE_WITH_ACTUAL_PASSWORD>>" -- TODO`,
+      `  USING '${r.HOST ?? "<<HOST>>"}';`,
+      `-- WARNING: Oracle does not expose DB Link passwords.`,
+      `-- This DDL is not executable without manual edit.`,
+    ];
+    return { ddl: lines.join("\n") };
   });
 }
 
@@ -1982,7 +2247,7 @@ export async function schemaKindCounts(p: {
       `SELECT object_type, COUNT(*) AS cnt
          FROM all_objects
         WHERE owner = :owner
-          AND object_type IN ('TABLE','VIEW','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','TYPE')
+          AND object_type IN ('TABLE','VIEW','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','TYPE','MATERIALIZED VIEW')
         GROUP BY object_type`,
       { owner: p.owner },
       { outFormat: oracledb.OUT_FORMAT_ARRAY }

@@ -43,6 +43,11 @@ import {
   querySessionSelf,
   enableDbmsOutputForActiveSession,
   unlockUnsafeDml,
+  mviewDetails,
+  mviewRefresh,
+  synonymDetails,
+  dbLinksList,
+  dbLinkDdl,
 } from "./oracle";
 import { aiChat, aiSuggestEndpoint } from "./ai";
 import { resolveApproval } from "./ai-approval-state";
@@ -102,6 +107,11 @@ const handlers: HandlerMap = {
   },
   "schema.list": () => schemaList(),
   "objects.list": (params) => objectsList(params as any),
+  "objects.list.dblinks": (params) => dbLinksList(params as any),
+  "mview.details": (params) => mviewDetails(params as any),
+  "mview.refresh": (params) => mviewRefresh(params as any),
+  "synonym.details": (params) => synonymDetails(params as any),
+  "object.ddl.dblink": (params) => dbLinkDdl(params as any),
   "table.describe": (params) => tableDescribe(params as any),
   "query.execute": (params) => queryExecute(params as any),
   "query.cancel": (params) => queryCancel(params as any),

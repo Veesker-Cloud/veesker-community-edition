@@ -50,6 +50,7 @@
     PROCEDURE: "Procedures", FUNCTION: "Functions",
     PACKAGE: "Packages", TRIGGER: "Triggers", TYPE: "Types",
     REST_MODULE: "REST Modules",
+    MATERIALIZED_VIEW: "Materialized Views", SYNONYM: "Synonyms", DB_LINK: "DB Links",
   };
 
   const KIND_SHORT: Record<ObjectKind, string> = {
@@ -57,6 +58,7 @@
     PROCEDURE: "Proc", FUNCTION: "Func",
     PACKAGE: "Pkg", TRIGGER: "Trig", TYPE: "Type",
     REST_MODULE: "API",
+    MATERIALIZED_VIEW: "MV", SYNONYM: "Syn", DB_LINK: "DBL",
   };
 
   function toggleKind(kind: ObjectKind) {
@@ -67,21 +69,24 @@
   }
 
   const KIND_ORDER: ObjectKind[] = [
-    "TABLE", "VIEW", "SEQUENCE",
+    "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "SEQUENCE",
     "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE",
     "REST_MODULE",
   ];
 
   const KIND_COLOR: Record<ObjectKind, string> = {
-    TABLE:       "#4a9eda",
-    VIEW:        "#27ae60",
-    SEQUENCE:    "#2ecc71",
-    PROCEDURE:   "#e67e22",
-    FUNCTION:    "#f39c12",
-    PACKAGE:     "#9b59b6",
-    TRIGGER:     "#e74c3c",
-    TYPE:        "#3498db",
-    REST_MODULE: "#f5a08a",
+    TABLE:             "#4a9eda",
+    VIEW:              "#27ae60",
+    SEQUENCE:          "#2ecc71",
+    PROCEDURE:         "#e67e22",
+    FUNCTION:          "#f39c12",
+    PACKAGE:           "#9b59b6",
+    TRIGGER:           "#e74c3c",
+    TYPE:              "#3498db",
+    REST_MODULE:       "#f5a08a",
+    MATERIALIZED_VIEW: "#1a9ca6",
+    SYNONYM:           "#7d5fa7",
+    DB_LINK:           "#d4770a",
   };
 
   function isSystemSchema(name: string): boolean {

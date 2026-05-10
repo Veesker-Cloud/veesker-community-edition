@@ -15,7 +15,8 @@ export type Schema = { name: string; isCurrent: boolean };
 export type ObjectKind =
   | "TABLE" | "VIEW" | "SEQUENCE"
   | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "TYPE"
-  | "REST_MODULE";
+  | "REST_MODULE"
+  | "MATERIALIZED_VIEW" | "SYNONYM" | "DB_LINK";
 export type ObjectRef = { name: string };
 export type ObjectRefWithStatus = { name: string; status: string };
 export type Column = {
