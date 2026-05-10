@@ -506,6 +506,7 @@ import {
   SESSION_SELF_PRIV_MISSING,
   SESSION_SELF_TRANSIENT,
   SESSION_SELF_NOT_FOUND,
+  MVIEW_REFRESH_PROD_REQUIRES_CONFIRMATION,
 } from "./errors";
 import { classifySql, isReadOnlySafe, isUnsafeBulkDml, isMergeSql, isTruncateSql, extractTableFromSql } from "./sql-kind";
 
@@ -863,9 +864,20 @@ export async function mviewRefresh(p: {
   owner: string;
   name: string;
   method: "FAST" | "COMPLETE" | "FORCE";
-  env: string;
-}): Promise<{ ok: true; durationMs: number }> {
+  confirmedProdRefresh?: boolean;
+}): Promise<{ ok: true; durationMs: number; envReal: string }> {
   return withActiveSession(async (conn) => {
+    const safety = getSessionSafety();
+    const envReal = (safety.env as string | undefined) ?? "unknown";
+
+    if (envReal === "prod" && !p.confirmedProdRefresh) {
+      throw new RpcCodedError(
+        MVIEW_REFRESH_PROD_REQUIRES_CONFIRMATION,
+        `mview.refresh on prod requires confirmedProdRefresh=true. ` +
+        `The UI must display the PROD confirmation dialog before calling this RPC.`
+      );
+    }
+
     const ownerDotName = `${p.owner}.${p.name}`;
     const start = Date.now();
     await conn.execute(
@@ -873,8 +885,11 @@ export async function mviewRefresh(p: {
       { mv_name: ownerDotName, method: p.method }
     );
     const durationMs = Date.now() - start;
-    log.info(`[mview] refresh owner=${p.owner} name=${p.name} method=${p.method} env=${p.env} durationMs=${durationMs}`);
-    return { ok: true, durationMs };
+    log.info(
+      `[mview] refresh owner=${p.owner} name=${p.name} method=${p.method} ` +
+      `env_real=${envReal} confirmed_prod=${p.confirmedProdRefresh ?? false} durationMs=${durationMs}`
+    );
+    return { ok: true, durationMs, envReal };
   });
 }
 

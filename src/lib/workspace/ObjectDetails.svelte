@@ -94,7 +94,8 @@
   async function doRefresh() {
     if (!selected) return;
     refreshRunning = true;
-    const res = await mviewRefreshRpc(selected.owner, selected.name, refreshMethod, connectionEnv);
+    const confirmedProdRefresh = connectionEnv === "prod" ? true : undefined;
+    const res = await mviewRefreshRpc(selected.owner, selected.name, refreshMethod, confirmedProdRefresh);
     refreshRunning = false;
     confirmingRefresh = false;
     if (res.ok) {

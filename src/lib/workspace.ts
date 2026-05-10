@@ -805,8 +805,8 @@ export const mviewRefreshRpc = (
   owner: string,
   name: string,
   method: "FAST" | "COMPLETE" | "FORCE",
-  env: string,
-) => call<{ ok: true; durationMs: number }>("mview_refresh", { owner, name, method, env });
+  confirmedProdRefresh?: boolean,
+) => call<{ ok: true; durationMs: number; envReal: string }>("mview_refresh", { owner, name, method, confirmedProdRefresh });
 
 export type SynonymDetails = {
   name: string;

@@ -49,6 +49,11 @@ export const UNSAFE_DML_STAGING    = -32038;
 export const UNSAFE_DML_PROD_BLOCKED = -32039;
 export const TRUNCATE_PROD_BLOCKED   = -32040;
 
+// Item #1A T1A.8: mview.refresh on prod requires explicit server-side confirmation.
+// Mirrors the unlockUnsafeDml pattern (security item #2) for MV refresh operations.
+// -32041 and -32042 are reserved for DDL/DCL modal (Item #1E, not yet implemented).
+export const MVIEW_REFRESH_PROD_REQUIRES_CONFIRMATION = -32043;
+
 export class RpcCodedError extends Error {
   code: number;
   data?: Record<string, unknown>;
