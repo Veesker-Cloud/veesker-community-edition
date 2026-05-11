@@ -45,7 +45,7 @@ jobs:
           - platform: windows-latest
             sidecar-cmd: build:win-x64
             rust-targets: ''
-            tauri-args: ''
+            tauri-args: '--bundles nsis'
           - platform: macos-14
             sidecar-cmd: build:mac-arm64
             rust-targets: aarch64-apple-darwin
