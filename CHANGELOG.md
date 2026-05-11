@@ -9,18 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Issues
 
+- **Directory detail panel** — even with `SELECT on DBA_DIRECTORIES` privilege, the inspector still shows "Directory details not available (requires SELECT on DBA_DIRECTORIES)" instead of displaying directory metadata. The directory list works correctly. Investigation pending — fix planned for v0.5.x.
+
 - **Sidecar stale binary** (source-build only) — if you cloned the repo and built from source before Phase 1 commits were merged, rebuild the sidecar binary: `cd sidecar && bun run build:win-x64`. Pre-built release binaries are current and unaffected.
-
-## [0.5.0-beta.2] — pending
-
-### Fixed
-
-- **Directory inspector fallback** — `directoryDetails` now falls back to `ALL_DIRECTORIES` on `ORA-00942` instead of returning `{detail: null}`. Users without `DBA_DIRECTORIES` access now see full directory detail including path, owner, and grants (PR #56)
-- **Scheduler Jobs query chain** — `schedulerJobsList` DBA fallback now queries `ALL_SCHEDULER_JOBS` and `USER_SCHEDULER_JOBS` in parallel. Fixes 0-row result for schema owners who lack `CREATE JOB` privilege but have their own scheduled jobs (PR #56)
-
-### Known Issues
-
-- **Scheduler Jobs cross-schema USER fallback** — when a non-DBA user browses *another* user's schema and that schema has no jobs visible via `ALL_SCHEDULER_JOBS`, the `USER_SCHEDULER_JOBS` supplement may surface the *browser's own* jobs labelled with the target schema's owner name. Requires all four conditions simultaneously (cross-schema view + no DBA access + no ALL_SCHEDULER_JOBS rows + browser has own USER_SCHEDULER_JOBS entries). Workaround: grant `SELECT_CATALOG_ROLE` to the connecting user. See `docs/superpowers/known-issues/item-1b-scheduler-jobs-cross-schema.md`.
 
 ## [0.5.0-beta.1] — 2026-05-11
 
