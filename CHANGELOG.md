@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Download page on veesker.cloud was showing v0.2.4 after v0.5.0-beta.1 release. Manual update applied + CD pipeline fixes.
+- `release.yml` sed regex was `[0-9.]*`, breaking on pre-release version strings (`-beta.X`, `-rc.X`). Changed to `[^"]*` to match any quoted version.
+- `release.yml` "Update site version" step now updates `src/app.html` JSON-LD `softwareVersion` in addition to `src/routes/download/+page.svelte`. Previously only the download page was updated, leaving SEO structured data outdated.
+- `SITE_DEPLOY_TOKEN` regenerated with correct owner scope (`veesker-cloud` org + `veesker-site` contents write). Original token used personal account scope, causing `git push` to fail with HTTP 403 on every release.
+- Site `/changelog` had editorial dates that did not match actual git tag dates. All entries corrected to match `git log --tags` commit timestamps.
+
 ### Known Issues
 
 - **Directory detail panel** — even with `SELECT on DBA_DIRECTORIES` privilege, the inspector still shows "Directory details not available (requires SELECT on DBA_DIRECTORIES)" instead of displaying directory metadata. The directory list works correctly. Investigation pending — fix planned for v0.5.x.
