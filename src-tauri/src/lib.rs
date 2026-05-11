@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0
 // https://github.com/veesker-cloud/veesker-community-edition
 
+mod audit;
 mod commands;
 mod crypto;
 mod persistence;
@@ -16,7 +17,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio::sync::Mutex;
 
-use crate::commands::{ActiveSessionEnv, AirGapState, PsdpmState};
+use crate::commands::{ActiveSessionEnv, AirGapState, AuditChainState, PsdpmState, VerifyChainRateLimit};
 use crate::persistence::connections::ConnectionService;
 use crate::sidecar::SidecarState;
 use crate::tray::{ActiveConnection, TrayHandle, TrayState};
@@ -78,6 +79,16 @@ pub fn run() {
         // L2.1 PSDPM (PL/SQL Developer Parity Mode) — initially off; flipped
         // to the active connection's psdpm_mode at workspace_open time.
         .manage(PsdpmState(tokio::sync::Mutex::new(false)))
+        // Single global mutex serializes audit chain writes.
+        // Acceptable while audit is sequential (1 statement at a time per
+        // active session). Multi-connection parallel execution may require
+        // per-connection chains — tracked for Item #5 (multi-conn).
+        .manage(AuditChainState(tokio::sync::Mutex::new(
+            "genesis".to_string(),
+        )))
+        .manage(VerifyChainRateLimit {
+            last_call: tokio::sync::Mutex::new(None),
+        })
         .setup(|app| {
             let app_data = app.path().app_data_dir().expect("app data dir");
             let db_path = app_data.join("veesker.db");
@@ -244,6 +255,7 @@ pub fn run() {
             commands::command_history_clear_inaccessible,
             commands::command_script_read,
             commands::audit_recent,
+            commands::audit_verify_chain,
             commands::compile_errors_get,
             commands::object_ddl_get,
             commands::object_dataflow_get,

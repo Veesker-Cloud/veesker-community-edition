@@ -189,6 +189,37 @@ async fn airgap_active(app: &AppHandle) -> bool {
 // non-user-initiated RPCs.
 pub struct PsdpmState(pub tokio::sync::Mutex<bool>);
 
+// Item #1D: HMAC-SHA256 audit chain state. Holds the last HMAC written to the
+// current session's JSONL. Resets to "genesis" on process start; each new app
+// session begins a fresh sub-chain (one sub-chain per restart within a day).
+pub struct AuditChainState(pub tokio::sync::Mutex<String>);
+
+// Item #1D: Rate-limit state for audit_verify_chain. At most 1 verify per 60s
+// to prevent runaway I/O on large JSONL files from a compromised renderer.
+pub struct VerifyChainRateLimit {
+    pub last_call: tokio::sync::Mutex<Option<std::time::Instant>>,
+}
+
+const VERIFY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainBrokenAt {
+    pub index: usize,
+    pub ts: String,
+    pub reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainVerifyResult {
+    pub ok: bool,
+    pub checked: usize,
+    pub skipped_legacy: usize,
+    pub sub_chains: usize,
+    pub broken_at: Option<ChainBrokenAt>,
+}
+
 /// Returns the canonicalized path if `path` (as supplied by the renderer) resolves to a
 /// location under one of the user-data scopes ($DOCUMENT, $DESKTOP, $DOWNLOAD, $HOME,
 /// app data dir, app config dir). Anything else is rejected to prevent a compromised
@@ -609,7 +640,7 @@ pub async fn query_execute(
             "user"
         };
         let env_val = app.state::<ActiveSessionEnv>().0.lock().await.clone();
-        let entry = write_audit_entry(&data_dir, &synthetic_input, source, env_val.as_deref());
+        let entry = write_audit_entry(&app, &data_dir, &synthetic_input, source, env_val.as_deref()).await;
         // L2.5 Activity Ledger: emit the just-written entry to the renderer for
         // real-time updates. Best-effort — emit failure does not affect the query.
         if let Some(ref e) = entry {
@@ -698,10 +729,12 @@ pub async fn history_list(
     svc.history_list(&connection_id, limit, offset, search.as_deref())
 }
 
-// L2.5: returns the JSON entry that was just written so callers can emit it
-// to the renderer (Activity Ledger). Returns None if the audit dir or file
-// could not be created/opened — emit is then skipped.
-fn write_audit_entry(
+// L2.5 + Item #1D: returns the JSON entry written to the Activity Ledger JSONL.
+// Each entry is HMAC-SHA256 signed (chain: prevHash → body → hmac) and then
+// AES-256-GCM encrypted. Returns None if the audit dir or file cannot be
+// created/opened — emit is then skipped (best-effort; never blocks SQL execution).
+async fn write_audit_entry(
+    app: &AppHandle,
     app_data_dir: &std::path::Path,
     input: &HistorySaveInput,
     source: &str,
@@ -714,7 +747,13 @@ fn write_audit_entry(
     let now = chrono::Utc::now();
     let date = now.format("%Y-%m-%d").to_string();
     let path = audit_dir.join(format!("{date}.jsonl"));
-    let entry = serde_json::json!({
+
+    // Item #1D: lock the chain mutex before building the entry so prevHash and
+    // hmac are written atomically with the file append.
+    let chain = app.state::<AuditChainState>();
+    let mut prev_hash_guard = chain.0.lock().await;
+
+    let body_value = serde_json::json!({
         "ts":           now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         "connectionId": input.connection_id,
         "host":         input.host.as_deref().unwrap_or(""),
@@ -729,15 +768,27 @@ fn write_audit_entry(
         "env":          env.unwrap_or(""),
         // L2.2 Origin attribution. Defaults to "user_typed" when missing so
         // legacy callers (history_save) still produce a valid origin for the
-        // Activity Ledger filter UI.
+        // Activity Ledger filter UI. These fields are part of the HMAC body —
+        // any tampering with origin invalidates the chain.
         "origin":       input.origin.clone().unwrap_or_else(|| "user_typed".to_string()),
         "originDetail": input.origin_detail,
     });
-    // L1.4 (Sprint C, Onda 1.B): envelope each line in AES-256-GCM. Legacy
-    // plaintext lines (`{...}`) and encrypted lines (`02:<base64>`) coexist
-    // in the same file — read paths detect by prefix. Rendering to the
-    // Activity Ledger uses the plain entry, so the renderer never sees
-    // ciphertext.
+    let body_str = body_value.to_string();
+
+    let key = crate::audit::chain::get_or_create_key();
+    let hmac = crate::audit::chain::compute_hmac(&key, &prev_hash_guard, &body_str);
+
+    let mut entry_obj = body_value.as_object().cloned().unwrap_or_default();
+    entry_obj.insert(
+        "prevHash".to_string(),
+        Value::String(prev_hash_guard.clone()),
+    );
+    entry_obj.insert("hmac".to_string(), Value::String(hmac.clone()));
+
+    let entry = Value::Object(entry_obj);
+    // L1.4 (Sprint C, Onda 1.B) — wrap the HMAC-signed body in AES-GCM.
+    // HMAC was computed over the plain body BEFORE encryption; a verifier with
+    // both keys decrypts → strips hmac/prevHash → recomputes HMAC → must match.
     let body = entry.to_string();
     let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
     let line_payload = match crate::crypto::encrypt_audit_line(&cipher_key, &body) {
@@ -753,6 +804,8 @@ fn write_audit_entry(
     } else {
         return None;
     }
+    // Advance in-memory chain only after the entry is durably on disk.
+    *prev_hash_guard = hmac;
     Some(entry)
 }
 
@@ -762,7 +815,7 @@ pub async fn history_save(app: AppHandle, input: HistorySaveInput) -> Result<i64
         // L2.5 Activity Ledger: emit the entry so the renderer panel updates
         // even when the SQL was logged through history_save (e.g. background
         // jobs that don't go through query_execute).
-        let entry = write_audit_entry(&data_dir, &input, "user", None);
+        let entry = write_audit_entry(&app, &data_dir, &input, "user", None).await;
         if let Some(ref e) = entry {
             let _ = app.emit("audit:append", e);
         }
@@ -815,6 +868,101 @@ pub async fn audit_recent(app: AppHandle, limit: Option<i64>) -> Vec<Value> {
     entries.reverse();
     entries.truncate(limit);
     entries
+}
+
+// Item #1D: Pure, testable chain verification logic. Reads a JSONL file,
+// decrypts each line, and verifies the HMAC chain. "genesis" prevHash values
+// mark the start of a new sub-chain (one per app session/restart) — these are
+// not treated as breaks.
+pub fn verify_chain_file(path: &Path, key: &[u8]) -> ChainVerifyResult {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return ChainVerifyResult { ok: true, checked: 0, skipped_legacy: 0, sub_chains: 0, broken_at: None },
+    };
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(t) => t,
+        Err(_) => return ChainVerifyResult { ok: false, checked: 0, skipped_legacy: 0, sub_chains: 0,
+            broken_at: Some(ChainBrokenAt { index: 0, ts: String::new(), reason: "file_not_utf8".to_string() }) },
+    };
+    let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
+    let mut checked: usize = 0;
+    let mut skipped_legacy: usize = 0;
+    let mut sub_chains: usize = 0;
+    let mut expected_prev = String::new();
+    let mut raw_index: usize = 0;
+
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let plain = match crate::crypto::decrypt_audit_line_if_envelope(&cipher_key, line) {
+            Ok(Some(p)) => p,
+            Ok(None) => line.to_string(),
+            Err(_) => { raw_index += 1; continue; }
+        };
+        let obj: serde_json::Map<String, Value> = match serde_json::from_str::<Value>(&plain) {
+            Ok(Value::Object(m)) => m,
+            _ => { raw_index += 1; continue; }
+        };
+        let ts = obj.get("ts").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let stored_hmac = match obj.get("hmac").and_then(|v| v.as_str()) {
+            Some(h) => h.to_string(),
+            None => { skipped_legacy += 1; raw_index += 1; continue; }
+        };
+        let stored_prev = match obj.get("prevHash").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => { skipped_legacy += 1; raw_index += 1; continue; }
+        };
+        // Sub-chain boundary: a new app session resets prevHash to "genesis".
+        if stored_prev == "genesis" {
+            sub_chains += 1;
+            expected_prev = "genesis".to_string();
+        }
+        // Verify chain linkage.
+        if stored_prev != expected_prev {
+            return ChainVerifyResult { ok: false, checked, skipped_legacy, sub_chains,
+                broken_at: Some(ChainBrokenAt { index: raw_index, ts, reason: "prev_hash_mismatch".to_string() }) };
+        }
+        // Reconstruct body_str: strip hmac and prevHash, re-serialize.
+        let mut stripped = obj.clone();
+        stripped.remove("hmac");
+        stripped.remove("prevHash");
+        let body_str = Value::Object(stripped).to_string();
+        let recomputed = crate::audit::chain::compute_hmac(key, &stored_prev, &body_str);
+        if recomputed != stored_hmac {
+            return ChainVerifyResult { ok: false, checked, skipped_legacy, sub_chains,
+                broken_at: Some(ChainBrokenAt { index: raw_index, ts, reason: "hmac_mismatch".to_string() }) };
+        }
+        expected_prev = stored_hmac;
+        checked += 1;
+        raw_index += 1;
+    }
+    ChainVerifyResult { ok: true, checked, skipped_legacy, sub_chains, broken_at: None }
+}
+
+#[tauri::command]
+pub async fn audit_verify_chain(
+    app: AppHandle,
+    rate_limit: tauri::State<'_, VerifyChainRateLimit>,
+) -> Result<ChainVerifyResult, String> {
+    let mut last = rate_limit.last_call.lock().await;
+    if let Some(t) = *last
+        && t.elapsed() < VERIFY_MIN_INTERVAL
+    {
+        return Err("RATE_LIMITED".into());
+    }
+    *last = Some(std::time::Instant::now());
+    drop(last);
+
+    let data_dir = app.path().app_data_dir().map_err(|_| "data_dir_unavailable")?;
+    let now = chrono::Utc::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    let path = data_dir.join("audit").join(format!("{date}.jsonl"));
+    if !path.exists() {
+        return Ok(ChainVerifyResult { ok: true, checked: 0, skipped_legacy: 0, sub_chains: 0, broken_at: None });
+    }
+    let key = crate::audit::chain::get_or_create_key();
+    Ok(verify_chain_file(&path, &key))
 }
 
 #[tauri::command]
@@ -1173,7 +1321,7 @@ pub async fn tx_modal_audit(
         origin: Some(input.decision.clone()),
         origin_detail: Some(origin_detail),
     };
-    let entry = write_audit_entry(&data_dir, &synthetic_input, "user", input.env.as_deref());
+    let entry = write_audit_entry(&app, &data_dir, &synthetic_input, "user", input.env.as_deref()).await;
     if let Some(ref e) = entry {
         let _ = app.emit("audit:append", e);
     }
@@ -2475,4 +2623,238 @@ pub async fn privileges_list(
 pub async fn sessions_blocking_chain(app: AppHandle) -> Result<Value, ConnectionTestErr> {
     let res = call_sidecar(&app, "sessions.blocking.chain", json!({})).await?;
     Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // Returns (entry_json_line, hmac) for use as the next prevHash.
+    fn make_entry(key: &[u8], prev_hash: &str, ts: &str, sql: &str) -> (String, String) {
+        let body = serde_json::json!({
+            "connectionId": "c1",
+            "elapsedMs": 5u64,
+            "env": "dev",
+            "errorCode": null,
+            "errorMessage": null,
+            "host": "localhost",
+            "origin": "user_typed",
+            "originDetail": null,
+            "rowCount": 1u64,
+            "source": "user",
+            "sql": sql,
+            "success": true,
+            "ts": ts,
+            "username": "test",
+        });
+        let body_str = body.to_string();
+        let hmac = crate::audit::chain::compute_hmac(key, prev_hash, &body_str);
+        let mut entry = body.as_object().unwrap().clone();
+        entry.insert("prevHash".to_string(), Value::String(prev_hash.to_string()));
+        entry.insert("hmac".to_string(), Value::String(hmac.clone()));
+        (Value::Object(entry).to_string(), hmac)
+    }
+
+    fn legacy_entry(ts: &str, sql: &str) -> String {
+        serde_json::json!({ "ts": ts, "sql": sql, "success": true }).to_string()
+    }
+
+    #[test]
+    fn verify_nonexistent_path_returns_empty_ok() {
+        let path = std::path::Path::new("/no/such/audit/file.jsonl");
+        let result = verify_chain_file(path, &[0u8; 32]);
+        assert!(result.ok);
+        assert_eq!(result.checked, 0);
+        assert_eq!(result.skipped_legacy, 0);
+        assert_eq!(result.sub_chains, 0);
+        assert!(result.broken_at.is_none());
+    }
+
+    #[test]
+    fn verify_empty_file_returns_ok() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f).unwrap();
+        let result = verify_chain_file(f.path(), &[0u8; 32]);
+        assert!(result.ok);
+        assert_eq!(result.checked, 0);
+    }
+
+    #[test]
+    fn verify_single_valid_entry() {
+        let key = vec![1u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let (line, _) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL");
+        writeln!(f, "{line}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok, "expected ok");
+        assert_eq!(result.checked, 1);
+        assert_eq!(result.skipped_legacy, 0);
+        assert_eq!(result.sub_chains, 1);
+        assert!(result.broken_at.is_none());
+    }
+
+    #[test]
+    fn verify_two_linked_entries() {
+        let key = vec![2u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let (line1, hmac1) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL");
+        let (line2, _) = make_entry(&key, &hmac1, "2026-05-11T10:00:01.000Z", "SELECT 2 FROM DUAL");
+        writeln!(f, "{line1}").unwrap();
+        writeln!(f, "{line2}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok, "expected ok");
+        assert_eq!(result.checked, 2);
+        assert_eq!(result.sub_chains, 1);
+    }
+
+    #[test]
+    fn verify_legacy_entry_skipped() {
+        let key = vec![3u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "{}", legacy_entry("2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL")).unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok, "legacy-only file should be ok");
+        assert_eq!(result.skipped_legacy, 1);
+        assert_eq!(result.checked, 0);
+        assert_eq!(result.sub_chains, 0);
+    }
+
+    #[test]
+    fn verify_mixed_legacy_and_chained() {
+        let key = vec![4u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "{}", legacy_entry("2026-05-11T09:59:00.000Z", "SELECT OLD FROM DUAL")).unwrap();
+        let (line, _) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT NEW FROM DUAL");
+        writeln!(f, "{line}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok);
+        assert_eq!(result.skipped_legacy, 1);
+        assert_eq!(result.checked, 1);
+        assert_eq!(result.sub_chains, 1);
+    }
+
+    #[test]
+    fn verify_tampered_body_detected() {
+        let key = vec![5u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let (line, _) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL");
+        // Parse, change a field, re-serialize without updating HMAC.
+        let mut obj: serde_json::Map<String, Value> =
+            serde_json::from_str::<Value>(&line).unwrap().as_object().unwrap().clone();
+        obj.insert("sql".to_string(), Value::String("DROP TABLE employees".to_string()));
+        let tampered = Value::Object(obj).to_string();
+        writeln!(f, "{tampered}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(!result.ok, "tampered body must fail");
+        assert_eq!(result.broken_at.as_ref().unwrap().reason, "hmac_mismatch");
+    }
+
+    #[test]
+    fn verify_prev_hash_mismatch_detected() {
+        let key = vec![6u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        // Entry1 is valid — after processing, expected_prev = hmac1.
+        let (line1, _hmac1) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1");
+        // Entry2 uses "deadbeef" as prevHash — not "genesis" (so no sub-chain reset)
+        // and not hmac1 → prev_hash_mismatch fires before HMAC check.
+        let (line2, _) = make_entry(&key, "deadbeef", "2026-05-11T10:00:01.000Z", "SELECT 2");
+        writeln!(f, "{line1}").unwrap();
+        writeln!(f, "{line2}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(!result.ok, "wrong prevHash must fail");
+        assert_eq!(result.broken_at.as_ref().unwrap().reason, "prev_hash_mismatch");
+        assert_eq!(result.broken_at.as_ref().unwrap().index, 1);
+    }
+
+    #[test]
+    fn verify_two_sub_chains_ok() {
+        let key = vec![7u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        // Sub-chain 1: one entry.
+        let (line1, _) = make_entry(&key, "genesis", "2026-05-11T08:00:00.000Z", "SELECT 1");
+        // Sub-chain 2: starts fresh after an app restart (prevHash back to genesis).
+        let (line2, _) = make_entry(&key, "genesis", "2026-05-11T09:00:00.000Z", "SELECT 2");
+        writeln!(f, "{line1}").unwrap();
+        writeln!(f, "{line2}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok, "two sub-chains must still be ok");
+        assert_eq!(result.sub_chains, 2);
+        assert_eq!(result.checked, 2);
+    }
+
+    #[test]
+    fn verify_long_chain_ok() {
+        let key = vec![8u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let mut prev = "genesis".to_string();
+        for i in 0..50 {
+            let ts = format!("2026-05-11T10:{:02}:00.000Z", i);
+            let sql = format!("SELECT {i} FROM DUAL");
+            let (line, hmac) = make_entry(&key, &prev, &ts, &sql);
+            writeln!(f, "{line}").unwrap();
+            prev = hmac;
+        }
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok);
+        assert_eq!(result.checked, 50);
+        assert_eq!(result.sub_chains, 1);
+    }
+
+    #[test]
+    fn verify_wrong_key_detects_hmac_mismatch() {
+        let write_key = vec![9u8; 32];
+        let verify_key = vec![10u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let (line, _) = make_entry(&write_key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1");
+        writeln!(f, "{line}").unwrap();
+        let result = verify_chain_file(f.path(), &verify_key);
+        assert!(!result.ok, "wrong verify key must fail");
+        assert_eq!(result.broken_at.as_ref().unwrap().reason, "hmac_mismatch");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_blocks_second_immediate_call() {
+        let rl = VerifyChainRateLimit {
+            last_call: tokio::sync::Mutex::new(None),
+        };
+        // First call sets the timestamp.
+        {
+            let mut last = rl.last_call.lock().await;
+            assert!(last.is_none());
+            *last = Some(std::time::Instant::now());
+        }
+        // Immediate second check: elapsed < VERIFY_MIN_INTERVAL → rate-limited.
+        {
+            let last = rl.last_call.lock().await;
+            let elapsed = last.unwrap().elapsed();
+            assert!(
+                elapsed < VERIFY_MIN_INTERVAL,
+                "elapsed {elapsed:?} should be less than {VERIFY_MIN_INTERVAL:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_allows_after_expiry() {
+        let rl = VerifyChainRateLimit {
+            last_call: tokio::sync::Mutex::new(None),
+        };
+        // Simulate a call that happened 61 seconds ago.
+        {
+            let mut last = rl.last_call.lock().await;
+            *last = Some(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(61))
+                    .unwrap(),
+            );
+        }
+        let last = rl.last_call.lock().await;
+        let elapsed = last.unwrap().elapsed();
+        assert!(
+            elapsed >= VERIFY_MIN_INTERVAL,
+            "elapsed {elapsed:?} should be >= {VERIFY_MIN_INTERVAL:?}"
+        );
+    }
 }
