@@ -131,7 +131,7 @@ jobs:
           VERSION="${VERSION#v}"
           git clone "https://x-access-token:${GH_TOKEN}@github.com/veesker-cloud/veesker-site.git" site
           cd site
-          sed -i "s/const RELEASE = \"[0-9.]*\"/const RELEASE = \"${VERSION}\"/" src/routes/download/+page.svelte
+          sed -i "s/const RELEASE = \"[^\"]*\"/const RELEASE = \"${VERSION}\"/" src/routes/download/+page.svelte
           git config user.email "geraldovianajr@veesker.cloud"
           git config user.name "gevianajr"
           git add src/routes/download/+page.svelte
