@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0
 // https://github.com/veesker-cloud/veesker-community-edition
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use keyring::Entry;
 use sha2::{Digest, Sha256};
 
