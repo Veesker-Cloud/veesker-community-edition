@@ -1148,3 +1148,14 @@ export const auditDdlEvent = (p: {
   env: p.env,
   windowAgeMs: p.windowAgeMs,
 });
+
+// Item #1D — HMAC chain integrity verification
+export type ChainVerifyResult = {
+  ok: boolean;
+  checked: number;
+  skippedLegacy: number;
+  subChains: number;
+  brokenAt: { index: number; ts: string; reason: string } | null;
+};
+
+export const auditVerifyChain = () => call<ChainVerifyResult>("audit_verify_chain", {});
