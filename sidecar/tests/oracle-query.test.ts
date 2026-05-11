@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach, mock } from "bun:test";
-import { setSession, clearSession } from "../src/state";
+import { setSession, clearSession, setSessionSafety } from "../src/state";
 import { queryExecute } from "../src/oracle";
 import { NO_ACTIVE_SESSION, ORACLE_ERR, RpcCodedError } from "../src/errors";
 
@@ -55,6 +55,7 @@ describe("queryExecute", () => {
       rowsAffected: undefined,
     }));
     setSession(conn, "SCOTT");
+    setSessionSafety({ env: "dev" });
     const r = await queryExecute({ sql: "CREATE TABLE t (id NUMBER)" });
     expect(r.rowCount).toBe(0);
   });

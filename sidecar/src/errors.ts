@@ -51,8 +51,13 @@ export const TRUNCATE_PROD_BLOCKED   = -32040;
 
 // Item #1A T1A.8: mview.refresh on prod requires explicit server-side confirmation.
 // Mirrors the unlockUnsafeDml pattern (security item #2) for MV refresh operations.
-// -32041 and -32042 are reserved for DDL/DCL modal (Item #1E, not yet implemented).
 export const MVIEW_REFRESH_PROD_REQUIRES_CONFIRMATION = -32043;
+
+// Item #1E: DDL/DCL confirmation gate.
+// -32041: DDL blocked — no confirmation window open for this connection.
+// -32042: destructive DDL requires explicit unlock confirmation before execution.
+export const DDL_BLOCKED         = -32041;
+export const DDL_UNLOCK_REQUIRED = -32042;
 
 // Item #1B T1B.3: DBMS_METADATA.GET_DDL('AQ_QUEUE') is not supported for this queue.
 // ORA-39200 or similar → caller shows informational message and manual reconstruction.

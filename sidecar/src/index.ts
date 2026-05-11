@@ -75,6 +75,8 @@ import {
   sessionKill,
   privilegesList,
   blockingChain,
+  ddlConfirm,
+  ddlUnlock,
 } from "./oracle";
 import { aiChat, aiSuggestEndpoint } from "./ai";
 import { resolveApproval } from "./ai-approval-state";
@@ -162,6 +164,8 @@ const handlers: HandlerMap = {
   "session.kill": (params) => sessionKill(params as any),
   "privileges.list": (params) => privilegesList(params as any),
   "sessions.blocking.chain": () => blockingChain(),
+  "ddl.confirm": (params) => ddlConfirm(params as { kind: "ddl" | "destructive_ddl" }),
+  "ddl.unlock": () => ddlUnlock(),
   "mview.details": (params) => mviewDetails(params as any),
   "mview.refresh": (params) => mviewRefresh(params as any),
   "synonym.details": (params) => synonymDetails(params as any),

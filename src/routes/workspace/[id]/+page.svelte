@@ -544,6 +544,7 @@
       meta.username,
       hostOrAlias,
       meta.autoExplainMode ?? "always",
+      meta.env,
     );
 
     const openRes = await workspaceOpen(id);

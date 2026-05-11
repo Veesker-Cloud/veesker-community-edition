@@ -15,6 +15,7 @@
   import SqlEditor from "./SqlEditor.svelte";
   import DmlConfirmModal from "./DmlConfirmModal.svelte";
   import UnsafeDmlModal from "./UnsafeDmlModal.svelte";
+  import DdlConfirmModal from "./DdlConfirmModal.svelte";
   import ResultGrid from "./ResultGrid.svelte";
   import ExecutionLog from "./ExecutionLog.svelte";
   import QueryHistory from "./QueryHistory.svelte";
@@ -955,6 +956,15 @@
       message={sqlEditor.pendingUnsafeDml.message}
       onConfirm={() => sqlEditor.resolveUnsafeDml(true)}
       onCancel={() => sqlEditor.resolveUnsafeDml(false)}
+    />
+  {/if}
+  {#if sqlEditor.pendingDdl}
+    <DdlConfirmModal
+      riskLevel={sqlEditor.pendingDdl.riskLevel}
+      statements={sqlEditor.pendingDdl.statements}
+      env={env ?? "dev"}
+      onConfirm={() => sqlEditor.resolveDdl(true)}
+      onCancel={() => sqlEditor.resolveDdl(false)}
     />
   {/if}
 {/if}

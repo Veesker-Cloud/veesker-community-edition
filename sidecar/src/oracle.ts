@@ -512,8 +512,10 @@ import {
   INVALID_IDENTIFIER,
   SESSION_KILL_PROD_REQUIRES_CONFIRMATION,
   INVALID_SESSION_ID,
+  DDL_BLOCKED,
+  DDL_UNLOCK_REQUIRED,
 } from "./errors";
-import { classifySql, isReadOnlySafe, isUnsafeBulkDml, isMergeSql, isTruncateSql, extractTableFromSql } from "./sql-kind";
+import { classifySql, classifyDdl, type DdlRiskLevel, isReadOnlySafe, isUnsafeBulkDml, isMergeSql, isTruncateSql, extractTableFromSql } from "./sql-kind";
 
 /** Injectable clock — swap in tests to simulate time passing. */
 interface Clock { now(): number; }
@@ -522,10 +524,17 @@ let _clock: Clock = wallClock;
 /** Test-only — never call this in production code. */
 export function _testInjectClock(c: Clock): void { _clock = c; }
 export function _testResetClock(): void { _clock = wallClock; }
+export function _testResetDdlWindow(): void { _ddlWindow = null; }
 
 type UnsafeDmlWindow = { table: string; expiresAt: number };
 let _unsafeDmlWindow: UnsafeDmlWindow | null = null;
 const UNSAFE_DML_WINDOW_TTL_MS = 15 * 60 * 1000;
+
+// Item #1E: DDL confirmation window. Scoped to the active connection — cleared
+// in openSession() so a new connection never inherits a prior window.
+type DdlWindow = { kind: "ddl" | "destructive_ddl"; openedAt: number; expiresAt: number };
+let _ddlWindow: DdlWindow | null = null;
+const DDL_WINDOW_TTL_MS = 5 * 60 * 1000;
 
 /**
  * Belt-and-suspenders runtime assertion that mirrors the global
@@ -611,6 +620,7 @@ export async function openSession(p: OpenSessionParams): Promise<OpenSessionResu
       clearSession();
     }
     _unsafeDmlWindow = null;
+    _ddlWindow = null;
 
     const conn = await buildConnection(p);
     try {
@@ -669,6 +679,8 @@ export async function closeSession(): Promise<{ closed: true }> {
       }
       clearSession();
     }
+    _unsafeDmlWindow = null;
+    _ddlWindow = null;
     return { closed: true };
   });
 }
@@ -1800,10 +1812,16 @@ export function enforcePsdpmForOrigin(origin: string | undefined): void {
  *             acknowledgeTable matching the target table name (-32038).
  *   dev/local — original warnUnsafeDml flag: single confirm via acknowledgeUnsafe (-32031).
  */
-function enforceSafetyForStatement(
+/**
+ * @param opts.dryRun - When true, returns the DDL risk level instead of throwing.
+ *   MUST be used only for pre-scan (batch collect). Does NOT open any window.
+ *   Callers MUST call ddlConfirm() and re-invoke after user approval.
+ *   Non-DDL statements always return undefined in dryRun mode.
+ */
+export function enforceSafetyForStatement(
   sql: string,
-  opts: { acknowledgeUnsafe?: boolean; acknowledgeTable?: string } = {}
-): void {
+  opts: { acknowledgeUnsafe?: boolean; acknowledgeTable?: string; dryRun?: boolean } = {}
+): DdlRiskLevel | undefined {
   const safety = getSessionSafety();
   const kind = classifySql(sql);
   const env = safety.env as string | undefined;
@@ -1863,6 +1881,80 @@ function enforceSafetyForStatement(
       );
     }
   }
+
+  // ── DDL gate (Item #1E) ──────────────────────────────────────────────────
+  if (kind === "ddl") {
+    const ddlLevel = classifyDdl(sql);
+    if (ddlLevel === "comment") return undefined;
+
+    // TRUNCATE is already gated by the isUnsafeBulkDml path (DML flow) above.
+    // Skip DDL gate to avoid double-gating TRUNCATE on staging.
+    if (isTruncateSql(sql)) return undefined;
+
+    // DEV and local: DDL passes freely.
+    // Note: security item #1 guarantees env is always set at workspace.open,
+    // so undefined env is unreachable here. Explicit allowlist (no !env clause)
+    // ensures missing env fails-closed rather than open.
+    if (env === "dev" || env === "local") {
+      return opts.dryRun ? ddlLevel : undefined;
+    }
+
+    // dryRun: return classification to caller without opening/checking window.
+    if (opts.dryRun) return ddlLevel;
+
+    const now = _clock.now();
+    const w = _ddlWindow;
+
+    if (ddlLevel === "destructive_ddl") {
+      if (w !== null && w.kind === "destructive_ddl" && now < w.expiresAt) {
+        // Window is valid — DDL_EXECUTED event is written by the frontend after success.
+        log.info(`[security] DDL_GATE_PASS kind=destructive_ddl env=${env} windowAgeMs=${now - w.openedAt}`);
+        return undefined;
+      }
+      if (w !== null && now >= w.expiresAt) {
+        log.info("[security] DDL_WINDOW_EXPIRED reason=expired");
+        _ddlWindow = null;
+      }
+      throw new RpcCodedError(
+        DDL_UNLOCK_REQUIRED,
+        `Destructive DDL requires explicit confirmation on ${env}. Open the DDL confirmation dialog first.`,
+      );
+    } else {
+      // Normal DDL: any open window (ddl OR destructive_ddl) satisfies.
+      if (w !== null && now < w.expiresAt) {
+        log.info(`[security] DDL_GATE_PASS kind=ddl env=${env} windowAgeMs=${now - w.openedAt}`);
+        return undefined;
+      }
+      if (w !== null && now >= w.expiresAt) {
+        log.info("[security] DDL_WINDOW_EXPIRED reason=expired");
+        _ddlWindow = null;
+      }
+      throw new RpcCodedError(
+        DDL_BLOCKED,
+        `DDL statement requires confirmation on ${env}. Open the DDL confirmation dialog first.`,
+      );
+    }
+  }
+
+  return undefined;
+}
+
+/** Open a DDL confirmation window for the active connection. */
+export function ddlConfirm(p: { kind: "ddl" | "destructive_ddl" }): { ok: true; expiresAt: number; openedAt: number } {
+  const now = _clock.now();
+  const expiresAt = now + DDL_WINDOW_TTL_MS;
+  _ddlWindow = { kind: p.kind, openedAt: now, expiresAt };
+  log.info(`[security] DDL_WINDOW_OPENED kind=${p.kind} expiresAt=${new Date(expiresAt).toISOString()}`);
+  return { ok: true, expiresAt, openedAt: now };
+}
+
+/** Close the DDL confirmation window explicitly (explicit_unlock). */
+export function ddlUnlock(): { ok: true } {
+  if (_ddlWindow !== null) {
+    log.info("[security] DDL_WINDOW_CLOSED reason=explicit_unlock");
+    _ddlWindow = null;
+  }
+  return { ok: true };
 }
 
 /** Open a one-shot 15-minute unlock window for a specific table on prod. */

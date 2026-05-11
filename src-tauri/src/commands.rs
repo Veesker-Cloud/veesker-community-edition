@@ -1678,6 +1678,73 @@ pub async fn unsafe_dml_confirm(
     Ok(rx.await.unwrap_or(false))
 }
 
+// ─── DDL Confirmation Gate (Item #1E) ────────────────────────────────────────
+
+fn write_ddl_event(app: &AppHandle, event_obj: Value) {
+    let Ok(data_dir) = app.path().app_data_dir() else { return };
+    let audit_dir = data_dir.join("audit");
+    if std::fs::create_dir_all(&audit_dir).is_err() { return }
+    let now = chrono::Utc::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    let path = audit_dir.join(format!("{date}.jsonl"));
+    let body = event_obj.to_string();
+    let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
+    let line = match crate::crypto::encrypt_audit_line(&cipher_key, &body) {
+        Ok(s) => format!("{s}\n"),
+        Err(_) => format!("{body}\n"),
+    };
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+    let _ = app.emit("audit:append", &event_obj);
+}
+
+#[tauri::command]
+pub async fn ddl_confirm(app: AppHandle, kind: String) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "ddl.confirm", json!({ "kind": kind })).await?;
+    let now = chrono::Utc::now();
+    write_ddl_event(&app, json!({
+        "event": "ddl_window_opened",
+        "kind": kind,
+        "user_action": "explicit_confirm",
+        "ts": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    }));
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn ddl_unlock(app: AppHandle) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "ddl.unlock", json!({})).await?;
+    let now = chrono::Utc::now();
+    write_ddl_event(&app, json!({
+        "event": "ddl_window_closed",
+        "reason": "explicit_unlock",
+        "ts": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    }));
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn audit_ddl_event(
+    app: AppHandle,
+    risk_level: String,
+    statement: String,
+    env: String,
+    window_age_ms: i64,
+) -> Result<(), ConnectionTestErr> {
+    let now = chrono::Utc::now();
+    write_ddl_event(&app, json!({
+        "event": "ddl_executed",
+        "sql_kind": "ddl",
+        "risk_level": risk_level,
+        "statement": statement.chars().take(500).collect::<String>(),
+        "env": env,
+        "window_age_ms": window_age_ms,
+        "ts": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    }));
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn confirm_rollback_tx(app: AppHandle) -> Result<bool, ConnectionTestErr> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};

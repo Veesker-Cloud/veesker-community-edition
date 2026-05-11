@@ -1129,3 +1129,22 @@ export type BlockingPair = {
 
 export const blockingChainGet = () =>
   call<{ pairs: BlockingPair[]; accessDenied: boolean }>("sessions_blocking_chain", {});
+
+// Item #1E — DDL confirmation gate
+export const ddlConfirm = (kind: "ddl" | "destructive_ddl") =>
+  call<{ ok: true; expiresAt: number; openedAt: number }>("ddl_confirm", { kind });
+
+export const ddlUnlock = () =>
+  call<{ ok: true }>("ddl_unlock", {});
+
+export const auditDdlEvent = (p: {
+  riskLevel: string;
+  statement: string;
+  env: string;
+  windowAgeMs: number;
+}) => call<void>("audit_ddl_event", {
+  riskLevel: p.riskLevel,
+  statement: p.statement,
+  env: p.env,
+  windowAgeMs: p.windowAgeMs,
+});

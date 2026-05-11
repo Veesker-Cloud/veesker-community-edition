@@ -6,6 +6,7 @@ import {
   resetTxState,
   recordTxModifying,
   setTxId,
+  setSessionSafety,
 } from "../src/state";
 import { queryExecute, connectionCommit, connectionRollback, connectionTxState } from "../src/oracle";
 
@@ -128,6 +129,7 @@ describe("syncTxStateAfterStatement (via queryExecute)", () => {
       txIdStep(null),                       // DDL implicit committed everything
     ]);
     setSession(conn, "SCOTT");
+    setSessionSafety({ env: "dev" });
     await queryExecute({ sql: "CREATE TABLE t (id NUMBER)" });
     const s = getTxState();
     expect(s.pendingStatements).toBe(0);
