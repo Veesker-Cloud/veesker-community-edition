@@ -183,12 +183,32 @@ describe("directoryDetails — path + grants", () => {
     expect(mockExecute).toHaveBeenCalledTimes(1);
   });
 
-  it("returns null detail (not throw) when DBA_DIRECTORIES raises ORA-942", async () => {
-    mockExecute.mockRejectedValueOnce({ errorNum: 942, message: "table or view does not exist" });
+  it("falls back to ALL_DIRECTORIES on DBA_DIRECTORIES ORA-942", async () => {
+    mockExecute
+      .mockRejectedValueOnce({ errorNum: 942, message: "table or view does not exist" })
+      .mockResolvedValueOnce({
+        rows: [{ DIRECTORY_NAME: "DATA_PUMP_DIR", OWNER: "SYS", DIRECTORY_PATH: "/opt/oracle/dpdump" }],
+      })
+      .mockResolvedValueOnce({ rows: [] }); // grants query
 
     const result = await directoryDetails({ name: "DATA_PUMP_DIR" });
 
+    expect(result.detail).not.toBeNull();
+    expect(result.detail!.name).toBe("DATA_PUMP_DIR");
+    expect(result.detail!.path).toBe("/opt/oracle/dpdump");
+    expect(result.detail!.grants).toHaveLength(0);
+    expect(mockExecute).toHaveBeenCalledTimes(3); // DBA (fail) + ALL + grants
+  });
+
+  it("returns null when directory absent from both DBA and ALL", async () => {
+    mockExecute
+      .mockRejectedValueOnce({ errorNum: 942, message: "table or view does not exist" })
+      .mockResolvedValueOnce({ rows: [] }); // ALL also has no row
+
+    const result = await directoryDetails({ name: "MISSING_DIR" });
+
     expect(result.detail).toBeNull();
+    expect(mockExecute).toHaveBeenCalledTimes(2); // DBA (fail) + ALL (empty)
   });
 
   it("returns empty grants array when DBA_TAB_PRIVS raises ORA-942", async () => {

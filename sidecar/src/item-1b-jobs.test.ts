@@ -113,17 +113,58 @@ describe("schedulerJobsList — DBA_SCHEDULER_JOBS + DBA_JOBS legacy", () => {
     expect(result.legacyJobs[0].broken).toBe(false);
   });
 
-  it("ORA-942 fallback for DBA_SCHEDULER_JOBS", async () => {
-    // Concurrent launch order: #1 = DBA_SCHEDULER_JOBS, #2 = DBA_JOBS (legacy), #3 = ALL_SCHEDULER_JOBS (fallback)
+  it("ORA-942 fallback for DBA_SCHEDULER_JOBS — ALL returns jobs", async () => {
+    // Call order: #1=DBA_SCHEDULER_JOBS (fail), #2=DBA_JOBS legacy, #3=ALL_SCHEDULER_JOBS, #4=USER_SCHEDULER_JOBS
     mockExecute
       .mockRejectedValueOnce({ errorNum: 942, message: "table or view does not exist" })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ OWNER: "HR", JOB_NAME: "GATHER_STATS", JOB_TYPE: "PLSQL_BLOCK", STATE: "SCHEDULED", ENABLED: "TRUE", RUN_COUNT: 1, FAILURE_COUNT: 0, NEXT_RUN_DATE: null, SCHEDULE_NAME: null, PROGRAM_NAME: null, COMMENTS: null }] });
+      .mockResolvedValueOnce({ rows: [] }) // DBA_JOBS legacy
+      .mockResolvedValueOnce({ rows: [{ OWNER: "HR", JOB_NAME: "GATHER_STATS", JOB_TYPE: "PLSQL_BLOCK", STATE: "SCHEDULED", ENABLED: "TRUE", RUN_COUNT: 1, FAILURE_COUNT: 0, NEXT_RUN_DATE: null, SCHEDULE_NAME: null, PROGRAM_NAME: null, COMMENTS: null }] }) // ALL
+      .mockResolvedValueOnce({ rows: [] }); // USER (empty — no supplement needed)
 
     const result = await schedulerJobsList({ owner: "HR" });
 
     expect(result.jobs.length).toBeGreaterThan(0);
-    expect(mockExecute).toHaveBeenCalledTimes(3);
+    expect(mockExecute).toHaveBeenCalledTimes(4);
+  });
+
+  it("supplements with USER_SCHEDULER_JOBS when ALL_SCHEDULER_JOBS returns empty", async () => {
+    // DBA fails → DBA_JOBS legacy empty → ALL_SCHEDULER_JOBS empty → USER_SCHEDULER_JOBS has jobs
+    mockExecute
+      .mockRejectedValueOnce({ errorNum: 942, message: "table or view does not exist" }) // DBA_SCHEDULER_JOBS
+      .mockResolvedValueOnce({ rows: [] }) // DBA_JOBS (legacy, parallel)
+      .mockResolvedValueOnce({ rows: [] }) // ALL_SCHEDULER_JOBS (no rows for user without CREATE JOB priv)
+      .mockResolvedValueOnce({ // USER_SCHEDULER_JOBS — always returns current user's jobs
+        rows: [{
+          OWNER: "GIMBIAS", JOB_NAME: "NIGHTLY_BACKUP", JOB_TYPE: "PLSQL_BLOCK",
+          STATE: "SCHEDULED", ENABLED: "TRUE", RUN_COUNT: 3, FAILURE_COUNT: 0,
+          NEXT_RUN_DATE: null, SCHEDULE_NAME: null, PROGRAM_NAME: null, COMMENTS: null,
+        }],
+      });
+
+    const result = await schedulerJobsList({ owner: "GIMBIAS" });
+
+    expect(result.jobs).toHaveLength(1);
+    expect(result.jobs[0].name).toBe("NIGHTLY_BACKUP");
+    expect(result.jobs[0].owner).toBe("GIMBIAS");
+    expect(mockExecute).toHaveBeenCalledTimes(4);
+  });
+
+  it("deduplicates when ALL and USER return overlapping jobs", async () => {
+    const jobRow = {
+      OWNER: "GIMBIAS", JOB_NAME: "SHARED_JOB", JOB_TYPE: "PLSQL_BLOCK",
+      STATE: "SCHEDULED", ENABLED: "TRUE", RUN_COUNT: 1, FAILURE_COUNT: 0,
+      NEXT_RUN_DATE: null, SCHEDULE_NAME: null, PROGRAM_NAME: null, COMMENTS: null,
+    };
+    mockExecute
+      .mockRejectedValueOnce({ errorNum: 942 }) // DBA_SCHEDULER_JOBS
+      .mockResolvedValueOnce({ rows: [] }) // DBA_JOBS legacy
+      .mockResolvedValueOnce({ rows: [jobRow] }) // ALL_SCHEDULER_JOBS
+      .mockResolvedValueOnce({ rows: [jobRow] }); // USER_SCHEDULER_JOBS same job
+
+    const result = await schedulerJobsList({ owner: "GIMBIAS" });
+
+    expect(result.jobs).toHaveLength(1); // deduped — not 2
+    expect(result.jobs[0].name).toBe("SHARED_JOB");
   });
 
   it("both ORA-942 returns empty arrays", async () => {

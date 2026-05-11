@@ -1150,8 +1150,22 @@ export async function directoryDetails(p: {
       if (!r) return { detail: null };
       base = { name: r.DIRECTORY_NAME, owner: r.OWNER, path: r.DIRECTORY_PATH };
     } catch (e: any) {
-      if (e.errorNum === 942) return { detail: null };
-      throw e;
+      if (e.errorNum !== 942) throw e;
+      log.info("[schema] DBA_DIRECTORIES not accessible (ORA-00942), fallback to ALL_DIRECTORIES for detail");
+      const res = await conn.execute<{
+        DIRECTORY_NAME: string;
+        OWNER: string;
+        DIRECTORY_PATH: string;
+      }>(
+        `SELECT directory_name, owner, directory_path
+           FROM all_directories
+          WHERE directory_name = :name`,
+        { name: p.name.toUpperCase() },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT }
+      );
+      const r = res.rows?.[0];
+      if (!r) return { detail: null };
+      base = { name: r.DIRECTORY_NAME, owner: r.OWNER, path: r.DIRECTORY_PATH };
     }
 
     let grants: DirectoryGrant[] = [];
@@ -3531,18 +3545,34 @@ export async function schedulerJobsList(p: {
         } catch (err: unknown) {
           const oraNum = (err as { errorNum?: number }).errorNum;
           if (oraNum === 942) {
-            log.info("[schema] DBA_SCHEDULER_JOBS not accessible (ORA-00942), trying ALL_SCHEDULER_JOBS");
-            res = await conn.execute<Record<string, unknown>>(
-              `SELECT j.OWNER, j.JOB_NAME, j.JOB_TYPE, j.STATE,
-                      j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
-                      j.NEXT_RUN_DATE, j.SCHEDULE_NAME, j.PROGRAM_NAME,
-                      j.COMMENTS
-               FROM ALL_SCHEDULER_JOBS j
-               WHERE j.OWNER = :owner
-               ORDER BY j.JOB_NAME
-               FETCH FIRST 500 ROWS ONLY`,
-              { owner: p.owner },
-            );
+            log.info("[schema] DBA_SCHEDULER_JOBS not accessible (ORA-00942), trying ALL_SCHEDULER_JOBS + USER_SCHEDULER_JOBS");
+            const [allRes, userRes] = await Promise.allSettled([
+              conn.execute<Record<string, unknown>>(
+                `SELECT j.OWNER, j.JOB_NAME, j.JOB_TYPE, j.STATE,
+                        j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
+                        j.NEXT_RUN_DATE, j.SCHEDULE_NAME, j.PROGRAM_NAME,
+                        j.COMMENTS
+                 FROM ALL_SCHEDULER_JOBS j
+                 WHERE j.OWNER = :owner
+                 ORDER BY j.JOB_NAME
+                 FETCH FIRST 500 ROWS ONLY`,
+                { owner: p.owner },
+              ),
+              conn.execute<Record<string, unknown>>(
+                `SELECT :owner AS OWNER, j.JOB_NAME, j.JOB_TYPE, j.STATE,
+                        j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
+                        j.NEXT_RUN_DATE, j.SCHEDULE_NAME, j.PROGRAM_NAME,
+                        j.COMMENTS
+                 FROM USER_SCHEDULER_JOBS j
+                 ORDER BY j.JOB_NAME
+                 FETCH FIRST 500 ROWS ONLY`,
+                { owner: p.owner },
+              ),
+            ]);
+            const allRows = allRes.status === "fulfilled" ? (allRes.value.rows ?? []) : [];
+            const userRows = userRes.status === "fulfilled" ? (userRes.value.rows ?? []) : [];
+            const seen = new Set(allRows.map((r) => String(r.JOB_NAME)));
+            res = { rows: [...allRows, ...userRows.filter((r) => !seen.has(String(r.JOB_NAME)))] };
           } else {
             throw err;
           }
