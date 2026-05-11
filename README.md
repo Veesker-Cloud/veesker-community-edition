@@ -4,9 +4,9 @@
 
 # Veesker Community Edition
 
-**The Oracle desktop IDE — free forever. Works with Oracle 9i through 26ai.**
+**Native Oracle IDE built for safety, auditability, and AI.**
 
-A native desktop IDE with a multi-statement SQL editor, AI assistant (BYOK), PL/SQL debugger, vector search studio, and no-code REST API builder — all in one app, no Oracle client required. 100% open-source under Apache 2.0.
+A native desktop IDE with a multi-statement SQL editor, AI assistant (BYOK), PL/SQL debugger, vector search studio, and no-code REST API builder — all in one app, no Oracle client required. Works with Oracle 9i through 26ai. 100% open-source under Apache 2.0.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-E85D3C.svg)](LICENSE) [![Community Edition](https://img.shields.io/badge/edition-Community-E85D3C.svg)](https://veesker.cloud) [![Built with Tauri 2](https://img.shields.io/badge/built%20with-Tauri%202-24C8D8?logo=tauri&logoColor=white)](https://tauri.app) [![Svelte 5](https://img.shields.io/badge/Svelte-5-FF3E00?logo=svelte&logoColor=white)](https://svelte.dev) [![Oracle 9i–26ai](https://img.shields.io/badge/Oracle-9i%E2%80%9326ai-F80000?logo=oracle&logoColor=white)](https://oracle.com)
 
@@ -175,23 +175,19 @@ If you need warranty, SLA, or commercial support, that requires a separate signe
 
 ## Current State & Roadmap
 
-> **Advanced technical preview.** Veesker is under active development. Core features are stable
-> and production-tested by the author on real Oracle databases, but this is not yet a drop-in
-> replacement for Toad or PL-SQL Developer in feature breadth. Recommended: validate in a
-> non-production environment before use on critical databases.
->
-> **Current known gaps:** schema browser missing Materialized Views, Synonyms, DB Links, Jobs
-> and Scheduler objects. Multi-connection requires one app instance per database today
-> (multi-connection workspaces are the next major release).
+> **Beta.** Veesker is under active development. Core features are stable and production-tested
+> by the author on real Oracle databases, but this is not yet a drop-in replacement for Toad or
+> PL/SQL Developer in feature breadth. Recommended: validate in a non-production environment
+> before use on critical databases.
 
-| Release | Target | What ships |
+| Release | Status | What ships |
 |---|---|---|
-| **Current** | May 2026 | SQL editor, PL/SQL debugger, AI assistant (BYOK), Vector Search Studio, ORDS builder, env-calibrated DML safety (DEV/STAGING/PROD tiers), AES-256-GCM audit log |
-| **v0.5-beta** | Q3 2026 | Schema browser complete (MV · synonyms · DB links · jobs · scheduler), DDL/DCL confirmation modal, multi-connection workspaces (one Oracle session per workspace) |
-| **v0.6** | Q4 2026 | Multiple independent SQL windows, edit-in-grid SELECT FOR UPDATE |
-| **v1.0** | Q1 2027 | Linux packaging (.deb/.AppImage), Windows code signing, macOS notarization, performance benchmarks |
-| post-v1.0 | Q1–Q2 2027 | TX close hooks across all workspace events (Item #4 Phase D) |
-| **Cloud Edition** | H2 2027 | Multi-user governance, SSO/SAML, centralized audit, schema-aware AI without BYOK |
+| **v0.5.0-beta.1** | ✅ May 2026 | Schema browser complete (18 object kinds: MV · synonyms · DB links · directories · queues · scheduler · legacy jobs · DB users · privileges), DDL/DCL confirmation gate, Sessions monitor + KILL, HMAC-SHA256 tamper-evident audit chain, Verify Chain UI |
+| **v0.5.x** | 🔜 patch | Directory inspector fallback to `USER_DIRECTORIES`, Scheduler Jobs query fallback chain to `ALL_SCHEDULER_JOBS` / `USER_SCHEDULER_JOBS` |
+| **v0.6** | Q3 2026 | Multiple independent SQL windows, edit-in-grid SELECT FOR UPDATE |
+| **v1.0** | Q4 2026 | Linux packaging (.deb/.AppImage), Windows code signing, macOS notarization, performance benchmarks |
+| post-v1.0 | Q1 2027 | TX close hooks across all workspace events (Item #4 Phase D) |
+| **Cloud Edition** | H1 2027 | Multi-user governance, SSO/SAML, centralized audit, schema-aware AI without BYOK |
 
 [→ Full technical roadmap](docs/superpowers/roadmap/2026-05-09-master-roadmap.md) (internal, updated each phase)
 
@@ -224,11 +220,12 @@ For commercial inquiries, partnerships, or trademark permission, reach out via e
 
 ### Schema browser
 
-- **All object kinds** — Tables, Views, Sequences, Procedures, Functions, Packages, Triggers, Types, REST Modules
+- **18 object kinds** — Tables, Views, Sequences, Procedures, Functions, Packages, Triggers, Types, REST Modules, **Materialized Views, Synonyms, DB Links, Directories, Advanced Queues, Scheduler Jobs, Legacy DBMS_JOB, DB Users, Privileges & Grants**
 - **Per-schema vector indicator** — schemas containing tables with VECTOR columns are flagged
 - **Smart filtering** — toggle visibility per kind, hide system schemas, full-text search across all objects
 - **Object kind counts** — at a glance, see how much is in each schema
 - **System schema toggle** — show/hide ANONYMOUS, SYS, MDSYS, etc.
+- **DBA → ALL → USER_* fallback** — every object kind degrades gracefully when DBA privileges are unavailable
 
 ### Table inspector
 
@@ -282,6 +279,18 @@ A pure-TypeScript library for reading and writing `.vsk` files — Veesker's ope
 
 The full sandbox workflow — owner build pipeline, hosted publish, recipient management, member open/query UX — is a Cloud Edition feature that consumes this engine.
 
+### Safety Layer
+
+Veesker treats your production database as a high-value asset, not just a connection target.
+
+- **4-layer PROD hard-lock** — PSDPM (production safety decision point) → server-side env guard → `validateOracleIdentifier` input validation → fail-closed defaults. Each layer is independent; all four must pass for any write-path action to execute in production
+- **DDL/DCL confirmation gate** — DDL statements (CREATE, ALTER, DROP, etc.) require explicit user confirmation with a 5-minute per-connection window. Dev and local environments are allowlisted; production is always gated
+- **Env-calibrated DML safety** — DEV: single confirm; STAGING: double confirm + type table name; PROD: block + explicit unlock with 15-min decay. Configured from the connection's declared environment
+- **`validateOracleIdentifier` defense-in-depth** — all Oracle identifiers entering any write-path action are validated against `/^[A-Z][A-Z0-9_$#]{0,127}$/`. SQL injection via identifier paths is structurally impossible
+- **Zero string interpolation in SQL** — owner/name pairs are always composed server-side as `:owner||'.'||:name`; no user input reaches SQL string context
+- **Sessions monitor** — view all active sessions; `KILL SESSION` requires prod-confirm (waived on dev/local)
+- **T1A.8 action pattern** — all 5 write-path action buttons (mview.refresh, job.run, job.disable, session.kill, DDL gate) follow the same env-guard + confirm architecture
+
 ### PL/SQL features
 
 - **PL/SQL editor** — full CRUD on procedures, functions, packages, triggers, and types with syntax highlighting
@@ -331,9 +340,11 @@ A no-code REST API builder using Oracle ORDS:
 
 - **No auto-commit** — every transaction requires an explicit COMMIT or ROLLBACK.
 - **User-initiated execution** — Veesker never runs SQL in the background or automatically.
-- **OS keychain credentials** — passwords are stored in Windows Credential Manager / macOS Keychain / Linux libsecret, never in plain files.
-- **Local audit trail** — every executed statement is logged to `<app_data>/audit/YYYY-MM-DD.jsonl` by the native host process.
+- **OS keychain credentials** — passwords are stored in Windows Credential Manager / macOS Keychain / Linux libsecret, never in plain files. 4 independent keychain keys: `db-master`, `audit-cipher`, `command-history`, `audit-hmac`.
+- **AES-256-GCM encrypted audit log** — every executed statement is encrypted at rest before being appended to `<app_data>/audit/YYYY-MM-DD.jsonl`.
+- **HMAC-SHA256 tamper-evident chain** — each audit entry links to the previous via `prevHash` + `hmac` fields. Any modification to a historical entry is detectable via "Verify Chain" in the Activity tab. Sub-chain restarts are tracked; the chain never produces false positives on app restart.
 - **AI never executes** — Sheep (AI assistant) only suggests SQL. Execution always requires your explicit approval.
+- **DDL/DCL safety gate** — DDL requires confirmation in production; dev/local environments are allowlisted.
 
 See [SECURITY.md](SECURITY.md) for the full security policy, vulnerability disclosure, and AI data disclosure details.
 
