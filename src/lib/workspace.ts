@@ -19,7 +19,9 @@ export type ObjectKind =
   | "MATERIALIZED_VIEW" | "SYNONYM" | "DB_LINK"
   | "DIRECTORY"
   | "QUEUE"
-  | "SCHEDULER_JOB";
+  | "SCHEDULER_JOB"
+  | "DB_USER"
+  | "PRIVILEGE";
 export type ObjectRef = { name: string };
 export type ObjectRefWithStatus = { name: string; status: string };
 export type Column = {
@@ -1020,3 +1022,110 @@ export const dbmsJobBrokenRpc = (jobId: number) =>
 
 export const dbmsJobUnbrokenRpc = (jobId: number) =>
   call<{ ok: true }>("dbms_job_unbroken", { jobId });
+
+// ── Item #1C T1C.1+T1C.2: Users + Sessions ───────────────────────────────────
+
+export type UserDetails = {
+  username: string;
+  accountStatus: string;
+  lockDate: string | null;
+  expiryDate: string | null;
+  created: string;
+  profile: string | null;
+  authenticationType: string | null;
+  defaultTablespace: string | null;
+  temporaryTablespace: string | null;
+  fallbackMode: boolean;
+};
+
+export type ProfileRow = {
+  resourceName: string;
+  resourceType: string;
+  limit: string;
+};
+
+export type QuotaRow = {
+  tablespaceName: string;
+  bytes: number | null;
+  maxBytes: number | null;
+  blocks: number | null;
+  maxBlocks: number | null;
+};
+
+export type SessionRow = {
+  sid: number;
+  serial: number;
+  status: string;
+  username: string | null;
+  osuser: string | null;
+  machine: string | null;
+  program: string | null;
+  module: string | null;
+  logonTime: string | null;
+  lastCallEt: number | null;
+  blockingSession: number | null;
+  blockingSessionStatus: string | null;
+  waitClass: string | null;
+  event: string | null;
+  secondsInWait: number | null;
+  sqlId: string | null;
+};
+
+export const userDetailsGet = (username: string) =>
+  call<UserDetails | null>("user_details", { username });
+
+export const userProfileDetailsGet = (profile: string) =>
+  call<{ rows: ProfileRow[]; accessDenied: boolean }>("user_profile_details", { profile });
+
+export const userQuotasGet = (username: string) =>
+  call<{ quotas: QuotaRow[]; accessDenied: boolean }>("user_quotas", { username });
+
+export const sessionsListAllGet = () =>
+  call<{ sessions: SessionRow[]; accessDenied: boolean }>("sessions_list_all", {});
+
+export const sessionSqlPreviewGet = (sqlId: string) =>
+  call<{ sql: string | null }>("session_sql_preview", { sqlId });
+
+export const sessionPrivCheckGet = () =>
+  call<{ hasAlterSystem: boolean }>("session_priv_check", {});
+
+export const sessionKillRpc = (sid: number, serial: number, confirmedProdKill?: boolean) =>
+  call<{ ok: true }>("session_kill", { sid, serial, confirmedProdKill });
+
+// ── Item #1C T1C.4: Privileges & Grants ───────────────────────────────────────
+
+export type RolePrivRow = { grantedRole: string; adminOption: string; defaultRole: string };
+export type SysPrivRow  = { privilege: string; adminOption: string };
+export type TabPrivRow  = { owner: string; tableName: string; grantor: string | null; privilege: string; grantable: string; hierarchy: string | null };
+export type GrantedToRow= { grantee: string; tableName: string; privilege: string; grantable: string };
+
+export type PrivilegesList = {
+  rolePrivs: RolePrivRow[];
+  sysPrivs: SysPrivRow[];
+  tabPrivs: TabPrivRow[];
+  grantedTo: GrantedToRow[];
+  tabPrivsAccessDenied: boolean;
+  grantedToAccessDenied: boolean;
+  fallbackMode: boolean;
+};
+
+export const privilegesListGet = (schema: string) =>
+  call<PrivilegesList>("privileges_list", { schema });
+
+// ── Item #1C T1C.5: Blocking chain ───────────────────────────────────────────
+
+export type BlockingPair = {
+  blockedSid: number;
+  blockedSerial: number;
+  blockedUser: string | null;
+  waitClass: string | null;
+  event: string | null;
+  secondsInWait: number | null;
+  blockerSid: number;
+  blockerSerial: number;
+  blockerUser: string | null;
+  blockerStatus: string | null;
+};
+
+export const blockingChainGet = () =>
+  call<{ pairs: BlockingPair[]; accessDenied: boolean }>("sessions_blocking_chain", {});

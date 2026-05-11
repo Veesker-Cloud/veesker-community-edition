@@ -47,6 +47,10 @@
     directoriesListGet,
     queuesListGet,
     schedulerJobsListGet,
+    userDetailsGet,
+    sessionsListAllGet,
+    sessionPrivCheckGet,
+    sessionSqlPreviewGet,
     SESSION_LOST,
     type WorkspaceInfo,
     type ObjectKind,
@@ -202,6 +206,8 @@
         DIRECTORY: { kind: "idle" },
         QUEUE: { kind: "idle" },
         SCHEDULER_JOB: { kind: "idle" },
+        DB_USER: { kind: "idle" },
+        PRIVILEGE: { kind: "idle" },
         SEQUENCE: { kind: "idle" },
         PROCEDURE: { kind: "idle" },
         FUNCTION: { kind: "idle" },
@@ -265,6 +271,18 @@
         if (res.error.code === SESSION_LOST) sessionLost = true;
         node.kinds[kind] = { kind: "err", message: res.error.message };
       }
+    } else if (kind === "DB_USER") {
+      const res = await userDetailsGet(node.name);
+      if (res.ok) {
+        node.kinds[kind] = res.data
+          ? { kind: "ok", value: [{ name: node.name, status: res.data.accountStatus || undefined }] }
+          : { kind: "ok", value: [] };
+      } else {
+        if (res.error.code === SESSION_LOST) sessionLost = true;
+        node.kinds[kind] = { kind: "err", message: res.error.message };
+      }
+    } else if (kind === "PRIVILEGE") {
+      node.kinds[kind] = { kind: "ok", value: [{ name: node.name }] };
     } else if (PLSQL_KINDS.includes(kind)) {
       const res = await objectsListPlsql(node.name, kind);
       if (res.ok) {
@@ -287,7 +305,7 @@
 
   function expandIfNeeded(node: SchemaNode): void {
     const kinds: ObjectKind[] = [
-      "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB", "SEQUENCE",
+      "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB", "DB_USER", "PRIVILEGE", "SEQUENCE",
       "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE",
       "REST_MODULE",
     ];
@@ -431,7 +449,7 @@
       details = { kind: "idle" };
       return;
     }
-    if (kind === "MATERIALIZED_VIEW" || kind === "SYNONYM" || kind === "DB_LINK" || kind === "DIRECTORY" || kind === "QUEUE" || kind === "SCHEDULER_JOB") {
+    if (kind === "MATERIALIZED_VIEW" || kind === "SYNONYM" || kind === "DB_LINK" || kind === "DIRECTORY" || kind === "QUEUE" || kind === "SCHEDULER_JOB" || kind === "DB_USER" || kind === "PRIVILEGE") {
       details = { kind: "idle" };
       return;
     }
@@ -497,7 +515,7 @@
     selectObject(prev.owner, prev.name, prev.kind);
   }
 
-  const NO_DETAIL_KINDS: ObjectKind[] = ["SEQUENCE", "REST_MODULE", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB"];
+  const NO_DETAIL_KINDS: ObjectKind[] = ["SEQUENCE", "REST_MODULE", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB", "DB_USER", "PRIVILEGE"];
 
   function onRetryDetails(): void {
     if (selected && !NO_DETAIL_KINDS.includes(selected.kind) && !PLSQL_KINDS.includes(selected.kind)) {
@@ -1128,7 +1146,7 @@
   {/if}
   {#if operationsPanel.isOpen}
     <div class="activity-ledger-wrap">
-      <OperationsPanel onClose={() => operationsPanel.close()} />
+      <OperationsPanel onClose={() => operationsPanel.close()} connectionEnv={meta?.env ?? ""} />
     </div>
   {:else}
     <button

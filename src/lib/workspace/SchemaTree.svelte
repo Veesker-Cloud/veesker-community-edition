@@ -54,6 +54,8 @@
     DIRECTORY: "Directories",
     QUEUE: "Queues",
     SCHEDULER_JOB: "Jobs",
+    DB_USER: "Users",
+    PRIVILEGE: "Privileges",
   };
 
   const KIND_SHORT: Record<ObjectKind, string> = {
@@ -65,6 +67,8 @@
     DIRECTORY: "Dir",
     QUEUE: "Q",
     SCHEDULER_JOB: "JOB",
+    DB_USER: "USR",
+    PRIVILEGE: "PRIV",
   };
 
   function toggleKind(kind: ObjectKind) {
@@ -75,7 +79,7 @@
   }
 
   const KIND_ORDER: ObjectKind[] = [
-    "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB", "SEQUENCE",
+    "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB", "DB_USER", "PRIVILEGE", "SEQUENCE",
     "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE",
     "REST_MODULE",
   ];
@@ -96,6 +100,8 @@
     DIRECTORY:         "hsl(45 90% 48%)",
     QUEUE:             "hsl(260 55% 58%)",
     SCHEDULER_JOB:     "hsl(200 70% 45%)",
+    DB_USER:           "hsl(220 65% 50%)",
+    PRIVILEGE:         "hsl(0 65% 50%)",
   };
 
   function isSystemSchema(name: string): boolean {

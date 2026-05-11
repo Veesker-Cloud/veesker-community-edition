@@ -5,8 +5,8 @@
 -->
 
 <script lang="ts">
-  import type { TableDetails, TableRelated, ObjectKind, Loadable, DataFlowResult, VectorIndex, VectorSearchResult, EmbedConfig, EmbedProvider, MViewDetails, SynonymDetails, DbLinkRow, DirectoryDetail, QueueRow, SchedulerJobDetails, LegacyJobDetails, SchedulerProgramDetails, SchedulerScheduleDetails, SchedulerJobPrivs } from "$lib/workspace";
-  import { tableCountRows, vectorIndexList, vectorSearch, vectorIndexCreate, vectorIndexDrop, embedCountPending, embedBatch, aiKeyGet, aiKeySave, mviewDetailsGet, mviewRefreshRpc, synonymDetailsGet, dbLinkDdlGet, directoryDetailsGet, queueDetailsGet, queueDdlGet, schedulerJobDetailsGet, legacyJobDetailsGet, schedulerJobDdlGet, schedulerProgramDetailsGet, schedulerScheduleDetailsGet, schedulerJobPrivCheckGet, schedulerJobRunRpc, schedulerJobEnableRpc, schedulerJobDisableRpc, dbmsJobRunRpc, dbmsJobBrokenRpc, dbmsJobUnbrokenRpc } from "$lib/workspace";
+  import type { TableDetails, TableRelated, ObjectKind, Loadable, DataFlowResult, VectorIndex, VectorSearchResult, EmbedConfig, EmbedProvider, MViewDetails, SynonymDetails, DbLinkRow, DirectoryDetail, QueueRow, SchedulerJobDetails, LegacyJobDetails, SchedulerProgramDetails, SchedulerScheduleDetails, SchedulerJobPrivs, UserDetails, ProfileRow, QuotaRow, SessionRow, PrivilegesList, RolePrivRow, SysPrivRow, TabPrivRow, GrantedToRow } from "$lib/workspace";
+  import { tableCountRows, vectorIndexList, vectorSearch, vectorIndexCreate, vectorIndexDrop, embedCountPending, embedBatch, aiKeyGet, aiKeySave, mviewDetailsGet, mviewRefreshRpc, synonymDetailsGet, dbLinkDdlGet, directoryDetailsGet, queueDetailsGet, queueDdlGet, schedulerJobDetailsGet, legacyJobDetailsGet, schedulerJobDdlGet, schedulerProgramDetailsGet, schedulerScheduleDetailsGet, schedulerJobPrivCheckGet, schedulerJobRunRpc, schedulerJobEnableRpc, schedulerJobDisableRpc, dbmsJobRunRpc, dbmsJobBrokenRpc, dbmsJobUnbrokenRpc, userDetailsGet, userProfileDetailsGet, userQuotasGet, sessionsListAllGet, sessionPrivCheckGet, privilegesListGet, sessionKillRpc } from "$lib/workspace";
   import { sqlEditor } from "$lib/stores/sql-editor.svelte";
   import DataFlow from "./DataFlow.svelte";
   import VectorScatter from "./VectorScatter.svelte";
@@ -66,7 +66,7 @@
   }
 
   // Reset live count + column search + empty-section toggles when object changes
-  $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); mviewData = null; synonymData = null; dbLinkDdlText = null; dbLinkDdlLoading = false; directoryData = null; directoryLoading = false; queueData = null; queueDataLoading = false; queueDdlText = null; queueDdlLoading = false; schedulerJobData = null; schedulerJobLoading = false; schedulerJobDdlText = null; schedulerJobDdlLoading = false; legacyJobData = null; legacyJobLoading = false; schedulerJobPrivs = null; expandedProgram = null; expandedSchedule = null; jobActionResult = null; confirmingProdJobAction = null; });
+  $effect(() => { void selected; liveCount = null; liveCountLoading = false; columnSearch = ""; relShowEmpty = new Set(); mviewData = null; synonymData = null; dbLinkDdlText = null; dbLinkDdlLoading = false; directoryData = null; directoryLoading = false; queueData = null; queueDataLoading = false; queueDdlText = null; queueDdlLoading = false; schedulerJobData = null; schedulerJobLoading = false; schedulerJobDdlText = null; schedulerJobDdlLoading = false; legacyJobData = null; legacyJobLoading = false; schedulerJobPrivs = null; expandedProgram = null; expandedSchedule = null; jobActionResult = null; confirmingProdJobAction = null; dbUserData = null; dbUserProfileData = null; dbUserQuotasData = null; dbUserSessionCount = null; dbUserActiveTab = "profile"; privData = null; privLoading = false; privActiveTab = "roles"; });
 
   // ── MView inspector state ──────────────────────────────────────────────────
   let mviewData = $state<MViewDetails | null>(null);
@@ -367,6 +367,77 @@
     }
   }
 
+  // ── DB_USER inspector state ───────────────────────────────────────────────
+  let dbUserData = $state<UserDetails | null>(null);
+  let dbUserLoading = $state(false);
+  let dbUserProfileData = $state<{ rows: ProfileRow[]; accessDenied: boolean } | null>(null);
+  let dbUserProfileLoading = $state(false);
+  let dbUserQuotasData = $state<{ quotas: QuotaRow[]; accessDenied: boolean } | null>(null);
+  let dbUserQuotasLoading = $state(false);
+  let dbUserSessionCount = $state<number | null>(null);
+  let dbUserActiveTab = $state<"profile" | "quotas" | "sessions" | "grants">("profile");
+
+  $effect(() => {
+    if (selected?.kind === "DB_USER") {
+      void loadDbUserInspector(selected.name);
+    }
+  });
+
+  async function loadDbUserInspector(username: string) {
+    dbUserData = null;
+    dbUserLoading = true;
+    try {
+      const res = await userDetailsGet(username);
+      if (res.ok) dbUserData = res.data;
+    } finally {
+      dbUserLoading = false;
+    }
+  }
+
+  async function loadDbUserProfile(profile: string) {
+    dbUserProfileData = null;
+    dbUserProfileLoading = true;
+    try {
+      const res = await userProfileDetailsGet(profile);
+      if (res.ok) dbUserProfileData = res.data;
+    } finally {
+      dbUserProfileLoading = false;
+    }
+  }
+
+  async function loadDbUserQuotas(username: string) {
+    dbUserQuotasData = null;
+    dbUserQuotasLoading = true;
+    try {
+      const res = await userQuotasGet(username);
+      if (res.ok) dbUserQuotasData = res.data;
+    } finally {
+      dbUserQuotasLoading = false;
+    }
+  }
+
+  // ── PRIVILEGE inspector state ─────────────────────────────────────────────
+  let privData = $state<PrivilegesList | null>(null);
+  let privLoading = $state(false);
+  let privActiveTab = $state<"roles" | "sys" | "tabPrivs" | "grantedTo">("roles");
+
+  $effect(() => {
+    if (selected?.kind === "PRIVILEGE") {
+      void loadPrivilegesInspector(selected.owner);
+    }
+  });
+
+  async function loadPrivilegesInspector(schema: string) {
+    privData = null;
+    privLoading = true;
+    try {
+      const res = await privilegesListGet(schema);
+      if (res.ok) privData = res.data;
+    } finally {
+      privLoading = false;
+    }
+  }
+
   type Tab = "overview" | "columns" | "indexes" | "related" | "dataflow" | "vectors" | "details";
   let activeTab = $state<Tab>("columns");
 
@@ -579,7 +650,9 @@
       selected?.kind === "DB_LINK" ||
       selected?.kind === "DIRECTORY" ||
       selected?.kind === "QUEUE" ||
-      selected?.kind === "SCHEDULER_JOB"
+      selected?.kind === "SCHEDULER_JOB" ||
+      selected?.kind === "DB_USER" ||
+      selected?.kind === "PRIVILEGE"
     ) {
       activeTab = "details";
     } else {
@@ -1939,6 +2012,187 @@
             {:else}
               <div class="empty-section">Job details not available (requires DBA_SCHEDULER_JOBS or ALL_SCHEDULER_JOBS access).</div>
             {/if}
+          {/if}
+        </div>
+
+      {:else if activeTab === "details" && selected.kind === "DB_USER"}
+        <div class="detail-panel">
+          {#if dbUserLoading}
+            <div class="loading-row"><span class="spinner"></span> Loading…</div>
+          {:else if dbUserData}
+            <div class="user-status-row">
+              <span class="obj-kind-tag" style="background: hsl(220 65% 50%)">USR</span>
+              <span style="font-weight: 600;">{dbUserData.username}</span>
+              {#if dbUserData.fallbackMode}
+                <span class="fallback-badge" title="DBA_USERS not accessible — showing ALL_USERS data">Limited</span>
+              {/if}
+              {#if !dbUserData.fallbackMode && dbUserData.accountStatus}
+                <span class="status-chip status-{dbUserData.accountStatus.toLowerCase().replace(/ /g, '-')}">{dbUserData.accountStatus}</span>
+                {#if dbUserData.lockDate}<span class="detail-meta">Locked: {dbUserData.lockDate}</span>{/if}
+                {#if dbUserData.expiryDate}<span class="detail-meta">Expires: {dbUserData.expiryDate}</span>{/if}
+              {/if}
+            </div>
+            <div class="detail-grid">
+              <span class="detail-key">Created</span>
+              <span class="detail-val">{dbUserData.created || "—"}</span>
+              {#if !dbUserData.fallbackMode}
+                <span class="detail-key">Profile</span>
+                <span class="detail-val">{dbUserData.profile || "DEFAULT"}</span>
+                <span class="detail-key">Auth Type</span>
+                <span class="detail-val">{dbUserData.authenticationType || "—"}</span>
+                <span class="detail-key">Default TS</span>
+                <span class="detail-val">{dbUserData.defaultTablespace || "—"}</span>
+                <span class="detail-key">Temp TS</span>
+                <span class="detail-val">{dbUserData.temporaryTablespace || "—"}</span>
+              {/if}
+            </div>
+            {#if dbUserData.fallbackMode}
+              <div class="access-denied-banner">DBA_USERS not accessible — showing ALL_USERS data only</div>
+            {/if}
+            <div class="sub-tab-bar">
+              <button class:active={dbUserActiveTab === "profile"} onclick={() => { dbUserActiveTab = "profile"; if (dbUserData?.profile && !dbUserData.fallbackMode) void loadDbUserProfile(dbUserData.profile); }}>Profile</button>
+              <button class:active={dbUserActiveTab === "quotas"} onclick={() => { dbUserActiveTab = "quotas"; void loadDbUserQuotas(dbUserData!.username); }}>Quotas</button>
+              <button class:active={dbUserActiveTab === "sessions"} onclick={() => { dbUserActiveTab = "sessions"; }}>Sessions</button>
+              <button class:active={dbUserActiveTab === "grants"} onclick={() => { dbUserActiveTab = "grants"; }}>Grants</button>
+            </div>
+            {#if dbUserActiveTab === "profile"}
+              {#if dbUserData.fallbackMode || !dbUserData.profile}
+                <div class="access-denied-banner">Profile details require DBA_PROFILES access</div>
+              {:else if dbUserProfileLoading}
+                <div class="loading-row"><span class="spinner"></span> Loading profile…</div>
+              {:else if dbUserProfileData}
+                {#if dbUserProfileData.accessDenied}
+                  <div class="access-denied-banner">DBA_PROFILES not accessible</div>
+                {:else if dbUserProfileData.rows.length === 0}
+                  <div class="empty-section">No profile limits found</div>
+                {:else}
+                  <table class="detail-table">
+                    <thead><tr><th>Resource</th><th>Type</th><th>Limit</th></tr></thead>
+                    <tbody>
+                      {#each dbUserProfileData.rows as row}
+                        <tr><td>{row.resourceName}</td><td>{row.resourceType}</td><td>{row.limit}</td></tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                {/if}
+              {:else}
+                <div class="empty-section">Click Profile to load</div>
+              {/if}
+            {:else if dbUserActiveTab === "quotas"}
+              {#if dbUserQuotasLoading}
+                <div class="loading-row"><span class="spinner"></span> Loading quotas…</div>
+              {:else if dbUserQuotasData}
+                {#if dbUserQuotasData.accessDenied}
+                  <div class="access-denied-banner">DBA_TS_QUOTAS not accessible</div>
+                {:else if dbUserQuotasData.quotas.length === 0}
+                  <div class="empty-section">No tablespace quotas assigned</div>
+                {:else}
+                  <table class="detail-table">
+                    <thead><tr><th>Tablespace</th><th>Used (bytes)</th><th>Max (bytes)</th></tr></thead>
+                    <tbody>
+                      {#each dbUserQuotasData.quotas as q}
+                        <tr>
+                          <td>{q.tablespaceName}</td>
+                          <td>{q.bytes != null ? q.bytes.toLocaleString() : "—"}</td>
+                          <td>{q.maxBytes != null ? (q.maxBytes === -1 ? "Unlimited" : q.maxBytes.toLocaleString()) : "—"}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                {/if}
+              {:else}
+                <div class="empty-section">Click Quotas to load</div>
+              {/if}
+            {:else if dbUserActiveTab === "sessions"}
+              <div class="empty-section">Open the Sessions tab in the workspace toolbar to see live sessions for this user</div>
+            {:else if dbUserActiveTab === "grants"}
+              <div class="empty-section">Select this schema's Privileges node in the tree to see grants</div>
+            {/if}
+          {:else if !dbUserLoading}
+            <div class="empty-section">User not found</div>
+          {/if}
+        </div>
+
+      {:else if activeTab === "details" && selected.kind === "PRIVILEGE"}
+        <div class="detail-panel">
+          {#if privLoading}
+            <div class="loading-row"><span class="spinner"></span> Loading privileges…</div>
+          {:else if privData}
+            <div class="inspector-header">
+              <span class="obj-kind-tag" style="background: hsl(0 65% 50%)">PRIV</span>
+              <span class="obj-name">{selected.owner}</span>
+              {#if privData.fallbackMode}
+                <span class="fallback-badge" title="DBA views not accessible — showing current session privileges only">Limited</span>
+              {/if}
+            </div>
+            {#if privData.fallbackMode}
+              <div class="access-denied-banner">DBA_ROLE_PRIVS / DBA_SYS_PRIVS not accessible — showing current session privileges only</div>
+            {/if}
+            <div class="sub-tab-bar">
+              <button class:active={privActiveTab === "roles"} onclick={() => privActiveTab = "roles"}>Role Privs ({privData.rolePrivs.length})</button>
+              <button class:active={privActiveTab === "sys"} onclick={() => privActiveTab = "sys"}>Sys Privs ({privData.sysPrivs.length})</button>
+              <button class:active={privActiveTab === "tabPrivs"} onclick={() => privActiveTab = "tabPrivs"}>Tab Privs</button>
+              <button class:active={privActiveTab === "grantedTo"} onclick={() => privActiveTab = "grantedTo"}>Granted To</button>
+            </div>
+            {#if privActiveTab === "roles"}
+              {#if privData.rolePrivs.length === 0}
+                <div class="empty-section">No role grants</div>
+              {:else}
+                <table class="detail-table">
+                  <thead><tr><th>Role</th><th>Admin</th><th>Default</th></tr></thead>
+                  <tbody>
+                    {#each privData.rolePrivs as r}
+                      <tr><td>{r.grantedRole}</td><td>{r.adminOption}</td><td>{r.defaultRole}</td></tr>
+                    {/each}
+                  </tbody>
+                </table>
+              {/if}
+            {:else if privActiveTab === "sys"}
+              {#if privData.sysPrivs.length === 0}
+                <div class="empty-section">No system privileges</div>
+              {:else}
+                <table class="detail-table">
+                  <thead><tr><th>Privilege</th><th>Admin Option</th></tr></thead>
+                  <tbody>
+                    {#each privData.sysPrivs as p}
+                      <tr><td>{p.privilege}</td><td>{p.adminOption}</td></tr>
+                    {/each}
+                  </tbody>
+                </table>
+              {/if}
+            {:else if privActiveTab === "tabPrivs"}
+              {#if privData.tabPrivsAccessDenied}
+                <div class="access-denied-banner">DBA_TAB_PRIVS not accessible</div>
+              {:else if privData.tabPrivs.length === 0}
+                <div class="empty-section">No table/object privileges received</div>
+              {:else}
+                <table class="detail-table">
+                  <thead><tr><th>Owner</th><th>Object</th><th>Privilege</th><th>Grantable</th></tr></thead>
+                  <tbody>
+                    {#each privData.tabPrivs as p}
+                      <tr><td>{p.owner}</td><td>{p.tableName}</td><td>{p.privilege}</td><td>{p.grantable}</td></tr>
+                    {/each}
+                  </tbody>
+                </table>
+              {/if}
+            {:else if privActiveTab === "grantedTo"}
+              {#if privData.grantedToAccessDenied}
+                <div class="access-denied-banner">DBA_TAB_PRIVS not accessible</div>
+              {:else if privData.grantedTo.length === 0}
+                <div class="empty-section">No grants given to others</div>
+              {:else}
+                <table class="detail-table">
+                  <thead><tr><th>Grantee</th><th>Object</th><th>Privilege</th><th>Grantable</th></tr></thead>
+                  <tbody>
+                    {#each privData.grantedTo as g}
+                      <tr><td>{g.grantee}</td><td>{g.tableName}</td><td>{g.privilege}</td><td>{g.grantable}</td></tr>
+                    {/each}
+                  </tbody>
+                </table>
+              {/if}
+            {/if}
+          {:else if !privLoading}
+            <div class="empty-section">Could not load privileges</div>
           {/if}
         </div>
 
@@ -3400,4 +3654,23 @@
     padding: 0.4rem 0.7rem;
     font-size: 11px;
   }
+  .user-status-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .status-chip { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; }
+  .status-open { background: hsl(140 60% 20%); color: hsl(140 60% 80%); }
+  .status-locked { background: hsl(0 60% 20%); color: hsl(0 60% 80%); }
+  .status-expired { background: hsl(45 60% 20%); color: hsl(45 60% 80%); }
+  .status-expired-and-locked { background: hsl(30 60% 20%); color: hsl(30 60% 80%); }
+  .access-denied-banner { background: hsl(45 80% 15%); border: 1px solid hsl(45 80% 30%); color: hsl(45 80% 75%); padding: 8px 12px; border-radius: 4px; font-size: 12px; margin: 8px 0; }
+  .fallback-badge { font-size: 10px; padding: 1px 6px; border-radius: 8px; background: hsl(45 80% 20%); color: hsl(45 80% 80%); border: 1px solid hsl(45 80% 35%); }
+  .detail-meta { font-size: 11px; color: var(--text-muted); }
+  .sub-tab-bar { display: flex; gap: 0; margin: 12px 0 8px; }
+  .sub-tab-bar button { padding: 4px 12px; font-size: 12px; background: var(--bg-surface-alt); color: var(--text-muted); border: 1px solid var(--border); cursor: pointer; font-family: inherit; }
+  .sub-tab-bar button:first-child { border-radius: 4px 0 0 4px; }
+  .sub-tab-bar button:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+  .sub-tab-bar button:not(:first-child):not(:last-child) { border-left: none; }
+  .sub-tab-bar button.active { background: hsl(220 70% 20%); color: var(--text-primary); border-color: hsl(220 60% 35%); }
+  .detail-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 4px; }
+  .detail-table th { text-align: left; padding: 4px 8px; color: var(--text-muted); border-bottom: 1px solid var(--border); font-weight: 500; }
+  .detail-table td { padding: 3px 8px; border-bottom: 1px solid var(--border); color: var(--text-primary); font-family: "JetBrains Mono", monospace; font-size: 11px; }
+  .obj-kind-tag { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px; color: #fff; letter-spacing: 0.05em; }
 </style>

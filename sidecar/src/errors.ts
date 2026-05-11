@@ -69,6 +69,12 @@ export const JOB_RUN_PROD_REQUIRES_CONFIRMATION    = -32046;
 export const JOB_DISABLE_PROD_REQUIRES_CONFIRMATION = -32048;
 export const INVALID_IDENTIFIER                     = -32049;
 
+// Item #1C T1C.3: Session kill actions.
+// -32051: SID/SERIAL# must be positive integers within valid range.
+// -32050: prod env guard for session kill (T1A.8 pattern, 3rd replication).
+export const SESSION_KILL_PROD_REQUIRES_CONFIRMATION = -32050;
+export const INVALID_SESSION_ID                      = -32051;
+
 export class RpcCodedError extends Error {
   code: number;
   data?: Record<string, unknown>;

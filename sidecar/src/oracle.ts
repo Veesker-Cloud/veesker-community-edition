@@ -510,6 +510,8 @@ import {
   JOB_RUN_PROD_REQUIRES_CONFIRMATION,
   JOB_DISABLE_PROD_REQUIRES_CONFIRMATION,
   INVALID_IDENTIFIER,
+  SESSION_KILL_PROD_REQUIRES_CONFIRMATION,
+  INVALID_SESSION_ID,
 } from "./errors";
 import { classifySql, isReadOnlySafe, isUnsafeBulkDml, isMergeSql, isTruncateSql, extractTableFromSql } from "./sql-kind";
 
@@ -3907,5 +3909,535 @@ export async function dbmsJobUnbroken(p: { jobId: number }): Promise<{ ok: true 
     await conn.execute(`BEGIN DBMS_JOB.BROKEN(:job_id, FALSE, SYSDATE); END;`, { job_id: p.jobId });
     log.info(`[scheduler] dbms_job.unbroken jobId=${p.jobId}`);
     return { ok: true };
+  });
+}
+
+// ── Item #1C T1C.1: Users ─────────────────────────────────────────────────────
+
+export type UserDetails = {
+  username: string;
+  accountStatus: string;
+  lockDate: string | null;
+  expiryDate: string | null;
+  created: string;
+  profile: string | null;
+  authenticationType: string | null;
+  defaultTablespace: string | null;
+  temporaryTablespace: string | null;
+  fallbackMode: boolean;
+};
+
+export type ProfileRow = {
+  resourceName: string;
+  resourceType: string;
+  limit: string;
+};
+
+export type QuotaRow = {
+  tablespaceName: string;
+  bytes: number | null;
+  maxBytes: number | null;
+  blocks: number | null;
+  maxBlocks: number | null;
+};
+
+// ── Item #1C T1C.2: Sessions ──────────────────────────────────────────────────
+
+export type SessionRow = {
+  sid: number;
+  serial: number;
+  status: string;
+  username: string | null;
+  osuser: string | null;
+  machine: string | null;
+  program: string | null;
+  module: string | null;
+  logonTime: string | null;
+  lastCallEt: number | null;
+  blockingSession: number | null;
+  blockingSessionStatus: string | null;
+  waitClass: string | null;
+  event: string | null;
+  secondsInWait: number | null;
+  sqlId: string | null;
+};
+
+// ── Item #1C T1C.4: Privileges (types declared here, functions in T1C.4) ──────
+
+export type RolePrivRow = {
+  grantedRole: string;
+  adminOption: string;
+  defaultRole: string;
+};
+
+export type SysPrivRow = {
+  privilege: string;
+  adminOption: string;
+};
+
+export type TabPrivRow = {
+  owner: string;
+  tableName: string;
+  grantor: string | null;
+  privilege: string;
+  grantable: string;
+  hierarchy: string | null;
+};
+
+export type GrantedToRow = {
+  grantee: string;
+  tableName: string;
+  privilege: string;
+  grantable: string;
+};
+
+export type PrivilegesList = {
+  rolePrivs: RolePrivRow[];
+  sysPrivs: SysPrivRow[];
+  tabPrivs: TabPrivRow[];
+  grantedTo: GrantedToRow[];
+  tabPrivsAccessDenied: boolean;
+  grantedToAccessDenied: boolean;
+  fallbackMode: boolean;
+};
+
+// ── Item #1C T1C.5: Blocking chain ───────────────────────────────────────────
+
+export type BlockingPair = {
+  blockedSid: number;
+  blockedSerial: number;
+  blockedUser: string | null;
+  waitClass: string | null;
+  event: string | null;
+  secondsInWait: number | null;
+  blockerSid: number;
+  blockerSerial: number;
+  blockerUser: string | null;
+  blockerStatus: string | null;
+};
+
+export async function userDetails(p: { username: string }): Promise<UserDetails | null> {
+  return withActiveSession(async (conn) => {
+    let r: Record<string, unknown> | undefined;
+    let fallbackMode = false;
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT USERNAME, ACCOUNT_STATUS, LOCK_DATE, EXPIRY_DATE,
+                CREATED, PROFILE, AUTHENTICATION_TYPE,
+                DEFAULT_TABLESPACE, TEMPORARY_TABLESPACE
+         FROM DBA_USERS
+         WHERE USERNAME = :username
+         FETCH FIRST 1 ROWS ONLY`,
+        { username: p.username },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      r = res.rows?.[0];
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) {
+        fallbackMode = true;
+        const res = await conn.execute<Record<string, unknown>>(
+          `SELECT USERNAME, CREATED FROM ALL_USERS WHERE USERNAME = :username FETCH FIRST 1 ROWS ONLY`,
+          { username: p.username },
+          { outFormat: oracledb.OUT_FORMAT_OBJECT },
+        );
+        r = res.rows?.[0];
+      } else {
+        throw err;
+      }
+    }
+    if (!r) return null;
+    return {
+      username: String(r.USERNAME ?? ""),
+      accountStatus: r.ACCOUNT_STATUS != null ? String(r.ACCOUNT_STATUS) : "",
+      lockDate: r.LOCK_DATE != null ? String(r.LOCK_DATE) : null,
+      expiryDate: r.EXPIRY_DATE != null ? String(r.EXPIRY_DATE) : null,
+      created: r.CREATED != null ? String(r.CREATED) : "",
+      profile: r.PROFILE != null ? String(r.PROFILE) : null,
+      authenticationType: r.AUTHENTICATION_TYPE != null ? String(r.AUTHENTICATION_TYPE) : null,
+      defaultTablespace: r.DEFAULT_TABLESPACE != null ? String(r.DEFAULT_TABLESPACE) : null,
+      temporaryTablespace: r.TEMPORARY_TABLESPACE != null ? String(r.TEMPORARY_TABLESPACE) : null,
+      fallbackMode,
+    };
+  });
+}
+
+export async function userProfileDetails(p: { profile: string }): Promise<{ rows: ProfileRow[]; accessDenied: boolean }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT RESOURCE_NAME, RESOURCE_TYPE, LIMIT
+         FROM DBA_PROFILES
+         WHERE PROFILE = :profile
+         ORDER BY RESOURCE_TYPE, RESOURCE_NAME`,
+        { profile: p.profile },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      return {
+        rows: (res.rows ?? []).map((r) => ({
+          resourceName: String(r.RESOURCE_NAME ?? ""),
+          resourceType: String(r.RESOURCE_TYPE ?? ""),
+          limit: String(r.LIMIT ?? ""),
+        })),
+        accessDenied: false,
+      };
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) return { rows: [], accessDenied: true };
+      throw err;
+    }
+  });
+}
+
+export async function userQuotas(p: { username: string }): Promise<{ quotas: QuotaRow[]; accessDenied: boolean }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT TABLESPACE_NAME, BYTES, MAX_BYTES, BLOCKS, MAX_BLOCKS
+         FROM DBA_TS_QUOTAS
+         WHERE USERNAME = :username
+         ORDER BY TABLESPACE_NAME`,
+        { username: p.username },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      return {
+        quotas: (res.rows ?? []).map((r) => ({
+          tablespaceName: String(r.TABLESPACE_NAME ?? ""),
+          bytes: r.BYTES != null ? Number(r.BYTES) : null,
+          maxBytes: r.MAX_BYTES != null ? Number(r.MAX_BYTES) : null,
+          blocks: r.BLOCKS != null ? Number(r.BLOCKS) : null,
+          maxBlocks: r.MAX_BLOCKS != null ? Number(r.MAX_BLOCKS) : null,
+        })),
+        accessDenied: false,
+      };
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) return { quotas: [], accessDenied: true };
+      throw err;
+    }
+  });
+}
+
+export async function sessionsListAll(): Promise<{ sessions: SessionRow[]; accessDenied: boolean }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT
+           s.SID, s.SERIAL# AS SERIAL_NUM, s.STATUS, s.USERNAME, s.OSUSER,
+           s.MACHINE, s.PROGRAM, s.MODULE,
+           TO_CHAR(s.LOGON_TIME, 'YYYY-MM-DD"T"HH24:MI:SS') AS LOGON_TIME,
+           s.LAST_CALL_ET,
+           s.BLOCKING_SESSION, s.BLOCKING_SESSION_STATUS,
+           s.WAIT_CLASS, s.EVENT, s.SECONDS_IN_WAIT,
+           s.SQL_ID
+         FROM V$SESSION s
+         WHERE s.USERNAME IS NOT NULL
+           AND s.TYPE = 'USER'
+         ORDER BY s.STATUS DESC, s.LAST_CALL_ET DESC
+         FETCH FIRST 200 ROWS ONLY`,
+        {},
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      return {
+        sessions: (res.rows ?? []).map((r) => ({
+          sid: Number(r.SID),
+          serial: Number(r.SERIAL_NUM),
+          status: String(r.STATUS ?? ""),
+          username: r.USERNAME != null ? String(r.USERNAME) : null,
+          osuser: r.OSUSER != null ? String(r.OSUSER) : null,
+          machine: r.MACHINE != null ? String(r.MACHINE) : null,
+          program: r.PROGRAM != null ? String(r.PROGRAM) : null,
+          module: r.MODULE != null ? String(r.MODULE) : null,
+          logonTime: r.LOGON_TIME != null ? String(r.LOGON_TIME) : null,
+          lastCallEt: r.LAST_CALL_ET != null ? Number(r.LAST_CALL_ET) : null,
+          blockingSession: r.BLOCKING_SESSION != null ? Number(r.BLOCKING_SESSION) : null,
+          blockingSessionStatus: r.BLOCKING_SESSION_STATUS != null ? String(r.BLOCKING_SESSION_STATUS) : null,
+          waitClass: r.WAIT_CLASS != null ? String(r.WAIT_CLASS) : null,
+          event: r.EVENT != null ? String(r.EVENT) : null,
+          secondsInWait: r.SECONDS_IN_WAIT != null ? Number(r.SECONDS_IN_WAIT) : null,
+          sqlId: r.SQL_ID != null ? String(r.SQL_ID) : null,
+        })),
+        accessDenied: false,
+      };
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) return { sessions: [], accessDenied: true };
+      throw err;
+    }
+  });
+}
+
+export async function sessionSqlPreview(p: { sqlId: string }): Promise<{ sql: string | null }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT SUBSTR(SQL_FULLTEXT, 1, 500) AS SQL_PREVIEW
+         FROM V$SQL
+         WHERE SQL_ID = :sql_id
+         AND ROWNUM = 1`,
+        { sql_id: p.sqlId },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      const r = res.rows?.[0];
+      return { sql: r?.SQL_PREVIEW != null ? String(r.SQL_PREVIEW) : null };
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) return { sql: null };
+      throw err;
+    }
+  });
+}
+
+export async function sessionPrivCheck(): Promise<{ hasAlterSystem: boolean }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT COUNT(*) AS HAS_ALTER_SYSTEM
+         FROM SESSION_PRIVS
+         WHERE PRIVILEGE = 'ALTER SYSTEM'`,
+        {},
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      const r = res.rows?.[0];
+      return { hasAlterSystem: Number(r?.HAS_ALTER_SYSTEM ?? 0) === 1 };
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) return { hasAlterSystem: false };
+      throw err;
+    }
+  });
+}
+
+export async function sessionKill(p: {
+  sid: number;
+  serial: number;
+  confirmedProdKill?: boolean;
+}): Promise<{ ok: true }> {
+  // Ajuste 1: positive integer validation
+  const sid = Math.trunc(p.sid);
+  const serial = Math.trunc(p.serial);
+  if (!Number.isInteger(sid) || !Number.isInteger(serial) || sid <= 0 || serial <= 0) {
+    throw new RpcCodedError(INVALID_SESSION_ID, "SID and SERIAL# must be positive integers");
+  }
+  // Ajuste 1: upper bound — Oracle NUMBER(11) practical max
+  const MAX_SESSION_ID = 2147483647;
+  if (sid > MAX_SESSION_ID || serial > MAX_SESSION_ID) {
+    throw new RpcCodedError(INVALID_SESSION_ID, "SID/SERIAL# exceeds valid range");
+  }
+
+  return withActiveSession(async (conn) => {
+    // T1A.8 env guard (3rd replication — after mview.refresh and job.run)
+    const env = (getSessionSafety().env as string | undefined) ?? "unknown";
+    if (env === "prod" && !p.confirmedProdKill) {
+      throw new RpcCodedError(
+        SESSION_KILL_PROD_REQUIRES_CONFIRMATION,
+        "Killing sessions in prod requires explicit confirmation",
+      );
+    }
+
+    // Ajuste 2: refuse to kill SYS/SYSTEM — killing either can destabilize the instance.
+    // ORA-942/1031 on the lookup means we can't verify the target is safe → refuse.
+    let username: string | null = null;
+    try {
+      const targetRes = await conn.execute<Record<string, unknown>>(
+        `SELECT USERNAME FROM V$SESSION WHERE SID = :sid AND SERIAL# = :serial`,
+        { sid, serial },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      const rawUser = targetRes.rows?.[0]?.USERNAME;
+      username = rawUser != null ? String(rawUser).toUpperCase() : null;
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) {
+        throw new RpcCodedError(
+          INVALID_SESSION_ID,
+          "Cannot verify session target: insufficient privilege on V$SESSION",
+        );
+      }
+      throw err;
+    }
+    if (username === "SYS" || username === "SYSTEM") {
+      throw new RpcCodedError(
+        INVALID_SESSION_ID,
+        `Refusing to kill ${username} session — protected system user`,
+      );
+    }
+
+    // Oracle KILL SESSION requires numeric literals in the quoted string; bind variables are not
+    // supported for the session address. SID and SERIAL# are validated as positive integers above.
+    await conn.execute(`ALTER SYSTEM KILL SESSION '${sid},${serial}' IMMEDIATE`);
+    log.info(`[session] kill sid=${sid} serial=${serial} env=${env}`);
+    return { ok: true };
+  });
+}
+
+export async function privilegesList(p: { schema: string }): Promise<PrivilegesList> {
+  return withActiveSession(async (conn) => {
+    let fallbackMode = false;
+
+    // Role Privs: DBA_ROLE_PRIVS → SESSION_ROLES fallback on ORA-942/1031
+    let rolePrivs: RolePrivRow[] = [];
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT GRANTED_ROLE, ADMIN_OPTION, DEFAULT_ROLE
+         FROM DBA_ROLE_PRIVS
+         WHERE GRANTEE = :schema
+         ORDER BY GRANTED_ROLE`,
+        { schema: p.schema },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      rolePrivs = (res.rows ?? []).map((r) => ({
+        grantedRole: String(r.GRANTED_ROLE ?? ""),
+        adminOption: String(r.ADMIN_OPTION ?? "NO"),
+        defaultRole: String(r.DEFAULT_ROLE ?? "NO"),
+      }));
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) {
+        fallbackMode = true;
+        try {
+          const res = await conn.execute<Record<string, unknown>>(
+            `SELECT ROLE AS GRANTED_ROLE, 'NO' AS ADMIN_OPTION, 'YES' AS DEFAULT_ROLE
+             FROM SESSION_ROLES ORDER BY ROLE`,
+            {},
+            { outFormat: oracledb.OUT_FORMAT_OBJECT },
+          );
+          rolePrivs = (res.rows ?? []).map((r) => ({
+            grantedRole: String(r.GRANTED_ROLE ?? ""),
+            adminOption: String(r.ADMIN_OPTION ?? "NO"),
+            defaultRole: String(r.DEFAULT_ROLE ?? "YES"),
+          }));
+        } catch { rolePrivs = []; }
+      } else {
+        throw err;
+      }
+    }
+
+    // Sys Privs: DBA_SYS_PRIVS → SESSION_PRIVS fallback on ORA-942/1031
+    let sysPrivs: SysPrivRow[] = [];
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT PRIVILEGE, ADMIN_OPTION
+         FROM DBA_SYS_PRIVS
+         WHERE GRANTEE = :schema
+         ORDER BY PRIVILEGE`,
+        { schema: p.schema },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      sysPrivs = (res.rows ?? []).map((r) => ({
+        privilege: String(r.PRIVILEGE ?? ""),
+        adminOption: String(r.ADMIN_OPTION ?? "NO"),
+      }));
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) {
+        fallbackMode = true;
+        try {
+          const res = await conn.execute<Record<string, unknown>>(
+            `SELECT PRIVILEGE, 'NO' AS ADMIN_OPTION FROM SESSION_PRIVS ORDER BY PRIVILEGE`,
+            {},
+            { outFormat: oracledb.OUT_FORMAT_OBJECT },
+          );
+          sysPrivs = (res.rows ?? []).map((r) => ({
+            privilege: String(r.PRIVILEGE ?? ""),
+            adminOption: String(r.ADMIN_OPTION ?? "NO"),
+          }));
+        } catch { sysPrivs = []; }
+      } else {
+        throw err;
+      }
+    }
+
+    // Tab Privs received: DBA_TAB_PRIVS WHERE GRANTEE = schema
+    let tabPrivs: TabPrivRow[] = [];
+    let tabPrivsAccessDenied = false;
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT OWNER, TABLE_NAME, GRANTOR, PRIVILEGE, GRANTABLE, HIERARCHY
+         FROM DBA_TAB_PRIVS
+         WHERE GRANTEE = :schema
+         ORDER BY OWNER, TABLE_NAME, PRIVILEGE
+         FETCH FIRST 200 ROWS ONLY`,
+        { schema: p.schema },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      tabPrivs = (res.rows ?? []).map((r) => ({
+        owner: String(r.OWNER ?? ""),
+        tableName: String(r.TABLE_NAME ?? ""),
+        grantor: r.GRANTOR != null ? String(r.GRANTOR) : null,
+        privilege: String(r.PRIVILEGE ?? ""),
+        grantable: String(r.GRANTABLE ?? "NO"),
+        hierarchy: r.HIERARCHY != null ? String(r.HIERARCHY) : null,
+      }));
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) { tabPrivsAccessDenied = true; }
+      else throw err;
+    }
+
+    // Granted To others: DBA_TAB_PRIVS WHERE OWNER = schema
+    let grantedTo: GrantedToRow[] = [];
+    let grantedToAccessDenied = false;
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT GRANTEE, TABLE_NAME, PRIVILEGE, GRANTABLE
+         FROM DBA_TAB_PRIVS
+         WHERE OWNER = :schema
+         ORDER BY GRANTEE, TABLE_NAME, PRIVILEGE
+         FETCH FIRST 200 ROWS ONLY`,
+        { schema: p.schema },
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      grantedTo = (res.rows ?? []).map((r) => ({
+        grantee: String(r.GRANTEE ?? ""),
+        tableName: String(r.TABLE_NAME ?? ""),
+        privilege: String(r.PRIVILEGE ?? ""),
+        grantable: String(r.GRANTABLE ?? "NO"),
+      }));
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) { grantedToAccessDenied = true; }
+      else throw err;
+    }
+
+    return { rolePrivs, sysPrivs, tabPrivs, grantedTo, tabPrivsAccessDenied, grantedToAccessDenied, fallbackMode };
+  });
+}
+
+export async function blockingChain(): Promise<{ pairs: BlockingPair[]; accessDenied: boolean }> {
+  return withActiveSession(async (conn) => {
+    try {
+      const res = await conn.execute<Record<string, unknown>>(
+        `SELECT s1.SID AS BLOCKED_SID, s1.SERIAL# AS BLOCKED_SERIAL,
+                s1.USERNAME AS BLOCKED_USER, s1.WAIT_CLASS AS WAIT_CLASS,
+                s1.EVENT AS EVENT, s1.SECONDS_IN_WAIT AS SECONDS_IN_WAIT,
+                s2.SID AS BLOCKER_SID, s2.SERIAL# AS BLOCKER_SERIAL,
+                s2.USERNAME AS BLOCKER_USER, s2.STATUS AS BLOCKER_STATUS
+         FROM V$SESSION s1
+         JOIN V$SESSION s2 ON s1.BLOCKING_SESSION = s2.SID
+         WHERE s1.BLOCKING_SESSION IS NOT NULL
+         ORDER BY s2.SID, s1.SID
+         FETCH FIRST 50 ROWS ONLY`,
+        {},
+        { outFormat: oracledb.OUT_FORMAT_OBJECT },
+      );
+      const pairs: BlockingPair[] = (res.rows ?? []).map((r) => ({
+        blockedSid: Number(r.BLOCKED_SID),
+        blockedSerial: Number(r.BLOCKED_SERIAL),
+        blockedUser: r.BLOCKED_USER != null ? String(r.BLOCKED_USER) : null,
+        waitClass: r.WAIT_CLASS != null ? String(r.WAIT_CLASS) : null,
+        event: r.EVENT != null ? String(r.EVENT) : null,
+        secondsInWait: r.SECONDS_IN_WAIT != null ? Number(r.SECONDS_IN_WAIT) : null,
+        blockerSid: Number(r.BLOCKER_SID),
+        blockerSerial: Number(r.BLOCKER_SERIAL),
+        blockerUser: r.BLOCKER_USER != null ? String(r.BLOCKER_USER) : null,
+        blockerStatus: r.BLOCKER_STATUS != null ? String(r.BLOCKER_STATUS) : null,
+      }));
+      return { pairs, accessDenied: false };
+    } catch (err: unknown) {
+      const oraNum = (err as { errorNum?: number }).errorNum;
+      if (oraNum === 942 || oraNum === 1031) return { pairs: [], accessDenied: true };
+      throw err;
+    }
   });
 }

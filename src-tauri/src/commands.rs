@@ -2322,3 +2322,90 @@ pub async fn dbms_job_unbroken(
     let res = call_sidecar(&app, "dbms_job.unbroken", json!({ "jobId": job_id })).await?;
     Ok(res)
 }
+
+// ── Item #1C T1C.1+T1C.2 — Users + Sessions ──────────────────────────────────
+
+#[tauri::command]
+pub async fn user_details(
+    app: AppHandle,
+    username: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "user.details", json!({ "username": username })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn user_profile_details(
+    app: AppHandle,
+    profile: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "user.profile.details", json!({ "profile": profile })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn user_quotas(
+    app: AppHandle,
+    username: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "user.quotas", json!({ "username": username })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn sessions_list_all(
+    app: AppHandle,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "sessions.list.all", json!({})).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn session_sql_preview(
+    app: AppHandle,
+    sql_id: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "session.sql.preview", json!({ "sqlId": sql_id })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn session_priv_check(
+    app: AppHandle,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "session.priv.check", json!({})).await?;
+    Ok(res)
+}
+
+// ── Item #1C T1C.3+T1C.4 — Session Kill + Privileges ─────────────────────────
+
+#[tauri::command]
+pub async fn session_kill(
+    app: AppHandle,
+    sid: i64,
+    serial: i64,
+    confirmed_prod_kill: Option<bool>,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "session.kill",
+        json!({ "sid": sid, "serial": serial, "confirmedProdKill": confirmed_prod_kill }),
+    )
+    .await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn privileges_list(
+    app: AppHandle,
+    schema: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "privileges.list", json!({ "schema": schema })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn sessions_blocking_chain(app: AppHandle) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "sessions.blocking.chain", json!({})).await?;
+    Ok(res)
+}
