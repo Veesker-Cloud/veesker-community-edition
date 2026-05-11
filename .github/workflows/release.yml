@@ -123,7 +123,7 @@ jobs:
               draft: false,
             })
 
-      - name: Update download page version
+      - name: Update site version
         env:
           GH_TOKEN: ${{ secrets.SITE_DEPLOY_TOKEN }}
         run: |
@@ -132,8 +132,9 @@ jobs:
           git clone "https://x-access-token:${GH_TOKEN}@github.com/veesker-cloud/veesker-site.git" site
           cd site
           sed -i "s/const RELEASE = \"[^\"]*\"/const RELEASE = \"${VERSION}\"/" src/routes/download/+page.svelte
+          sed -i "s/\"softwareVersion\": \"[^\"]*\"/\"softwareVersion\": \"${VERSION}\"/" src/app.html
           git config user.email "geraldovianajr@veesker.cloud"
           git config user.name "gevianajr"
-          git add src/routes/download/+page.svelte
-          git diff --cached --quiet || git commit -m "chore(download): bump version to ${VERSION}"
+          git add src/routes/download/+page.svelte src/app.html
+          git diff --cached --quiet || git commit -m "chore(release): bump version to ${VERSION}"
           git push
