@@ -1445,6 +1445,28 @@ mod encryption_tests {
     }
 
     #[test]
+    fn open_encrypted_handles_zeroed_key_fallback() {
+        // Validates that db_key_as_sqlcipher_pragma_arg accepts a zeroed key
+        // (the fallback path when the OS keychain is unavailable, per NB-2 of
+        // Item #1D) and that SQLCipher can open/close the DB without panicking.
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("zeroed.db");
+        let zeroed_key = vec![0u8; 32];
+        let pragma = crate::crypto::db_key_as_sqlcipher_pragma_arg(&zeroed_key);
+
+        let conn = open_with_pragma_key(&db, &pragma).unwrap();
+        conn.execute_batch("CREATE TABLE t (k TEXT); INSERT INTO t VALUES ('ok');")
+            .unwrap();
+        drop(conn);
+
+        let conn2 = open_with_pragma_key(&db, &pragma).unwrap();
+        let v: String = conn2
+            .query_row("SELECT k FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, "ok");
+    }
+
+    #[test]
     fn open_encrypted_or_migrate_migrates_legacy_plaintext_db() {
         let dir = TempDir::new().unwrap();
         let db = dir.path().join("veesker.db");
