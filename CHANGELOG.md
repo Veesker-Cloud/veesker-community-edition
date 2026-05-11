@@ -9,8 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Issues
 
-- **Directory detail panel** — inspector fails to load on first install due to stale sidecar binary in the v0.5.0-beta.1 release artifact; workaround: rebuild sidecar (`bun run build:win-x64`) or wait for v0.5.0-beta.2 patch
-- **Scheduler Jobs detail** — `schedulerJob.detail` returns `-32601 Method not found` against a pre-compiled binary for the same reason; same workaround applies
+- **Directory detail panel** — requires `SELECT on DBA_DIRECTORIES` privilege. Without it, the inspector shows "Directory details not available" instead of falling back to `USER_DIRECTORIES`. Affects users without DBA grant. Fix planned for v0.5.0-beta.2.
+
+- **Scheduler Jobs detail** — may not load for users without DBA privilege on `DBA_SCHEDULER_JOBS`. Investigation pending; expected fix is to add a fallback query chain to `ALL_SCHEDULER_JOBS` / `USER_SCHEDULER_JOBS`. Fix planned for v0.5.0-beta.2.
+
+- **Sidecar stale binary** (source-build only) — if you cloned the repo and built from source before Phase 1 commits were merged, rebuild the sidecar binary: `cd sidecar && bun run build:win-x64`. Pre-built release binaries are current and unaffected.
 
 ## [0.5.0-beta.1] — 2026-05-11
 

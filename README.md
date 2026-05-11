@@ -183,7 +183,7 @@ If you need warranty, SLA, or commercial support, that requires a separate signe
 | Release | Status | What ships |
 |---|---|---|
 | **v0.5.0-beta.1** | ✅ May 2026 | Schema browser complete (18 object kinds: MV · synonyms · DB links · directories · queues · scheduler · legacy jobs · DB users · privileges), DDL/DCL confirmation gate, Sessions monitor + KILL, HMAC-SHA256 tamper-evident audit chain, Verify Chain UI |
-| **v0.5.x** | 🔜 patch | Stale binary fixes (directory/scheduler detail panels), query scope corrections (MV owner, PUBLIC synonyms) |
+| **v0.5.x** | 🔜 patch | Directory inspector fallback to `USER_DIRECTORIES`, Scheduler Jobs query fallback chain to `ALL_SCHEDULER_JOBS` / `USER_SCHEDULER_JOBS` |
 | **v0.6** | Q3 2026 | Multiple independent SQL windows, edit-in-grid SELECT FOR UPDATE |
 | **v1.0** | Q4 2026 | Linux packaging (.deb/.AppImage), Windows code signing, macOS notarization, performance benchmarks |
 | post-v1.0 | Q1 2027 | TX close hooks across all workspace events (Item #4 Phase D) |
