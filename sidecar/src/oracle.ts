@@ -3015,7 +3015,18 @@ export async function explainPlan(p: { sql: string }): Promise<{ nodes: ExplainN
     const sid = `V${crypto.randomUUID().replace(/-/g, "").slice(0, 29)}`;
     // EXPLAIN PLAN requires STATEMENT_ID as a string literal — Oracle does not accept a bind variable here (ORA-01780).
     // sid is generated internally so direct interpolation is safe.
-    await conn.execute(`EXPLAIN PLAN SET STATEMENT_ID = '${sid}' FOR ${stmts[0]}`);
+    try {
+      await conn.execute(`EXPLAIN PLAN SET STATEMENT_ID = '${sid}' FOR ${stmts[0]}`);
+    } catch (e: any) {
+      if (e?.errorNum !== 904) throw e;
+      throw Object.assign(
+        new Error(
+          "EXPLAIN PLAN failed: your schema has a stale PLAN_TABLE missing required columns (FILTER_PREDICATES). " +
+          "Fix: DROP TABLE plan_table; — or safer: RENAME plan_table TO plan_table_legacy;"
+        ),
+        { code: "PLAN_TABLE_STALE" }
+      );
+    }
     let res: oracledb.Result<{
       ID: number;
       PARENT_ID: number | null;

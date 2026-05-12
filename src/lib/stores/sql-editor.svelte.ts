@@ -31,6 +31,7 @@ export type TabResult = {
   dbmsOutput: string[] | null;        // null = not captured; [] = enabled but nothing printed
   compileErrors: CompileError[] | null; // null = not a compilable stmt; [] = clean
   explainNodes: import("$lib/workspace").ExplainNode[] | null;
+  explainError?: string;
   fetchedAll: boolean;                // true if the result came from a fetchAll run (no row cap)
 };
 
@@ -811,7 +812,12 @@ export const sqlEditor = {
           if (!t) return;
           const r = t.results.find((x) => x.id === resultIdRef);
           if (!r) return;
-          if (er.ok) r.explainNodes = er.data.nodes;
+          if (er.ok) {
+            r.explainNodes = er.data.nodes;
+            r.explainError = undefined;
+          } else {
+            r.explainError = er.error?.message ?? "Explain plan failed";
+          }
           _tabs = [..._tabs];
         });
       }
@@ -1474,6 +1480,28 @@ export function setActiveResult(tabId: string, resultId: string): void {
   if (!tab.results.some((r) => r.id === resultId)) return;
   tab.activeResultId = resultId;
   _tabs = [..._tabs];
+}
+
+export function retryAutoExplain(tabId: string, resultId: string, sql: string): void {
+  const t = _tabs.find((x) => x.id === tabId);
+  if (!t) return;
+  const r = t.results.find((x) => x.id === resultId);
+  if (!r) return;
+  r.explainError = undefined;
+  _tabs = [..._tabs];
+  explainPlanGet(sql).then((er) => {
+    const t2 = _tabs.find((x) => x.id === tabId);
+    if (!t2) return;
+    const r2 = t2.results.find((x) => x.id === resultId);
+    if (!r2) return;
+    if (er.ok) {
+      r2.explainNodes = er.data.nodes;
+      r2.explainError = undefined;
+    } else {
+      r2.explainError = er.error?.message ?? "Explain plan failed";
+    }
+    _tabs = [..._tabs];
+  });
 }
 
 export function addProcResults(result: ProcExecuteResult): void {

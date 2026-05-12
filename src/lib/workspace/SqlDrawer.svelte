@@ -6,7 +6,7 @@
 
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { sqlEditor, COMPILE_REGEX, runExplain, setActiveResult } from "$lib/stores/sql-editor.svelte";
+  import { sqlEditor, COMPILE_REGEX, runExplain, setActiveResult, retryAutoExplain } from "$lib/stores/sql-editor.svelte";
   import { dmlPreviewRpc } from "$lib/workspace";
   import { formatSql } from "$lib/workspace/format-sql";
   import { createPerfAnalyzer } from "$lib/stores/perf-analyzer.svelte";
@@ -874,9 +874,11 @@
                   {:else if resultPanel.activeTab === 'plan'}
                     <PlanTab
                       state={
-                        activeTabResult?.explainNodes !== undefined && activeTabResult?.explainNodes !== null
-                          ? { kind: "ready", nodes: activeTabResult.explainNodes, onExplainWithAI }
-                          : { kind: "idle" }
+                        activeTabResult?.explainError
+                          ? { kind: "error", message: activeTabResult.explainError, onRetry: () => retryAutoExplain(active!.id, activeTabResult!.id, active!.sql) }
+                          : activeTabResult?.explainNodes !== undefined && activeTabResult?.explainNodes !== null
+                            ? { kind: "ready", nodes: activeTabResult.explainNodes, onExplainWithAI }
+                            : { kind: "idle" }
                       }
                     />
                   {:else}
