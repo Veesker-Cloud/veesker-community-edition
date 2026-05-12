@@ -42,6 +42,7 @@
     connectionName?: string;
     connectionUser?: string | null;
     connectionService?: string | null;
+    connectionVersion?: string | null;
     isProductionLocked?: boolean;
   };
   let {
@@ -54,6 +55,7 @@
     connectionName,
     connectionUser = null,
     connectionService = null,
+    connectionVersion = null,
     isProductionLocked = false,
   }: Props = $props();
 
@@ -609,6 +611,7 @@
               connectionId={tab.connectionId ?? sqlEditor.connectionId ?? ""}
               user={connectionUser}
               service={connectionService}
+              serverVersion={connectionVersion}
               {isProductionLocked}
               onExit={() => sqlEditor.closeTab(tab.id)}
             />

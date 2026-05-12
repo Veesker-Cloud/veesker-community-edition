@@ -8,7 +8,7 @@
 
   import { CommandModeState } from "$lib/command/state.svelte";
   import { CommandExecutor, type ExecutorContext } from "$lib/command/executor";
-  import { formatConnectionLabel, formatPrompt } from "$lib/command/prompt";
+  import { formatPrompt } from "$lib/command/prompt";
   import { sqlEditor } from "$lib/stores/sql-editor.svelte";
   import { connectionCommit, connectionRollback } from "$lib/workspace";
 
@@ -16,11 +16,12 @@
     connectionId: string;
     user: string | null;
     service: string | null;
+    serverVersion?: string | null;
     isProductionLocked: boolean;
     onExit?: (code: number) => void;
   };
 
-  let { connectionId, user, service, isProductionLocked, onExit }: Props = $props();
+  let { connectionId, user, service, serverVersion = null, isProductionLocked, onExit }: Props = $props();
 
   type LineKind =
     | "echo"
@@ -55,22 +56,32 @@
     return formatPrompt({ lineNumber: lineNum, isContinuation: true });
   }
 
+  // DML/DQL keywords that are safe to auto-execute on Enter without explicit ";"
+  const AUTO_EXEC_STARTS = /^\s*(SELECT|INSERT|UPDATE|DELETE|MERGE|TRUNCATE|COMMIT|ROLLBACK|SAVEPOINT|GRANT|REVOKE|DESCRIBE|DESC|CALL)\b/i;
+  // Line endings that signal the statement is clearly not complete yet
+  const PENDING_ENDINGS = /([,=]|\bOR\b|\bAND\b|\bWHERE\b|\bFROM\b|\bJOIN\b|\bON\b|\bHAVING\b|\bSET\b|\bUNION\b|\bINTERSECT\b|\bMINUS\b)\s*$/i;
+
+  function shouldAutoTerminate(line: string, partialBuffer: string): boolean {
+    const t = line.trim();
+    if (partialBuffer.length > 0) return false;
+    if (!t || t.endsWith(";") || t === "/") return false;
+    if (!AUTO_EXEC_STARTS.test(t)) return false;
+    if (PENDING_ENDINGS.test(t)) return false;
+    return true;
+  }
+
   function addBannerLines(): void {
-    displayLines.push({ text: "SQL*Plus-compatible Command Mode (Veesker)", kind: "info" });
-    const label = formatConnectionLabel(user, service).replace(/>$/, "");
-    if (label.length > 0) {
-      const suffix = isProductionLocked ? " [PROD]" : "";
-      displayLines.push({ text: `Connected to: ${label}${suffix}`, kind: "info" });
-    } else {
-      displayLines.push({
-        text: isProductionLocked ? "Connected. [PROD]" : "Connected.",
-        kind: "info",
-      });
+    if (serverVersion) {
+      displayLines.push({ text: `Connected to ${serverVersion}`, kind: "info" });
+    } else if (service) {
+      displayLines.push({ text: `Connected to ${service}`, kind: "info" });
     }
-    displayLines.push({
-      text: "Type @file.sql to run a script. Type EXIT to disconnect.",
-      kind: "info",
-    });
+    if (user && service) {
+      displayLines.push({ text: `Connected as ${user}@${service}`, kind: "info" });
+    } else if (user) {
+      displayLines.push({ text: `Connected as ${user}`, kind: "info" });
+    }
+    displayLines.push({ text: "", kind: "info" });
   }
 
   function flushTranscript(): void {
@@ -120,8 +131,9 @@
 
     currentInput = "";
     running = true;
+    const lineToFeed = shouldAutoTerminate(line, cmdState.partialBuffer) ? `${line};` : line;
     try {
-      await executor.feedLine(line);
+      await executor.feedLine(lineToFeed);
       flushTranscript();
     } finally {
       running = false;
