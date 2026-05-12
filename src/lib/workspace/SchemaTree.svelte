@@ -78,11 +78,14 @@
     hiddenKinds = next;
   }
 
-  const KIND_ORDER: ObjectKind[] = [
-    "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB", "DB_USER", "PRIVILEGE", "SEQUENCE",
-    "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE",
-    "REST_MODULE",
+  const KIND_GROUPS: { label: string; kinds: ObjectKind[] }[] = [
+    { label: "Data",  kinds: ["TABLE", "VIEW", "MATERIALIZED_VIEW", "SEQUENCE", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE"] },
+    { label: "Code",  kinds: ["PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE"] },
+    { label: "Admin", kinds: ["SCHEDULER_JOB", "DB_USER", "PRIVILEGE"] },
+    { label: "API",   kinds: ["REST_MODULE"] },
   ];
+
+  const KIND_ORDER: ObjectKind[] = KIND_GROUPS.flatMap(g => g.kinds);
 
   const KIND_COLOR: Record<ObjectKind, string> = {
     TABLE:             "#4a9eda",
@@ -154,6 +157,12 @@
     if (loadable.kind !== "ok") return null;
     return filtered.length;
   }
+
+  const activeSchema = $derived(
+    schemas.find(s => s.isCurrent && s.expanded) ??
+    schemas.find(s => s.expanded) ??
+    schemas.find(s => s.isCurrent)
+  );
 </script>
 
 <nav class="tree">
@@ -199,18 +208,27 @@
 
   <!-- Type filter pills -->
   <div class="kind-pills">
-    {#each KIND_ORDER as kind}
-      <button
-        class="kind-pill"
-        class:off={hiddenKinds.has(kind)}
-        style="--kc:{KIND_COLOR[kind]}"
-        onclick={() => toggleKind(kind)}
-        title={KIND_LABELS[kind]}
-        aria-pressed={!hiddenKinds.has(kind)}
-      >
-        <span class="pill-dot" aria-hidden="true"></span>
-        {KIND_SHORT[kind]}
-      </button>
+    {#each KIND_GROUPS as group}
+      <div class="pill-row">
+        <span class="pill-group-label" aria-hidden="true">{group.label}</span>
+        {#each group.kinds as kind}
+          {@const pillCount = activeSchema?.kindCounts?.[kind]}
+          <button
+            class="kind-pill"
+            class:off={hiddenKinds.has(kind)}
+            style="--kc:{KIND_COLOR[kind]}"
+            onclick={() => toggleKind(kind)}
+            title={KIND_LABELS[kind]}
+            aria-pressed={!hiddenKinds.has(kind)}
+          >
+            <span class="pill-dot" aria-hidden="true"></span>
+            {KIND_SHORT[kind]}
+            {#if pillCount !== undefined}
+              <span class="pill-count">{pillCount}</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
     {/each}
   </div>
 
@@ -463,9 +481,26 @@
   /* ── Kind filter pills ───────────────────────────────────── */
   .kind-pills {
     display: flex;
-    flex-wrap: wrap;
-    gap: 3px;
+    flex-direction: column;
+    gap: 1px;
     padding: 0 0.6rem 0.5rem;
+  }
+  .pill-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 2px;
+  }
+  .pill-group-label {
+    font-size: 8px;
+    color: var(--text-muted);
+    font-family: "Space Grotesk", sans-serif;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    width: 28px;
+    flex-shrink: 0;
+    padding-top: 3px;
+    opacity: 0.7;
   }
   .kind-pill {
     display: flex;
@@ -500,6 +535,13 @@
     background: var(--kc);
     flex-shrink: 0;
     transition: background 0.12s;
+  }
+  .pill-count {
+    font-size: 8px;
+    opacity: 0.75;
+    font-family: "Inter", sans-serif;
+    margin-left: 1px;
+    letter-spacing: 0;
   }
 
   /* ── Schema row ───────────────────────────────────────────── */
