@@ -227,7 +227,7 @@
     {/each}
   </div>
 
-  {#each schemas as s (s.name)}
+  {#each schemas as s}
     {#if isVisible(s)}
     <div class="schema">
       <button
@@ -277,7 +277,7 @@
                       <button class="retry-btn" onclick={() => onRetry(s.name, kind)}>retry</button>
                     </div>
                   {:else if loadable.kind === "ok"}
-                    {#each filtered as o (o.name)}
+                    {#each filtered as o}
                       <div class="obj-row">
                         <button
                           class="object"
