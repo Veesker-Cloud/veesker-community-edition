@@ -339,11 +339,15 @@
   }
 
   function onToggle(owner: string): void {
-    const node = schemas.find((s) => s.name === owner);
-    if (!node) return;
-    node.expanded = !node.expanded;
-    schemas = [...schemas];
-    if (node.expanded) expandIfNeeded(node);
+    let target: SchemaNode | undefined;
+    schemas = schemas.map((s) => {
+      if (s.name === owner) {
+        target = { ...s, expanded: !s.expanded };
+        return target;
+      }
+      return s;
+    });
+    if (target?.expanded) expandIfNeeded(target);
   }
 
   function onRetryKind(owner: string, kind: ObjectKind): void {
