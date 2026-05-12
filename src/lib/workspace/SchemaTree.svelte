@@ -60,15 +60,15 @@
   };
 
   const KIND_SHORT: Record<ObjectKind, string> = {
-    TABLE: "Tbl", VIEW: "View", SEQUENCE: "Seq",
-    PROCEDURE: "Proc", FUNCTION: "Func",
-    PACKAGE: "Pkg", TRIGGER: "Trig", TYPE: "Type",
+    TABLE: "TBL", VIEW: "VIEW", SEQUENCE: "SEQ",
+    PROCEDURE: "PROC", FUNCTION: "FUNC",
+    PACKAGE: "PKG", TRIGGER: "TRIG", TYPE: "TYPE",
     REST_MODULE: "API",
-    MATERIALIZED_VIEW: "MV", SYNONYM: "Syn", DB_LINK: "DBL",
-    DIRECTORY: "Dir",
-    QUEUE: "Q",
+    MATERIALIZED_VIEW: "MV", SYNONYM: "SYN", DB_LINK: "DBLINK",
+    DIRECTORY: "DIR",
+    QUEUE: "QUEUE",
     SCHEDULER_JOB: "JOB",
-    DB_USER: "USR",
+    DB_USER: "USER",
     PRIVILEGE: "PRIV",
   };
 
@@ -80,32 +80,26 @@
   }
 
   const KIND_GROUPS: { label: string; kinds: ObjectKind[] }[] = [
-    { label: "Data",  kinds: ["TABLE", "VIEW", "MATERIALIZED_VIEW", "SEQUENCE", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE"] },
-    { label: "Code",  kinds: ["PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE"] },
-    { label: "Admin", kinds: ["SCHEDULER_JOB", "DB_USER", "PRIVILEGE"] },
-    { label: "API",   kinds: ["REST_MODULE"] },
+    { label: "Data",        kinds: ["TABLE", "VIEW", "MATERIALIZED_VIEW", "SEQUENCE"] },
+    { label: "Code",        kinds: ["PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE"] },
+    { label: "Integration", kinds: ["REST_MODULE", "DB_LINK", "SYNONYM", "DIRECTORY", "QUEUE", "SCHEDULER_JOB"] },
+    { label: "Security",    kinds: ["DB_USER", "PRIVILEGE"] },
   ];
 
   const KIND_ORDER: ObjectKind[] = KIND_GROUPS.flatMap(g => g.kinds);
 
   const KIND_COLOR: Record<ObjectKind, string> = {
-    TABLE:             "#4a9eda",
-    VIEW:              "#27ae60",
-    SEQUENCE:          "#2ecc71",
-    PROCEDURE:         "#e67e22",
-    FUNCTION:          "#f39c12",
-    PACKAGE:           "#9b59b6",
-    TRIGGER:           "#e74c3c",
-    TYPE:              "#3498db",
-    REST_MODULE:       "#f5a08a",
-    MATERIALIZED_VIEW: "#1a9ca6",
-    SYNONYM:           "#7d5fa7",
-    DB_LINK:           "#d4770a",
-    DIRECTORY:         "hsl(45 90% 48%)",
-    QUEUE:             "hsl(260 55% 58%)",
-    SCHEDULER_JOB:     "hsl(200 70% 45%)",
-    DB_USER:           "hsl(220 65% 50%)",
-    PRIVILEGE:         "hsl(0 65% 50%)",
+    TABLE: "#4a9eda", VIEW: "#4a9eda", MATERIALIZED_VIEW: "#4a9eda", SEQUENCE: "#4a9eda",
+    PROCEDURE: "#e67e22", FUNCTION: "#e67e22", PACKAGE: "#e67e22", TRIGGER: "#e67e22", TYPE: "#e67e22",
+    REST_MODULE: "#1a9ca6", DB_LINK: "#1a9ca6", SYNONYM: "#1a9ca6", DIRECTORY: "#1a9ca6", QUEUE: "#1a9ca6", SCHEDULER_JOB: "#1a9ca6",
+    DB_USER: "#c0392b", PRIVILEGE: "#c0392b",
+  };
+
+  const KIND_BRIGHTNESS: Record<ObjectKind, number> = {
+    TABLE: 1.0, VIEW: 1.2, MATERIALIZED_VIEW: 0.82, SEQUENCE: 1.4,
+    PROCEDURE: 1.0, FUNCTION: 1.2, PACKAGE: 0.82, TRIGGER: 1.4, TYPE: 0.65,
+    REST_MODULE: 1.0, DB_LINK: 1.2, SYNONYM: 1.4, DIRECTORY: 0.75, QUEUE: 1.6, SCHEDULER_JOB: 0.6,
+    DB_USER: 1.0, PRIVILEGE: 1.4,
   };
 
   function isSystemSchema(name: string): boolean {
@@ -224,7 +218,7 @@
           <button
             class="kind-pill"
             class:off={hiddenKinds.has(kind)}
-            style="--kc:{KIND_COLOR[kind]}"
+            style="--kc:{KIND_COLOR[kind]}; --kb:{KIND_BRIGHTNESS[kind]}"
             onclick={() => toggleKind(kind)}
             title={KIND_LABELS[kind]}
             aria-pressed={!hiddenKinds.has(kind)}
@@ -548,6 +542,7 @@
     background: color-mix(in srgb, var(--kc) 22%, transparent);
     border-color: color-mix(in srgb, var(--kc) 60%, transparent);
   }
+  .kind-pill:not(.off) { filter: brightness(var(--kb, 1)); }
   .kind-pill.off {
     background: transparent;
     border-color: var(--border);
