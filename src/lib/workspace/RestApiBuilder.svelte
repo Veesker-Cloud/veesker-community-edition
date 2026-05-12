@@ -205,8 +205,8 @@
     const out: { method: string; path: string; label: string }[] = [];
     if (operations.includes("GET")) out.push({ method: "GET", path: basePath, label: "lista" });
     if (operations.includes("GET_BY_ID")) out.push({ method: "GET", path: basePath + ":id/", label: "detalhe" });
-    if (operations.includes("POST")) out.push({ method: "POST", path: basePath, label: "criar" });
-    if (operations.includes("PUT")) out.push({ method: "PUT", path: basePath + ":id/", label: "atualizar" });
+    if (operations.includes("POST")) out.push({ method: "POST", path: basePath, label: "create" });
+    if (operations.includes("PUT")) out.push({ method: "PUT", path: basePath + ":id/", label: "update" });
     if (operations.includes("DELETE")) out.push({ method: "DELETE", path: basePath + ":id/", label: "remover" });
     return out;
   });
@@ -227,7 +227,7 @@
     tabindex="-1"
   >
     <div class="modal-head">
-      <span class="title">Criar Endpoint REST</span>
+      <span class="title">Create REST Endpoint</span>
       <div class="head-actions">
         <button class="sheep-btn" onclick={() => showSheepOverlay = true} title="Descrever em linguagem natural">✨ Sheep</button>
         <button class="close-btn" onclick={onCancel} aria-label="Close">✕</button>
@@ -261,7 +261,7 @@
               </div>
             {:else}
               <div class="sheep-actions">
-                <button class="btn" onclick={() => showSheepOverlay = false}>Cancelar</button>
+                <button class="btn" onclick={() => showSheepOverlay = false}>Cancel</button>
                 <button
                   class="btn primary"
                   onclick={() => void requestSuggestion()}
@@ -371,7 +371,7 @@
       <div class="section">
         <h3>Roteamento</h3>
         <div class="row">
-          <label class="radio"><input type="radio" bind:group={moduleMode} value="new" /> Novo módulo:</label>
+          <label class="radio"><input type="radio" bind:group={moduleMode} value="new" /> New module:</label>
           <input class="input" bind:value={moduleName} placeholder="meu-modulo" disabled={moduleMode !== "new"} />
         </div>
         <div class="row">
@@ -399,7 +399,7 @@
         <div class="row"><label class="radio"><input type="radio" bind:group={authMode} value="oauth" /> OAuth 2.0 Client Credentials</label></div>
         {#if authMode === "oauth"}
           <div class="hint" style="margin-left: 22px">
-            Veesker irá criar o privilege automaticamente. Crie clients OAuth na seção "API Clients".
+            Veesker will create the privilege automatically. Create OAuth clients in the "API Clients" section.
           </div>
         {/if}
       </div>
@@ -421,7 +421,7 @@
     </div>
 
     <div class="modal-foot">
-      <button class="btn" onclick={onCancel}>Cancelar</button>
+      <button class="btn" onclick={onCancel}>Cancel</button>
       <button
         class="btn primary"
         onclick={handlePreview}

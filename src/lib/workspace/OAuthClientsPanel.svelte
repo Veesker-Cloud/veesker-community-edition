@@ -75,7 +75,7 @@
   }
 
   async function handleRevoke(name: string) {
-    if (!confirm(`Revogar client "${name}"? Esta ação é irreversível.`)) return;
+    if (!confirm(`Revoke client "${name}"? This action is irreversible.`)) return;
     revokingName = name;
     const res = await ordsClientsRevoke(name);
     revokingName = null;
@@ -109,7 +109,7 @@
       <span class="title">API Clients (OAuth 2.0)</span>
       <div class="actions">
         {#if !showCreate}
-          <button class="btn primary" onclick={() => showCreate = true}>+ Novo Client</button>
+          <button class="btn primary" onclick={() => showCreate = true}>+ New Client</button>
         {/if}
         <button class="close" onclick={onClose} aria-label="Close">✕</button>
       </div>
@@ -121,7 +121,7 @@
           {error}
           {#if onOpenBootstrap && (error.includes("ORDS") || error.includes("OAUTH"))}
             <button class="btn small" style="margin-left: 8px" onclick={() => { onClose(); onOpenBootstrap?.(); }}>
-              Configurar ORDS
+              Configure ORDS
             </button>
           {/if}
         </div>
@@ -129,20 +129,20 @@
 
       {#if showCreate}
         <div class="create-form">
-          <h3>Novo Client OAuth</h3>
+          <h3>New OAuth Client</h3>
           <div class="row">
-            <span class="label">Nome:</span>
+            <span class="label">Name:</span>
             <input class="input" bind:value={newName} placeholder="mobile-app" />
           </div>
           <div class="row">
-            <span class="label">Descrição:</span>
+            <span class="label">Description:</span>
             <input class="input" bind:value={newDescription} placeholder="Mobile app for sales team" />
           </div>
           <div class="row">
             <span class="label">Roles:</span>
             <div class="role-chips">
               {#if rolesList.length === 0}
-                <span class="hint">Nenhuma role disponível. Crie uma role pelo builder de endpoint primeiro.</span>
+                <span class="hint">No roles available. Create a role via the endpoint builder first.</span>
               {/if}
               {#each rolesList as r (r)}
                 <button
@@ -155,22 +155,22 @@
             </div>
           </div>
           <div class="form-actions">
-            <button class="btn" onclick={() => { showCreate = false; newName = ""; newDescription = ""; newRoles = []; }}>Cancelar</button>
+            <button class="btn" onclick={() => { showCreate = false; newName = ""; newDescription = ""; newRoles = []; }}>Cancel</button>
             <button class="btn primary" onclick={() => void handleCreate()} disabled={creating || !newName.trim()}>
-              {creating ? "Criando…" : "Criar Client"}
+              {creating ? "Creating…" : "Create Client"}
             </button>
           </div>
         </div>
       {/if}
 
       {#if loading}
-        <div class="state-msg">Carregando clients…</div>
+        <div class="state-msg">Loading clients…</div>
       {:else if clients.length === 0 && !showCreate}
-        <div class="state-msg">Nenhum client OAuth criado ainda.</div>
+        <div class="state-msg">No OAuth clients created yet.</div>
       {:else}
         <table class="clients-table">
           <thead>
-            <tr><th>Nome</th><th>Descrição</th><th>Criado em</th><th></th></tr>
+            <tr><th>Name</th><th>Description</th><th>Created on</th><th></th></tr>
           </thead>
           <tbody>
             {#each clients as c (c.name)}

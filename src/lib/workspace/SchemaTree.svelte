@@ -355,7 +355,7 @@
             contextMenu = null;
           }}
         >
-          {contextMenu.kind === 'TABLE' || contextMenu.kind === 'VIEW' ? 'Expor como API REST…' : 'Expor como endpoint REST…'}
+          {contextMenu.kind === 'TABLE' || contextMenu.kind === 'VIEW' ? 'Expose as REST API…' : 'Expose as REST endpoint…'}
         </button>
       {/if}
     </div>

@@ -42,13 +42,13 @@
   class="panel"
   role="dialog"
   aria-modal="false"
-  aria-label="Configuração ORDS"
+  aria-label="ORDS Setup"
   tabindex="-1"
   onkeydown={(e) => e.key === "Escape" && onClose()}
 >
   <div class="panel-head">
     <span class="panel-title">VRAS · ORDS</span>
-    <button class="close-btn" onclick={onClose} aria-label="Fechar">✕</button>
+    <button class="close-btn" onclick={onClose} aria-label="Close">✕</button>
   </div>
   <div class="panel-body">
     {#if variant === "not-installed"}
@@ -60,11 +60,11 @@
       </p>
     {:else if variant === "no-access"}
       <p class="label-warn">Sem acesso ao ORDS</p>
-      <p class="hint">Usuário <code>{schemaName}</code> precisa do grant:</p>
+      <p class="hint">User <code>{schemaName}</code> needs the grant:</p>
       <pre class="cmd">GRANT ORDS_ADMINISTRATOR_ROLE TO {schemaName};</pre>
     {:else if variant === "schema-disabled"}
       <p class="label-warn">Schema não habilitado</p>
-      <p class="hint">Schema <code>{schemaName}</code> precisa ser habilitado para ORDS.</p>
+      <p class="hint">Schema <code>{schemaName}</code> must be enabled for ORDS.</p>
       <button class="primary-btn" onclick={() => void handleEnable()} disabled={enabling}>
         {enabling ? "Habilitando…" : "Habilitar agora"}
       </button>
@@ -82,7 +82,7 @@
         onkeydown={(e) => e.key === "Enter" && handleSetUrl()}
       />
       <button class="primary-btn" onclick={handleSetUrl} disabled={!baseUrlInput.trim()}>
-        Salvar
+        Save
       </button>
     {:else}
       <p class="label-ok">ORDS {result.version ?? ""} configurado.</p>

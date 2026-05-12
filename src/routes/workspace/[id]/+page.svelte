@@ -923,7 +923,7 @@
                 const baseUrl = ordsStore.state?.ordsBaseUrl?.replace(/\/$/, "") ?? "";
                 const schema = (selected?.owner ?? "").toLowerCase();
                 if (!baseUrl) {
-                  alert("ORDS base URL não configurada. Abra o modal de bootstrap para definir.");
+                  alert("ORDS base URL not configured. Open the bootstrap modal to set it.");
                   return;
                 }
                 void openUrl(`${baseUrl}/${schema}/open-api-catalog${modulePath}`);
@@ -1101,7 +1101,7 @@
       onEnableSchema={async () => {
         const res = await ordsEnableSchema();
         if (!res.ok) {
-          alert("Falha ao habilitar schema: " + res.error.message);
+          alert("Failed to enable schema: " + res.error.message);
           return;
         }
         await ordsStore.refresh();
