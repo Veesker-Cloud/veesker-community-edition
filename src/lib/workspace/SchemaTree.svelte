@@ -32,6 +32,7 @@
 
   let search = $state("");
   let hiddenKinds = $state<Set<ObjectKind>>(new Set());
+  let density = $state<"compact" | "comfortable">("compact");
   let showSystemSchemas = $state(false);
   let contextMenu = $state<{ x: number; y: number; owner: string; name: string; kind: ObjectKind } | null>(null);
 
@@ -165,7 +166,7 @@
   );
 </script>
 
-<nav class="tree">
+<nav class="tree" class:comfortable={density === "comfortable"}>
   <!-- Search + Refresh -->
   <div class="search-wrap">
     <svg class="search-icon" width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
@@ -189,6 +190,13 @@
       aria-pressed={showSystemSchemas}
       title={showSystemSchemas ? "Hide system schemas" : "Show system schemas"}
     >sys</button>
+    <button
+      class="density-btn"
+      class:active={density === "comfortable"}
+      onclick={() => density = density === "compact" ? "comfortable" : "compact"}
+      title={density === "compact" ? "Comfortable spacing" : "Compact spacing"}
+      aria-pressed={density === "comfortable"}
+    >⊞</button>
     {#if onRefresh}
       <button
         class="refresh-btn"
@@ -260,8 +268,8 @@
             {#if s.kinds[kind] !== undefined && !hiddenKinds.has(kind)}
               {@const loadable = s.kinds[kind]!}
               {@const filtered = loadable.kind === "ok" ? filteredObjects(loadable.value, passThrough) : []}
-              {#if kindVisible(loadable, passThrough)}
-              <details class="kind" open>
+              {#if kindVisible(loadable, passThrough) && !(loadable.kind === "ok" && filtered.length === 0)}
+              <details class="kind">
                 <summary class="kind-head" style="--kc:{KIND_COLOR[kind]}">
                   <span class="kind-dot" style="background:{KIND_COLOR[kind]}" aria-hidden="true"></span>
                   <span class="kind-label">{KIND_LABELS[kind]}</span>
@@ -460,6 +468,24 @@
     border-color: rgba(232,213,160,0.35);
     background: rgba(232,213,160,0.08);
   }
+  .density-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1;
+    padding: 1px 4px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: color 0.12s, border-color 0.12s, background 0.12s;
+  }
+  .density-btn:hover { color: var(--text-secondary); border-color: var(--border-strong); }
+  .density-btn.active {
+    color: #7ec96a;
+    border-color: rgba(126,201,106,0.35);
+    background: rgba(126,201,106,0.08);
+  }
 
   .refresh-btn {
     background: transparent;
@@ -582,7 +608,8 @@
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    padding: 0.25rem 0.7rem 0.25rem 1.4rem;
+    padding: 0.25rem 0.7rem 0.25rem calc(1.4rem - 2px);
+    border-left: 2px solid color-mix(in srgb, var(--kc) 35%, transparent);
     cursor: pointer;
     list-style: none;
     font-family: "Space Grotesk", sans-serif;
@@ -733,6 +760,13 @@
     padding: 6px 14px; text-align: left;
   }
   .ctx-item:hover { background: var(--row-hover); }
+
+  /* ── Density: comfortable ─────────────────────────────────── */
+  .tree.comfortable .schema-row { padding: 0.55rem 0.7rem; }
+  .tree.comfortable .kind-head { padding: 0.35rem 0.7rem 0.35rem calc(1.4rem - 2px); }
+  .tree.comfortable .object { padding: 0.28rem 0.7rem 0.28rem 1.8rem; }
+  .tree.comfortable .muted-row { padding: 0.18rem 0.7rem 0.18rem 1.8rem; }
+  .tree.comfortable .err-row { padding: 0.22rem 0.7rem 0.22rem 1.8rem; }
 
   /* ── Cloud tier overrides ─────────────────────────────────── */
   :global([data-tier="cloud"]) .search:focus {
