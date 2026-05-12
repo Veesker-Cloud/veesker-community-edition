@@ -3022,21 +3022,7 @@ export async function explainPlan(p: { sql: string }): Promise<{ nodes: ExplainN
       ACCESS_PREDICATES: string | null;
       FILTER_PREDICATES: string | null;
     }>;
-    try {
-      res = await conn.execute<{
-        ID: number;
-        PARENT_ID: number | null;
-        OPERATION: string;
-        OPTIONS: string | null;
-        OBJECT_NAME: string | null;
-        OBJECT_OWNER: string | null;
-        COST: number | null;
-        CARDINALITY: number | null;
-        BYTES: number | null;
-        ACCESS_PREDICATES: string | null;
-        FILTER_PREDICATES: string | null;
-      }>(
-        `SELECT id               AS ID,
+    const PLAN_QUERY_BASE = `SELECT id               AS ID,
                 parent_id        AS PARENT_ID,
                 operation        AS OPERATION,
                 options          AS OPTIONS,
@@ -3044,17 +3030,59 @@ export async function explainPlan(p: { sql: string }): Promise<{ nodes: ExplainN
                 object_owner     AS OBJECT_OWNER,
                 cost             AS COST,
                 cardinality      AS CARDINALITY,
-                bytes            AS BYTES,
-                access_predicates  AS ACCESS_PREDICATES,
-                filter_predicates  AS FILTER_PREDICATES
-           FROM plan_table
+                bytes            AS BYTES`;
+    const PLAN_ORDER = `FROM plan_table
           WHERE statement_id = :sid
           START WITH id = 0
           CONNECT BY PRIOR id = parent_id
-          ORDER SIBLINGS BY id`,
-        { sid },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
+          ORDER SIBLINGS BY id`;
+    try {
+      try {
+        res = await conn.execute<{
+          ID: number;
+          PARENT_ID: number | null;
+          OPERATION: string;
+          OPTIONS: string | null;
+          OBJECT_NAME: string | null;
+          OBJECT_OWNER: string | null;
+          COST: number | null;
+          CARDINALITY: number | null;
+          BYTES: number | null;
+          ACCESS_PREDICATES: string | null;
+          FILTER_PREDICATES: string | null;
+        }>(
+          `${PLAN_QUERY_BASE},
+                access_predicates  AS ACCESS_PREDICATES,
+                filter_predicates  AS FILTER_PREDICATES
+           ${PLAN_ORDER}`,
+          { sid },
+          { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+      } catch (e: any) {
+        if (e?.errorNum !== 904) throw e;
+        // ORA-00904: predicate columns absent in this user's PLAN_TABLE (stale schema).
+        // Fall back without them — the plan tree renders; predicates are informational.
+        res = await conn.execute<{
+          ID: number;
+          PARENT_ID: number | null;
+          OPERATION: string;
+          OPTIONS: string | null;
+          OBJECT_NAME: string | null;
+          OBJECT_OWNER: string | null;
+          COST: number | null;
+          CARDINALITY: number | null;
+          BYTES: number | null;
+          ACCESS_PREDICATES: string | null;
+          FILTER_PREDICATES: string | null;
+        }>(
+          `${PLAN_QUERY_BASE},
+                NULL AS ACCESS_PREDICATES,
+                NULL AS FILTER_PREDICATES
+           ${PLAN_ORDER}`,
+          { sid },
+          { outFormat: oracledb.OUT_FORMAT_OBJECT }
+        );
+      }
     } finally {
       await conn.execute(`DELETE FROM plan_table WHERE statement_id = :sid`, { sid });
     }
