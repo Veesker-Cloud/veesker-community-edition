@@ -57,17 +57,20 @@
   }
 
   // Only applied for manual Enter — never for paste lines.
-  // Covers single-line DQL/DML/TCL that are clearly complete (no pending operator at end).
-  const AUTO_EXEC_STARTS = /^\s*(SELECT|INSERT|UPDATE|DELETE|MERGE|TRUNCATE|COMMIT|ROLLBACK|SAVEPOINT|GRANT|REVOKE|DESCRIBE|DESC|CALL)\b/i;
+  // Only fires when the statement has its structurally required clauses present.
   const PENDING_ENDINGS = /([,=]|\bOR\b|\bAND\b|\bWHERE\b|\bFROM\b|\bJOIN\b|\bON\b|\bHAVING\b|\bSET\b|\bUNION\b|\bINTERSECT\b|\bMINUS\b)\s*$/i;
 
   function shouldAutoTerminate(line: string, partialBuffer: string): boolean {
     const t = line.trim();
     if (partialBuffer.length > 0) return false;
     if (!t || t.endsWith(";") || t === "/") return false;
-    if (!AUTO_EXEC_STARTS.test(t)) return false;
     if (PENDING_ENDINGS.test(t)) return false;
-    return true;
+    if (/^\s*SELECT\b/i.test(t)) return /\bFROM\b/i.test(t);
+    if (/^\s*INSERT\b/i.test(t)) return /\bVALUES\b|\bSELECT\b/i.test(t);
+    if (/^\s*UPDATE\b/i.test(t)) return /\bSET\b/i.test(t);
+    if (/^\s*DELETE\b/i.test(t)) return /\bFROM\b/i.test(t);
+    if (/^\s*MERGE\b/i.test(t)) return /\bUSING\b/i.test(t);
+    return /^\s*(TRUNCATE|COMMIT|ROLLBACK|SAVEPOINT|GRANT|REVOKE|DESCRIBE|DESC|CALL)\b/i.test(t);
   }
 
   function addBannerLines(): void {
@@ -89,6 +92,7 @@
     const total = cmdState.transcript.length;
     if (total < lastTranscriptLen) {
       displayLines = [];
+      addBannerLines();
       lastTranscriptLen = 0;
     }
     for (let i = lastTranscriptLen; i < total; i++) {
@@ -118,6 +122,7 @@
 
     if (trimmed === "clear" || trimmed === "cls") {
       displayLines = [];
+      addBannerLines();
       currentInput = "";
       lastTranscriptLen = cmdState.transcript.length;
       await scrollToBottom();
@@ -297,7 +302,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 8px 12px 4px;
+    padding: 8px 12px 0;
     scrollbar-width: thin;
     scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
   }
@@ -317,15 +322,15 @@
   .cw-plsql-result { color: #e6dccd; }
   .cw-input-row {
     display: flex;
-    align-items: center;
-    padding: 4px 12px 8px;
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    align-items: baseline;
+    padding: 0 12px 8px;
   }
   .cw-prompt {
     color: #a0a0a0;
     white-space: pre;
     flex-shrink: 0;
     user-select: none;
+    line-height: 1.45;
   }
   .cw-input {
     flex: 1;

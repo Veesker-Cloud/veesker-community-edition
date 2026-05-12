@@ -30,7 +30,7 @@
 import { CommandParser } from "./parser";
 import { CommandModeState } from "./state.svelte";
 import type { TranscriptEntry } from "./state.svelte";
-import { formatRows, formatStatus } from "./formatter";
+import { formatRows, formatStatus, getDdlDmlMessage } from "./formatter";
 import type { Parsed, CommandSettings, SharedExecResult } from "./types";
 import { appendCommandHistory, clearInaccessibleHistory, loadCommandHistory } from "./history";
 import { loadScript, parseScript } from "./script-runner";
@@ -233,9 +233,10 @@ export class CommandExecutor {
       const result = await this.ctx.runSql(text, { origin });
       if (result.ok) {
         const data = result.data;
-        const formatted =
-          formatRows(data.rows, data.columns, this.state.settings) +
+        const statusMsg =
+          getDdlDmlMessage(text, data.rowCount, data.elapsedMs, this.state.settings) ??
           formatStatus(data.rowCount, data.elapsedMs, this.state.settings);
+        const formatted = formatRows(data.rows, data.columns, this.state.settings) + statusMsg;
         this.push({
           kind: "sql-result",
           text: formatted,

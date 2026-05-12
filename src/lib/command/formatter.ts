@@ -7,6 +7,18 @@ import type { QueryColumn } from "$lib/sql-query";
 
 const NUMERIC_TYPE_RE = /^(NUMBER|FLOAT|INTEGER|DECIMAL|DOUBLE|BINARY_FLOAT|BINARY_DOUBLE)/i;
 
+const ORACLE_MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'] as const;
+
+function formatOracleDate(d: Date): string {
+  const day = String(d.getDate()).padStart(2, '0');
+  const mon = ORACLE_MONTHS[d.getMonth()];
+  const year = String(d.getFullYear()).slice(2);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${day}-${mon}-${year} ${hh}:${mm}:${ss}`;
+}
+
 function isNumericCol(c: QueryColumn): boolean {
   return NUMERIC_TYPE_RE.test(c.dataType);
 }
@@ -52,7 +64,7 @@ function stringifyValue(value: unknown, settings: CommandSettings, isNumeric: bo
   if (typeof value === "string") return value;
   if (value instanceof Date) {
     try {
-      return value.toISOString();
+      return formatOracleDate(value);
     } catch {
       return String(value);
     }
@@ -179,4 +191,98 @@ export function formatStatus(
     line += `\nElapsed: ${formatElapsed(elapsedMs)}\n`;
   }
   return line;
+}
+
+// Returns the Oracle-style execution message for DDL/DML/TCL/DCL statements.
+// Returns null for SELECT (or unrecognized) so the caller falls back to formatStatus.
+export function getDdlDmlMessage(
+  sql: string,
+  rowCount: number,
+  elapsedMs: number,
+  settings: CommandSettings,
+): string | null {
+  const t = sql.trim();
+  let msg: string | null = null;
+
+  if (/^INSERT\b/i.test(t)) {
+    msg = rowCount === 1 ? '1 row inserted.' : `${rowCount} rows inserted.`;
+  } else if (/^UPDATE\b/i.test(t)) {
+    msg = rowCount === 1 ? '1 row updated.' : `${rowCount} rows updated.`;
+  } else if (/^DELETE\b/i.test(t)) {
+    msg = rowCount === 1 ? '1 row deleted.' : `${rowCount} rows deleted.`;
+  } else if (/^MERGE\b/i.test(t)) {
+    msg = rowCount === 1 ? '1 row merged.' : `${rowCount} rows merged.`;
+  } else if (/^COMMIT\b/i.test(t)) {
+    msg = 'Commit complete.';
+  } else if (/^ROLLBACK\b/i.test(t)) {
+    msg = 'Rollback complete.';
+  } else if (/^SAVEPOINT\b/i.test(t)) {
+    msg = 'Savepoint created.';
+  } else if (/^CREATE\s+(OR\s+REPLACE\s+)?VIEW\b/i.test(t)) {
+    msg = 'View created.';
+  } else if (/^DROP\s+VIEW\b/i.test(t)) {
+    msg = 'View dropped.';
+  } else if (/^CREATE\s+(GLOBAL\s+TEMPORARY\s+|PRIVATE\s+TEMPORARY\s+)?TABLE\b/i.test(t)) {
+    msg = 'Table created.';
+  } else if (/^DROP\s+TABLE\b/i.test(t)) {
+    msg = 'Table dropped.';
+  } else if (/^ALTER\s+TABLE\b/i.test(t)) {
+    msg = 'Table altered.';
+  } else if (/^TRUNCATE\s+TABLE\b/i.test(t)) {
+    msg = 'Table truncated.';
+  } else if (/^CREATE\s+(UNIQUE\s+|BITMAP\s+)?INDEX\b/i.test(t)) {
+    msg = 'Index created.';
+  } else if (/^DROP\s+INDEX\b/i.test(t)) {
+    msg = 'Index dropped.';
+  } else if (/^ALTER\s+INDEX\b/i.test(t)) {
+    msg = 'Index altered.';
+  } else if (/^CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\s+BODY\b/i.test(t)) {
+    msg = 'Package body created.';
+  } else if (/^CREATE\s+(OR\s+REPLACE\s+)?PACKAGE\b/i.test(t)) {
+    msg = 'Package created.';
+  } else if (/^CREATE\s+(OR\s+REPLACE\s+)?PROCEDURE\b/i.test(t)) {
+    msg = 'Procedure created.';
+  } else if (/^CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\b/i.test(t)) {
+    msg = 'Function created.';
+  } else if (/^CREATE\s+(OR\s+REPLACE\s+)?TRIGGER\b/i.test(t)) {
+    msg = 'Trigger created.';
+  } else if (/^CREATE\s+SEQUENCE\b/i.test(t)) {
+    msg = 'Sequence created.';
+  } else if (/^DROP\s+SEQUENCE\b/i.test(t)) {
+    msg = 'Sequence dropped.';
+  } else if (/^ALTER\s+SEQUENCE\b/i.test(t)) {
+    msg = 'Sequence altered.';
+  } else if (/^CREATE\s+(OR\s+REPLACE\s+)?(PUBLIC\s+)?SYNONYM\b/i.test(t)) {
+    msg = 'Synonym created.';
+  } else if (/^DROP\s+(PUBLIC\s+)?SYNONYM\b/i.test(t)) {
+    msg = 'Synonym dropped.';
+  } else if (/^CREATE\s+USER\b/i.test(t)) {
+    msg = 'User created.';
+  } else if (/^DROP\s+USER\b/i.test(t)) {
+    msg = 'User dropped.';
+  } else if (/^ALTER\s+USER\b/i.test(t)) {
+    msg = 'User altered.';
+  } else if (/^CREATE\s+ROLE\b/i.test(t)) {
+    msg = 'Role created.';
+  } else if (/^DROP\s+ROLE\b/i.test(t)) {
+    msg = 'Role dropped.';
+  } else if (/^COMMENT\s+ON\b/i.test(t)) {
+    msg = 'Comment created.';
+  } else if (/^GRANT\b/i.test(t)) {
+    msg = 'Grant succeeded.';
+  } else if (/^REVOKE\b/i.test(t)) {
+    msg = 'Revoke succeeded.';
+  } else if (/^DROP\b/i.test(t)) {
+    msg = 'Object dropped.';
+  } else if (/^ALTER\b/i.test(t)) {
+    msg = 'Object altered.';
+  } else if (/^CREATE\b/i.test(t)) {
+    msg = 'Object created.';
+  }
+
+  if (msg === null) return null;
+  if (!settings.feedback) return '';
+  let out = `${msg}\n`;
+  if (settings.timing) out += `\nElapsed: ${formatElapsed(elapsedMs)}\n`;
+  return out;
 }
