@@ -221,7 +221,6 @@
 
   async function loadKind(node: SchemaNode, kind: ObjectKind): Promise<void> {
     node.kinds[kind] = { kind: "loading" };
-    schemas = [...schemas];
     if (kind === "REST_MODULE") {
       const res = await ordsModulesList(node.name);
       if (res.ok) {
@@ -300,7 +299,6 @@
         node.kinds[kind] = { kind: "err", message: res.error.message };
       }
     }
-    schemas = [...schemas];
   }
 
   function expandIfNeeded(node: SchemaNode): void {
@@ -324,7 +322,6 @@
             delete counts["MATERIALIZED VIEW"];
           }
           node.kindCounts = counts;
-          schemas = [...schemas];
         }
       });
     }
@@ -332,7 +329,6 @@
       void vectorTablesInSchema(node.name).then((res) => {
         if (res.ok) {
           node.vectorTables = new Set(res.data.columns.map((c) => c.tableName));
-          schemas = [...schemas];
         }
       });
     }
