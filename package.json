@@ -53,6 +53,7 @@
     "@xterm/xterm": "^6.0.0",
     "chart.js": "^4.5.1",
     "codemirror": "^6.0.2",
+    "lucide-svelte": "^1.0.1",
     "sql-formatter": "^15.7.3"
   },
   "devDependencies": {

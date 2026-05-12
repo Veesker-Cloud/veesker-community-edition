@@ -6,6 +6,7 @@
 
 <script lang="ts">
   import type { ObjectKind, Loadable } from "$lib/workspace";
+  import { Table, Eye, Layers, Hash, Cog, SquareFunction, Package, Zap, FileType, Webhook, Link2, ExternalLink, Folder, ListOrdered, Clock, User, Shield } from "lucide-svelte";
 
   export type SchemaNode = {
     name: string;
@@ -59,18 +60,6 @@
     PRIVILEGE: "Privileges",
   };
 
-  const KIND_SHORT: Record<ObjectKind, string> = {
-    TABLE: "TBL", VIEW: "VIEW", SEQUENCE: "SEQ",
-    PROCEDURE: "PROC", FUNCTION: "FUNC",
-    PACKAGE: "PKG", TRIGGER: "TRIG", TYPE: "TYPE",
-    REST_MODULE: "API",
-    MATERIALIZED_VIEW: "MV", SYNONYM: "SYN", DB_LINK: "DBLINK",
-    DIRECTORY: "DIR",
-    QUEUE: "QUEUE",
-    SCHEDULER_JOB: "JOB",
-    DB_USER: "USER",
-    PRIVILEGE: "PRIV",
-  };
 
   function toggleKind(kind: ObjectKind) {
     const next = new Set(hiddenKinds);
@@ -95,11 +84,11 @@
     DB_USER: "#c0392b", PRIVILEGE: "#c0392b",
   };
 
-  const KIND_BRIGHTNESS: Record<ObjectKind, number> = {
-    TABLE: 1.0, VIEW: 1.2, MATERIALIZED_VIEW: 0.82, SEQUENCE: 1.4,
-    PROCEDURE: 1.0, FUNCTION: 1.2, PACKAGE: 0.82, TRIGGER: 1.4, TYPE: 0.65,
-    REST_MODULE: 1.0, DB_LINK: 1.2, SYNONYM: 1.4, DIRECTORY: 0.75, QUEUE: 1.6, SCHEDULER_JOB: 0.6,
-    DB_USER: 1.0, PRIVILEGE: 1.4,
+  const KIND_ICON: Record<ObjectKind, any> = {
+    TABLE: Table, VIEW: Eye, MATERIALIZED_VIEW: Layers, SEQUENCE: Hash,
+    PROCEDURE: Cog, FUNCTION: SquareFunction, PACKAGE: Package, TRIGGER: Zap, TYPE: FileType,
+    REST_MODULE: Webhook, DB_LINK: Link2, SYNONYM: ExternalLink, DIRECTORY: Folder, QUEUE: ListOrdered, SCHEDULER_JOB: Clock,
+    DB_USER: User, PRIVILEGE: Shield,
   };
 
   function isSystemSchema(name: string): boolean {
@@ -208,28 +197,32 @@
     {/if}
   </div>
 
-  <!-- Type filter pills -->
-  <div class="kind-pills">
+  <!-- Kind icon toolbar -->
+  <div class="kind-toolbar">
+    <div class="toolbar-actions">
+      <button class="toolbar-text-btn" onclick={() => hiddenKinds = new Set()}>All</button>
+      <button class="toolbar-text-btn" onclick={() => hiddenKinds = new Set(KIND_ORDER)}>None</button>
+    </div>
     {#each KIND_GROUPS as group}
-      <div class="pill-row">
-        <span class="pill-group-label" aria-hidden="true">{group.label}</span>
-        {#each group.kinds as kind}
-          {@const pillCount = activeSchema?.kindCounts?.[kind]}
-          <button
-            class="kind-pill"
-            class:off={hiddenKinds.has(kind)}
-            style="--kc:{KIND_COLOR[kind]}; --kb:{KIND_BRIGHTNESS[kind]}"
-            onclick={() => toggleKind(kind)}
-            title={KIND_LABELS[kind]}
-            aria-pressed={!hiddenKinds.has(kind)}
-          >
-            <span class="pill-dot" aria-hidden="true"></span>
-            {KIND_SHORT[kind]}
-            {#if pillCount !== undefined}
-              <span class="pill-count">{pillCount}</span>
-            {/if}
-          </button>
-        {/each}
+      <div class="toolbar-row">
+        <span class="toolbar-group-label">{group.label}</span>
+        <div class="toolbar-icons">
+          {#each group.kinds as kind}
+            {@const isOff = hiddenKinds.has(kind)}
+            {@const count = activeSchema?.kindCounts?.[kind]}
+            <button
+              class="kind-icon-btn"
+              class:off={isOff}
+              style="--gc:{KIND_COLOR[kind]}"
+              onclick={() => toggleKind(kind)}
+              title={KIND_LABELS[kind] + (count !== undefined ? ` · ${count}` : "")}
+              aria-label={"Filter: " + KIND_LABELS[kind] + (count !== undefined ? ` (${count})` : "") + (isOff ? ", disabled" : ", enabled")}
+              aria-pressed={!isOff}
+            >
+              <svelte:component this={KIND_ICON[kind]} size={16} />
+            </button>
+          {/each}
+        </div>
       </div>
     {/each}
   </div>
@@ -498,72 +491,19 @@
   .refresh-btn:disabled { opacity: 0.4; cursor: default; }
   .refresh-btn.spinning svg { animation: spin 0.8s linear infinite; }
 
-  /* ── Kind filter pills ───────────────────────────────────── */
-  .kind-pills {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    padding: 0 0.6rem 0.5rem;
-  }
-  .pill-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    gap: 2px;
-  }
-  .pill-group-label {
-    font-size: 8px;
-    color: var(--text-muted);
-    font-family: "Space Grotesk", sans-serif;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    width: 28px;
-    flex-shrink: 0;
-    padding-top: 3px;
-    opacity: 0.7;
-  }
-  .kind-pill {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    border: 1px solid color-mix(in srgb, var(--kc) 40%, transparent);
-    background: color-mix(in srgb, var(--kc) 12%, transparent);
-    color: color-mix(in srgb, var(--kc) 75%, var(--text-secondary));
-    font-size: 10px;
-    font-family: "Inter", sans-serif;
-    cursor: pointer;
-    transition: opacity 0.12s, background 0.12s, border-color 0.12s;
-    user-select: none;
-    line-height: 1.4;
-  }
-  .kind-pill:hover {
-    background: color-mix(in srgb, var(--kc) 22%, transparent);
-    border-color: color-mix(in srgb, var(--kc) 60%, transparent);
-  }
-  .kind-pill:not(.off) { filter: brightness(var(--kb, 1)); }
-  .kind-pill.off {
-    background: transparent;
-    border-color: var(--border);
-    color: var(--text-muted);
-  }
-  .kind-pill.off .pill-dot { background: var(--border-strong); }
-  .pill-dot {
-    width: 4px;
-    height: 4px;
-    border-radius: 50%;
-    background: var(--kc);
-    flex-shrink: 0;
-    transition: background 0.12s;
-  }
-  .pill-count {
-    font-size: 8px;
-    opacity: 0.75;
-    font-family: "Inter", sans-serif;
-    margin-left: 1px;
-    letter-spacing: 0;
-  }
+  /* ── Kind icon toolbar ───────────────────────────────────── */
+  .kind-toolbar { padding: 0 0.6rem 0.5rem; display: flex; flex-direction: column; gap: 3px; }
+  .toolbar-actions { display: flex; gap: 8px; margin-bottom: 1px; }
+  .toolbar-text-btn { background: none; border: none; color: var(--text-muted); font-size: 10px; font-family: "Inter", sans-serif; font-weight: 500; cursor: pointer; padding: 0; transition: color 0.1s; }
+  .toolbar-text-btn:hover { color: var(--text-primary); text-decoration: underline; }
+  .toolbar-row { display: flex; align-items: center; gap: 4px; }
+  .toolbar-group-label { font-size: 9px; color: var(--text-muted); font-family: "Inter", sans-serif; letter-spacing: 0.08em; text-transform: uppercase; width: 80px; flex-shrink: 0; }
+  .toolbar-icons { display: flex; align-items: center; gap: 6px; }
+  .kind-icon-btn { display: flex; align-items: center; justify-content: center; background: none; border: none; padding: 3px; border-radius: 3px; cursor: pointer; color: var(--gc); transition: background 0.1s, transform 0.08s, opacity 0.1s; outline: none; }
+  .kind-icon-btn:hover { background: rgba(255, 255, 255, 0.05); }
+  .kind-icon-btn:active { transform: scale(0.95); }
+  .kind-icon-btn:focus-visible { outline: 1px solid var(--gc); outline-offset: 1px; }
+  .kind-icon-btn.off { color: var(--text-muted); opacity: 0.3; }
 
   /* ── Schema row ───────────────────────────────────────────── */
   .schema { margin-bottom: 0.15rem; }
