@@ -758,7 +758,9 @@
   let unlistenAiApprovalReq: UnlistenFn | null = null;
 
   onMount(() => {
-    void bootstrap();
+    bootstrap().catch((e) => {
+      fatal = `Unexpected error: ${e instanceof Error ? e.message : String(e)}`;
+    });
     window.addEventListener("keydown", onKeydown);
     // L3.1 (Onda 3): subscribe to streaming row-fetch progress emitted by the
     // sidecar. Best-effort — if the listener fails to register the bar simply

@@ -624,20 +624,27 @@ export async function openSession(p: OpenSessionParams): Promise<OpenSessionResu
 
     const conn = await buildConnection(p);
     try {
+      const safety = safetyFromParams(p);
+      // Apply a boot call-timeout before any queries. Without this, if Oracle
+      // accepts the TCP connection but stalls on SQL (e.g. during recovery or
+      // under heavy load), applySessionIdentification hangs forever and the
+      // workspace never loads past "Loading workspace...".
+      const BOOT_CALL_TIMEOUT_MS = 20_000;
+      try { conn.callTimeout = BOOT_CALL_TIMEOUT_MS; } catch { /* old oracledb */ }
+
       // Brand the session in V$SESSION before any user query can run on it.
       // Best-effort: failures here must not abort the open.
       await applySessionIdentification(conn);
 
-      const safety = safetyFromParams(p);
-      // Apply per-statement timeout. Setting to 0 means no timeout (oracledb default).
-      // We only set if > 0, so existing sessions are unaffected.
-      if (typeof safety.statementTimeoutMs === "number" && safety.statementTimeoutMs > 0) {
-        try {
-          conn.callTimeout = safety.statementTimeoutMs;
-        } catch (e) {
-          // Non-fatal: log but proceed. Old oracledb versions may not have callTimeout.
-          log.error(`[oracle] failed to apply callTimeout: ${e instanceof Error ? e.message : String(e)}`);
-        }
+      // Transition to the user-configured session timeout (0 = unlimited).
+      const sessionTimeoutMs =
+        typeof safety.statementTimeoutMs === "number" && safety.statementTimeoutMs > 0
+          ? safety.statementTimeoutMs
+          : 0;
+      try {
+        conn.callTimeout = sessionTimeoutMs;
+      } catch (e) {
+        log.error(`[oracle] failed to apply callTimeout: ${e instanceof Error ? e.message : String(e)}`);
       }
 
       const versionRes = await conn.execute<{ V: string }>(
