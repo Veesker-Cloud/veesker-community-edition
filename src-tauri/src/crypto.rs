@@ -18,7 +18,6 @@ use aes_gcm::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use keyring::Entry;
-use rand::RngCore;
 
 const KEY_BYTES: usize = 32;
 const KEY_HEX_LEN: usize = KEY_BYTES * 2;
@@ -67,8 +66,7 @@ pub fn get_or_create_command_history_key() -> Option<Vec<u8>> {
     {
         return Some(bytes);
     }
-    let mut bytes = vec![0u8; KEY_BYTES];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    let bytes: Vec<u8> = (0..KEY_BYTES).map(|_| rand::random::<u8>()).collect();
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     if entry.set_password(&hex).is_err() {
         eprintln!(
@@ -97,8 +95,7 @@ fn get_or_create_key(keychain_name: &str, log_label: &str) -> Vec<u8> {
     {
         return bytes;
     }
-    let mut bytes = vec![0u8; KEY_BYTES];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    let bytes: Vec<u8> = (0..KEY_BYTES).map(|_| rand::random::<u8>()).collect();
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     if entry.set_password(&hex).is_err() {
         eprintln!("{log_label}: could not persist key to keychain");
