@@ -93,6 +93,7 @@
     });
 
     resizeObserver = new ResizeObserver(() => {
+      if (!host || host.clientWidth === 0) return;
       fit?.fit();
       if (term && termId) {
         invoke("terminal_resize", { id: termId, cols: term.cols, rows: term.rows }).catch(() => {});
@@ -173,9 +174,7 @@
       <button class="tp-btn" aria-label="Close terminal" onclick={onClose} title="Close (Ctrl+`)">×</button>
     </div>
   </div>
-  {#if !minimized}
-    <div bind:this={host} class="tp-host"></div>
-  {/if}
+  <div bind:this={host} class="tp-host" class:tp-host-hidden={minimized}></div>
 </div>
 
 <style>
@@ -234,4 +233,5 @@
     overflow: hidden;
     padding: 4px 8px;
   }
+  .tp-host-hidden { display: none; }
 </style>
