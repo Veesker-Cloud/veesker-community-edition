@@ -81,43 +81,33 @@
   let flyoutAnchorRight = $state(0);
   let badgeAnchorEl = $state<HTMLDivElement | null>(null);
 
-  // ── Draggable dock ────────────────────────────────────────────────────────────
-  type DockPos = { x: number; y: number };
-  let dockPos = $state<DockPos | null>((() => {
-    try { const s = localStorage.getItem("veesker:dock:pos"); return s ? (JSON.parse(s) as DockPos) : null; } catch { return null; }
-  })());
-  let dockEl = $state<HTMLDivElement | null>(null);
-  let editorPaneEl = $state<HTMLDivElement | null>(null);
-  let _dockDragOffset = { x: 0, y: 0 };
+  // ── macOS-style dock (magnify on hover) ──────────────────────────────────────
+  let dockMouseX = $state<number | null>(null);
 
-  function onDockGripDown(e: PointerEvent) {
-    if (!dockEl || !editorPaneEl) return;
-    e.preventDefault();
-    const paneRect = editorPaneEl.getBoundingClientRect();
-    const dockRect = dockEl.getBoundingClientRect();
-    _dockDragOffset = { x: e.clientX - dockRect.left, y: e.clientY - dockRect.top };
-    if (dockPos === null) {
-      dockPos = { x: dockRect.left - paneRect.left, y: dockRect.top - paneRect.top };
-    }
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  function onDockMouseMove(e: MouseEvent) { dockMouseX = e.clientX; }
+  function onDockMouseLeave() { dockMouseX = null; }
+
+  function btnScale(el: HTMLButtonElement | null): number {
+    if (dockMouseX === null || !el) return 1;
+    const rect = el.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const dist = dockMouseX - cx;
+    return 1 + 0.6 * Math.exp(-(dist * dist) / 7200); // sigma=60px: 2*60²=7200
   }
 
-  function onDockGripMove(e: PointerEvent) {
-    if (e.buttons === 0 || !editorPaneEl || dockPos === null) return;
-    const paneRect = editorPaneEl.getBoundingClientRect();
-    const dockW = dockEl?.offsetWidth ?? 200;
-    const dockH = dockEl?.offsetHeight ?? 40;
-    dockPos = {
-      x: Math.max(0, Math.min(paneRect.width - dockW, e.clientX - paneRect.left - _dockDragOffset.x)),
-      y: Math.max(0, Math.min(paneRect.height - dockH, e.clientY - paneRect.top - _dockDragOffset.y)),
-    };
-  }
-
-  function onDockGripUp() {
-    if (dockPos) {
-      try { localStorage.setItem("veesker:dock:pos", JSON.stringify(dockPos)); } catch { /* ignore */ }
-    }
-  }
+  let btnNewEl = $state<HTMLButtonElement | null>(null);
+  let btnOpenEl = $state<HTMLButtonElement | null>(null);
+  let btnSaveEl = $state<HTMLButtonElement | null>(null);
+  let btnSaveAsEl = $state<HTMLButtonElement | null>(null);
+  let btnFormatEl = $state<HTMLButtonElement | null>(null);
+  let btnCompileEl = $state<HTMLButtonElement | null>(null);
+  let btnRunEl = $state<HTMLButtonElement | null>(null);
+  let btnExplainEl = $state<HTMLButtonElement | null>(null);
+  let btnFlowStaticEl = $state<HTMLButtonElement | null>(null);
+  let btnFlowStatsEl = $state<HTMLButtonElement | null>(null);
+  let btnCommitEl = $state<HTMLButtonElement | null>(null);
+  let btnRollbackEl = $state<HTMLButtonElement | null>(null);
+  let btnExpandEl = $state<HTMLButtonElement | null>(null);
 
   // ── Terminal ──────────────────────────────────────────────────────────────
   let terminalOpen = $state(false);
@@ -609,7 +599,7 @@
           </div>
         {:else}
           {@const tab = sqlEditor.active}
-          <div bind:this={editorPaneEl} class="editor-pane" class:editor-prod={env === "prod"} style="flex: 0 0 {sqlEditor.editorRatio * 100}%">
+          <div class="editor-pane" class:editor-prod={env === "prod"} style="flex: 0 0 {sqlEditor.editorRatio * 100}%">
             {#if tab}
               {#if tab.packageSpec != null}
                 <div class="pkg-subtabs">
@@ -653,24 +643,9 @@
                 {completionSchema}
                 {getColumns}
               />
-              <div bind:this={dockEl} class="dock" aria-label="Editor actions" style={dockPos ? `top:${dockPos.y}px;left:${dockPos.x}px;transform:none;bottom:auto;` : ""}>
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <div
-                  class="dock-grip"
-                  title="Drag to move · double-click to reset"
-                  onpointerdown={onDockGripDown}
-                  onpointermove={onDockGripMove}
-                  onpointerup={onDockGripUp}
-                  ondblclick={() => { dockPos = null; try { localStorage.removeItem("veesker:dock:pos"); } catch { /* ignore */ } }}
-                >
-                  <svg width="10" height="14" viewBox="0 0 10 14" fill="none" aria-hidden="true">
-                    <circle cx="3" cy="3" r="1.2" fill="currentColor"/><circle cx="7" cy="3" r="1.2" fill="currentColor"/>
-                    <circle cx="3" cy="7" r="1.2" fill="currentColor"/><circle cx="7" cy="7" r="1.2" fill="currentColor"/>
-                    <circle cx="3" cy="11" r="1.2" fill="currentColor"/><circle cx="7" cy="11" r="1.2" fill="currentColor"/>
-                  </svg>
-                </div>
-                <div class="dock-sep"></div>
-                <button class="dock-btn" title="New query (⌘N)" aria-label="New query" onclick={() => sqlEditor.openBlank()}>
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div class="dock" aria-label="Editor actions" role="toolbar" tabindex="-1" onmousemove={onDockMouseMove} onmouseleave={onDockMouseLeave}>
+                <button bind:this={btnNewEl} class="dock-btn" data-label="New query (⌘N)" aria-label="New query" style="transform: scale({btnScale(btnNewEl)})" onclick={() => sqlEditor.openBlank()}>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <path d="M4 2.5h5.5L13 6v7.5H4V2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
                     <path d="M9.5 2.5V6.5H13" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
@@ -678,13 +653,13 @@
                     <line x1="8" y1="8" x2="8" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
                   </svg>
                 </button>
-                <button class="dock-btn" title="Open file (⌘O)" aria-label="Open file" onclick={() => void sqlEditor.openFromFile()}>
+                <button bind:this={btnOpenEl} class="dock-btn" data-label="Open file (⌘O)" aria-label="Open file" style="transform: scale({btnScale(btnOpenEl)})" onclick={() => void sqlEditor.openFromFile()}>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <path d="M2 7.5h12V13H2V7.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
                     <path d="M2 7.5V5H5.5l1.5 2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
                 </button>
-                <button class="dock-btn" title="Save (⌘S)" aria-label="Save" onclick={() => void sqlEditor.saveActive()}>
+                <button bind:this={btnSaveEl} class="dock-btn" data-label="Save (⌘S)" aria-label="Save" style="transform: scale({btnScale(btnSaveEl)})" onclick={() => void sqlEditor.saveActive()}>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <rect x="2" y="2" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
                     <rect x="5" y="2" width="6" height="4.5" stroke="currentColor" stroke-width="1.1"/>
@@ -692,7 +667,7 @@
                     <line x1="8.5" y1="2.5" x2="8.5" y2="6" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
                   </svg>
                 </button>
-                <button class="dock-btn" title="Save as… (⌘⇧S)" aria-label="Save as" onclick={() => void sqlEditor.saveAsActive()}>
+                <button bind:this={btnSaveAsEl} class="dock-btn" data-label="Save as… (⌘⇧S)" aria-label="Save as" style="transform: scale({btnScale(btnSaveAsEl)})" onclick={() => void sqlEditor.saveAsActive()}>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <rect x="1.5" y="2" width="10.5" height="12" rx="1.5" stroke="currentColor" stroke-width="1.3"/>
                     <rect x="4.5" y="2" width="5" height="4" stroke="currentColor" stroke-width="1.1"/>
@@ -702,7 +677,7 @@
                   </svg>
                 </button>
                 <div class="dock-sep"></div>
-                <button class="dock-btn dock-format" title="Beautify / Format code" aria-label="Format code" disabled={!(tab.packageActiveTab === "spec" ? (tab.packageSpec ?? tab.sql) : tab.sql)?.trim()} onclick={handleFormat}>
+                <button bind:this={btnFormatEl} class="dock-btn dock-format" data-label="Format code" aria-label="Format code" style="transform: scale({btnScale(btnFormatEl)})" disabled={!(tab.packageActiveTab === "spec" ? (tab.packageSpec ?? tab.sql) : tab.sql)?.trim()} onclick={handleFormat}>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <path d="M2.5 13.5L9.5 6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                     <rect x="1.2" y="12.2" width="2.8" height="2.8" rx="0.4" transform="rotate(-45 2.6 13.6)" stroke="currentColor" stroke-width="1.1" fill="none"/>
@@ -714,7 +689,7 @@
                 </button>
                 <div class="dock-sep"></div>
                 {#if COMPILE_REGEX.test(tab.packageActiveTab === "spec" ? (tab.packageSpec ?? tab.sql) : tab.sql)}
-                  <button class="dock-btn dock-compile" title="Compile (F5)" aria-label="Compile" onclick={() => void sqlEditor.runActiveAll()}>
+                  <button bind:this={btnCompileEl} class="dock-btn dock-compile" data-label="Compile (F5)" aria-label="Compile" style="transform: scale({btnScale(btnCompileEl)})" onclick={() => void sqlEditor.runActiveAll()}>
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                       <polygon points="3,2 14,8 3,14"/>
                     </svg>
@@ -722,7 +697,7 @@
                   <div class="dock-sep"></div>
                 {:else}
                   {@const currentSql = tab.packageActiveTab === "spec" ? (tab.packageSpec ?? tab.sql) : tab.sql}
-                  <button class="dock-btn dock-run" title="Execute (F5)" aria-label="Execute" disabled={!currentSql?.trim() || !!active?.running} onclick={() => void sqlEditor.runActiveAll()}>
+                  <button bind:this={btnRunEl} class="dock-btn dock-run" data-label="Execute (F5)" aria-label="Execute" style="transform: scale({btnScale(btnRunEl)})" disabled={!currentSql?.trim() || !!active?.running} onclick={() => void sqlEditor.runActiveAll()}>
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                       <polygon points="3,2 14,8 3,14"/>
                     </svg>
@@ -730,7 +705,7 @@
                   <div class="dock-sep"></div>
                 {/if}
                 {#if !tab.plsqlMeta}
-                  <button class="dock-btn" title="Explain Plan (F6)" aria-label="Explain Plan" onclick={() => triggerExplain(tab.sql)}>
+                  <button bind:this={btnExplainEl} class="dock-btn" data-label="Explain Plan (F6)" aria-label="Explain Plan" style="transform: scale({btnScale(btnExplainEl)})" onclick={() => triggerExplain(tab.sql)}>
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                       <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3"/>
                       <line x1="10.2" y1="10.2" x2="14.5" y2="14.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
@@ -738,7 +713,7 @@
                       <line x1="4.5" y1="7" x2="9.5" y2="7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
                     </svg>
                   </button>
-                  <button class="dock-btn" title="Visual Flow — static trace" aria-label="Visual Flow (static)" disabled={!tab.sql?.trim()} onclick={() => void explainWithVisualFlow(false)}>
+                  <button bind:this={btnFlowStaticEl} class="dock-btn" data-label="Visual Flow (static)" aria-label="Visual Flow (static)" style="transform: scale({btnScale(btnFlowStaticEl)})" disabled={!tab.sql?.trim()} onclick={() => void explainWithVisualFlow(false)}>
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                       <circle cx="2.5" cy="8" r="1.8" stroke="currentColor" stroke-width="1.2"/>
                       <circle cx="8" cy="3.5" r="1.8" stroke="currentColor" stroke-width="1.2"/>
@@ -751,7 +726,7 @@
                       <line x1="9.6" y1="11.1" x2="12.6" y2="9.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
                     </svg>
                   </button>
-                  <button class="dock-btn" title="Visual Flow + runtime stats" aria-label="Visual Flow with stats" disabled={!tab.sql?.trim()} onclick={() => void explainWithVisualFlow(true)}>
+                  <button bind:this={btnFlowStatsEl} class="dock-btn" data-label="Visual Flow + stats" aria-label="Visual Flow with stats" style="transform: scale({btnScale(btnFlowStatsEl)})" disabled={!tab.sql?.trim()} onclick={() => void explainWithVisualFlow(true)}>
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                       <circle cx="2.5" cy="8" r="1.8" stroke="currentColor" stroke-width="1.2"/>
                       <circle cx="7" cy="3.5" r="1.8" stroke="currentColor" stroke-width="1.2"/>
@@ -764,20 +739,20 @@
                   </button>
                   <div class="dock-sep"></div>
                 {/if}
-                <button class="dock-btn dock-commit" title="Commit transaction" aria-label="Commit" disabled={!sqlEditor.pendingTx} onclick={() => void sqlEditor.commit().catch(e => { window.alert("Commit failed: " + String(e)); })}>
+                <button bind:this={btnCommitEl} class="dock-btn dock-commit" data-label="Commit" aria-label="Commit" style="transform: scale({btnScale(btnCommitEl)})" disabled={!sqlEditor.pendingTx} onclick={() => void sqlEditor.commit().catch(e => { window.alert("Commit failed: " + String(e)); })}>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.3"/>
                     <polyline points="5,8 7.5,10.5 11.5,5.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
                 </button>
-                <button class="dock-btn dock-rollback" title="Rollback transaction" aria-label="Rollback" disabled={!sqlEditor.pendingTx} onclick={() => void sqlEditor.rollback().catch(e => { window.alert("Rollback failed: " + String(e)); })}>
+                <button bind:this={btnRollbackEl} class="dock-btn dock-rollback" data-label="Rollback" aria-label="Rollback" style="transform: scale({btnScale(btnRollbackEl)})" disabled={!sqlEditor.pendingTx} onclick={() => void sqlEditor.rollback().catch(e => { window.alert("Rollback failed: " + String(e)); })}>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <path d="M5.5 4C8 1.5 14 2.5 14 8s-6 6.5-8.5 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
                     <polyline points="2,8.5 5.5,4 9,7.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
                 </button>
                 <div class="dock-sep"></div>
-                <button class="dock-btn" title={sqlEditor.editorExpanded ? "Restore (⌘⇧E)" : "Expand (⌘⇧E)"} aria-label={sqlEditor.editorExpanded ? "Restore editor" : "Expand editor"} onclick={() => sqlEditor.toggleEditorExpanded()}>
+                <button bind:this={btnExpandEl} class="dock-btn" data-label={sqlEditor.editorExpanded ? "Restore (⌘⇧E)" : "Expand (⌘⇧E)"} aria-label={sqlEditor.editorExpanded ? "Restore editor" : "Expand editor"} style="transform: scale({btnScale(btnExpandEl)})" onclick={() => sqlEditor.toggleEditorExpanded()}>
                   {#if sqlEditor.editorExpanded}
                     <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                       <path d="M6 1v5H1M10 1v5h5M6 15v-5H1M10 15v-5h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1228,41 +1203,26 @@
   }
   .editor-prod { border-top: 3px solid #b33e1f; }
 
-  /* ── Floating dock ──────────────────────────────────────────────────────── */
+  /* ── macOS-style dock ───────────────────────────────────────────────────── */
   .dock {
-    position: absolute;
-    bottom: 12px;
+    position: fixed;
+    bottom: 16px;
     left: 50%;
     transform: translateX(-50%);
-    z-index: 40;
+    z-index: 200;
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     gap: 1px;
-    padding: 4px 6px;
+    padding: 6px 8px;
     background: rgba(14, 12, 10, 0.84);
-    backdrop-filter: blur(18px) saturate(160%);
-    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
     border: 1px solid rgba(255, 255, 255, 0.09);
-    border-radius: 14px;
-    box-shadow: 0 4px 20px rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.06) inset;
+    border-radius: 16px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6), 0 1px 0 rgba(255,255,255,0.06) inset;
     white-space: nowrap;
     pointer-events: auto;
   }
-  .dock-grip {
-    width: 18px;
-    height: 30px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: grab;
-    color: rgba(255,255,255,0.18);
-    border-radius: 6px;
-    flex-shrink: 0;
-    touch-action: none;
-    user-select: none;
-  }
-  .dock-grip:hover { color: rgba(255,255,255,0.38); background: rgba(255,255,255,0.05); }
-  .dock-grip:active { cursor: grabbing; }
   .dock-btn {
     background: transparent;
     border: none;
@@ -1274,33 +1234,55 @@
     justify-content: center;
     color: rgba(255,255,255,0.48);
     cursor: pointer;
-    transition: background 0.12s, color 0.12s, transform 0.1s;
+    transition: background 0.12s, color 0.12s, transform 0.15s ease-out;
+    transform-origin: bottom center;
     flex-shrink: 0;
+    position: relative;
   }
   .dock-btn:hover:not(:disabled) {
     background: rgba(255,255,255,0.10);
     color: rgba(255,255,255,0.92);
-    transform: scale(1.15) translateY(-2px);
   }
-  .dock-btn:active:not(:disabled) { transform: scale(1.04); }
+  .dock-btn:active:not(:disabled) { transform: scale(0.96) !important; }
   .dock-btn:disabled { opacity: 0.22; cursor: default; }
+  .dock-btn[data-label]::after {
+    content: attr(data-label);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    translate: -50% 0;
+    background: rgba(10, 9, 8, 0.92);
+    border: 1px solid rgba(255,255,255,0.12);
+    color: rgba(255,255,255,0.85);
+    font-size: 10.5px;
+    font-family: "Space Grotesk", sans-serif;
+    padding: 3px 8px;
+    border-radius: 5px;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 100ms ease;
+    z-index: 10;
+  }
+  .dock-btn[data-label]:hover::after { opacity: 1; }
   .dock-sep {
     width: 1px;
     height: 18px;
     background: rgba(255,255,255,0.10);
     margin: 0 3px;
     flex-shrink: 0;
+    align-self: center;
   }
   .dock-format { color: #a0c4ff; }
-  .dock-format:hover:not(:disabled) { background: rgba(100,160,255,0.14); color: #c4d9ff; transform: scale(1.15) translateY(-2px); }
+  .dock-format:hover:not(:disabled) { background: rgba(100,160,255,0.14); color: #c4d9ff; }
   .dock-compile { color: #f5a08a; }
-  .dock-compile:hover:not(:disabled) { background: rgba(179,62,31,0.18); color: #f5c4a8; transform: scale(1.15) translateY(-2px); }
+  .dock-compile:hover:not(:disabled) { background: rgba(179,62,31,0.18); color: #f5c4a8; }
   .dock-run { color: #7ec96a; }
-  .dock-run:hover:not(:disabled) { background: rgba(126,201,106,0.15); color: #9fe88a; transform: scale(1.15) translateY(-2px); }
+  .dock-run:hover:not(:disabled) { background: rgba(126,201,106,0.15); color: #9fe88a; }
   .dock-commit { color: #7ec96a; }
-  .dock-commit:hover:not(:disabled) { background: rgba(126,201,106,0.15); color: #9fe88a; transform: scale(1.15) translateY(-2px); }
+  .dock-commit:hover:not(:disabled) { background: rgba(126,201,106,0.15); color: #9fe88a; }
   .dock-rollback { color: #f5a08a; }
-  .dock-rollback:hover:not(:disabled) { background: rgba(245,160,138,0.15); color: #f5c4a8; transform: scale(1.15) translateY(-2px); }
+  .dock-rollback:hover:not(:disabled) { background: rgba(245,160,138,0.15); color: #f5c4a8; }
 
   /* ── Middle resize handle ──────────────────────────────────────────────── */
   .mid-handle {
