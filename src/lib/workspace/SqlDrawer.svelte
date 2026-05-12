@@ -42,6 +42,7 @@
     connectionName?: string;
     connectionUser?: string | null;
     connectionService?: string | null;
+    connectionVersion?: string | null;
     isProductionLocked?: boolean;
   };
   let {
@@ -54,6 +55,7 @@
     connectionName,
     connectionUser = null,
     connectionService = null,
+    connectionVersion = null,
     isProductionLocked = false,
   }: Props = $props();
 
@@ -108,6 +110,22 @@
   let btnCommitEl = $state<HTMLButtonElement | null>(null);
   let btnRollbackEl = $state<HTMLButtonElement | null>(null);
   let btnExpandEl = $state<HTMLButtonElement | null>(null);
+  let btnNewCaretEl = $state<HTMLButtonElement | null>(null);
+  let dockNewMenuOpen = $state(false);
+
+  function toggleDockNewMenu(e: MouseEvent) {
+    e.stopPropagation();
+    dockNewMenuOpen = !dockNewMenuOpen;
+  }
+
+  $effect(() => {
+    if (!dockNewMenuOpen) return;
+    function onOutsideClick(ev: MouseEvent) {
+      if (!(ev.target as HTMLElement).closest(".dock-new-group")) dockNewMenuOpen = false;
+    }
+    window.addEventListener("click", onOutsideClick);
+    return () => window.removeEventListener("click", onOutsideClick);
+  });
 
   // ── Terminal ──────────────────────────────────────────────────────────────
   let terminalOpen = $state(false);
@@ -593,6 +611,7 @@
               connectionId={tab.connectionId ?? sqlEditor.connectionId ?? ""}
               user={connectionUser}
               service={connectionService}
+              serverVersion={connectionVersion}
               {isProductionLocked}
               onExit={() => sqlEditor.closeTab(tab.id)}
             />
@@ -645,14 +664,31 @@
               />
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <div class="dock" aria-label="Editor actions" role="toolbar" tabindex="-1" onmousemove={onDockMouseMove} onmouseleave={onDockMouseLeave}>
-                <button bind:this={btnNewEl} class="dock-btn" data-label="New query (⌘N)" aria-label="New query" style="transform: scale({btnScale(btnNewEl)})" onclick={() => sqlEditor.openBlank()}>
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                    <path d="M4 2.5h5.5L13 6v7.5H4V2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
-                    <path d="M9.5 2.5V6.5H13" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
-                    <line x1="6.5" y1="9.5" x2="9.5" y2="9.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
-                    <line x1="8" y1="8" x2="8" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
-                  </svg>
-                </button>
+                <div class="dock-new-group">
+                  <button bind:this={btnNewEl} class="dock-btn dock-new-main" data-label="New SQL Window (⌘N)" aria-label="New SQL Window" style="transform: scale({btnScale(btnNewEl)})" onclick={() => { sqlEditor.openBlank(); dockNewMenuOpen = false; }}>
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                      <path d="M4 2.5h5.5L13 6v7.5H4V2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+                      <path d="M9.5 2.5V6.5H13" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+                      <line x1="6.5" y1="9.5" x2="9.5" y2="9.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                      <line x1="8" y1="8" x2="8" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                    </svg>
+                  </button>
+                  <button bind:this={btnNewCaretEl} class="dock-btn dock-new-caret" aria-label="New tab options" aria-expanded={dockNewMenuOpen} style="transform: scale({btnScale(btnNewCaretEl)})" onclick={toggleDockNewMenu}>
+                    <svg width="7" height="5" viewBox="0 0 7 5" fill="currentColor" aria-hidden="true"><path d="M0 0l3.5 5L7 0z"/></svg>
+                  </button>
+                  {#if dockNewMenuOpen}
+                    <div class="dock-new-menu" role="menu">
+                      <button class="dock-menu-item" role="menuitem" onclick={() => { sqlEditor.openBlank(); dockNewMenuOpen = false; }}>
+                        <span class="dock-menu-label">SQL Window</span>
+                        <span class="dock-menu-shortcut">⌘N</span>
+                      </button>
+                      <button class="dock-menu-item" role="menuitem" disabled={sqlEditor.connectionId === null} onclick={() => { const id = sqlEditor.connectionId; if (id) sqlEditor.openCommandTab(id); dockNewMenuOpen = false; }}>
+                        <span class="dock-menu-label">Command Window</span>
+                        <span class="dock-menu-shortcut">⌃⇧N</span>
+                      </button>
+                    </div>
+                  {/if}
+                </div>
                 <button bind:this={btnOpenEl} class="dock-btn" data-label="Open file (⌘O)" aria-label="Open file" style="transform: scale({btnScale(btnOpenEl)})" onclick={() => void sqlEditor.openFromFile()}>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <path d="M2 7.5h12V13H2V7.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
@@ -1283,6 +1319,63 @@
   .dock-commit:hover:not(:disabled) { background: rgba(126,201,106,0.15); color: #9fe88a; }
   .dock-rollback { color: #f5a08a; }
   .dock-rollback:hover:not(:disabled) { background: rgba(245,160,138,0.15); color: #f5c4a8; }
+  .dock-new-group {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
+  }
+  .dock-new-main {
+    width: 26px;
+    border-radius: 8px 0 0 8px;
+  }
+  .dock-new-caret {
+    width: 14px;
+    border-radius: 0 8px 8px 0;
+    border-left: 1px solid rgba(255,255,255,0.08);
+    padding: 0;
+  }
+  .dock-new-menu {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    z-index: 50;
+    min-width: 200px;
+    padding: 4px;
+    background: rgba(14, 12, 10, 0.96);
+    backdrop-filter: blur(18px) saturate(160%);
+    -webkit-backdrop-filter: blur(18px) saturate(160%);
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .dock-menu-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    color: rgba(255,255,255,0.85);
+    font-size: 12px;
+    font-family: "Space Grotesk", sans-serif;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background 0.1s;
+    width: 100%;
+  }
+  .dock-menu-item:hover:not(:disabled) { background: rgba(255,255,255,0.08); }
+  .dock-menu-item:disabled { opacity: 0.4; cursor: default; }
+  .dock-menu-label { flex: 1; }
+  .dock-menu-shortcut {
+    color: rgba(255,255,255,0.4);
+    font-size: 10px;
+    font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  }
 
   /* ── Middle resize handle ──────────────────────────────────────────────── */
   .mid-handle {

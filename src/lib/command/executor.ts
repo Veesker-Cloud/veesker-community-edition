@@ -30,7 +30,7 @@
 import { CommandParser } from "./parser";
 import { CommandModeState } from "./state.svelte";
 import type { TranscriptEntry } from "./state.svelte";
-import { formatRows, formatStatus } from "./formatter";
+import { formatRows, formatStatus, getDdlDmlMessage } from "./formatter";
 import type { Parsed, CommandSettings, SharedExecResult } from "./types";
 import { appendCommandHistory, clearInaccessibleHistory, loadCommandHistory } from "./history";
 import { loadScript, parseScript } from "./script-runner";
@@ -233,9 +233,10 @@ export class CommandExecutor {
       const result = await this.ctx.runSql(text, { origin });
       if (result.ok) {
         const data = result.data;
-        const formatted =
-          formatRows(data.rows, data.columns, this.state.settings) +
+        const statusMsg =
+          getDdlDmlMessage(text, data.rowCount, data.elapsedMs, this.state.settings) ??
           formatStatus(data.rowCount, data.elapsedMs, this.state.settings);
+        const formatted = formatRows(data.rows, data.columns, this.state.settings) + statusMsg;
         this.push({
           kind: "sql-result",
           text: formatted,
@@ -333,7 +334,7 @@ export class CommandExecutor {
         await this.appendHistorySafe(raw, origin, "ok", null);
         return;
       case "SHOW":
-        this.handleShow(args);
+        await this.handleShow(args);
         await this.appendHistorySafe(raw, origin, "ok", null);
         return;
       case "DEFINE":
@@ -509,16 +510,16 @@ export class CommandExecutor {
     }
   }
 
-  private handleShow(args: string[]): void {
+  private async handleShow(args: string[]): Promise<void> {
     if (args.length === 0) {
-      this.push({
-        kind: "error",
-        code: "SP2-0158",
-        message: "missing SHOW option",
-      });
+      this.push({ kind: "error", code: "SP2-0158", message: "missing SHOW option" });
       return;
     }
     const rawKey = args[0].toUpperCase();
+    if (rawKey === "ERRORS" || rawKey === "ERR") {
+      await this.handleShowErrors(args.slice(1));
+      return;
+    }
     if (rawKey === "ALL") {
       let out = "";
       for (const k of SETTING_DISPLAY_ORDER) {
@@ -529,17 +530,77 @@ export class CommandExecutor {
     }
     const key = SETTING_ALIASES[rawKey];
     if (!key) {
-      this.push({
-        kind: "error",
-        code: "SP2-0158",
-        message: `unknown SHOW option "${args[0]}"`,
-      });
+      this.push({ kind: "error", code: "SP2-0158", message: `unknown SHOW option "${args[0]}"` });
       return;
     }
-    this.push({
-      kind: "info",
-      text: `${settingLabel(key)} ${renderSettingValue(key, this.state.settings)}\n`,
-    });
+    this.push({ kind: "info", text: `${settingLabel(key)} ${renderSettingValue(key, this.state.settings)}\n` });
+  }
+
+  private async handleShowErrors(args: string[]): Promise<void> {
+    const schema = this.ctx.user ? `${this.ctx.user.toUpperCase()}.` : "";
+    let sql: string;
+    let noErrMsg: string;
+
+    if (args.length >= 2) {
+      const type = args[0].toUpperCase().replace(/'/g, "''");
+      const name = args[1].toUpperCase().replace(/'/g, "''");
+      sql = `SELECT line, position, text FROM user_errors WHERE type = '${type}' AND name = '${name}' ORDER BY sequence`;
+      noErrMsg = `No errors for ${type} ${schema}${name}\n`;
+    } else if (args.length === 1) {
+      const type = args[0].toUpperCase().replace(/'/g, "''");
+      sql = `SELECT name, line, position, text FROM user_errors WHERE type = '${type}' ORDER BY name, sequence`;
+      noErrMsg = `No errors for ${type}\n`;
+    } else {
+      sql = [
+        "SELECT e.type, e.name, e.line, e.position, e.text",
+        "FROM user_errors e",
+        "JOIN user_objects o ON o.object_name = e.name AND o.object_type = e.type",
+        "ORDER BY o.last_ddl_time DESC, e.name, e.sequence",
+        "FETCH FIRST 50 ROWS ONLY",
+      ].join(" ");
+      noErrMsg = "No errors\n";
+    }
+
+    const result = await this.ctx.runSql(sql, { origin: "user_typed" });
+    if (!result.ok) {
+      this.push({ kind: "error", code: String(result.error.code), message: result.error.message });
+      return;
+    }
+
+    const { rows } = result.data;
+    if (rows.length === 0) {
+      this.push({ kind: "info", text: noErrMsg });
+      return;
+    }
+
+    let out = "";
+    if (args.length >= 2) {
+      const type = args[0].toUpperCase();
+      const name = args[1].toUpperCase();
+      out += `Errors for ${type} ${schema}${name}:\n\n`;
+      out += "LINE/COL  ERROR\n";
+      out += "--------  -------------------------------------------------------\n";
+      for (const row of rows) {
+        const [line, pos, text] = row as [number | null, number | null, string | null];
+        out += `${`${line ?? "?"}/${pos ?? "?"}`.padEnd(8)}  ${text ?? ""}\n`;
+      }
+    } else if (args.length === 1) {
+      const type = args[0].toUpperCase();
+      out += `Errors for ${type}:\n\n`;
+      out += "OBJECT                          LINE/COL  ERROR\n";
+      out += "------------------------------  --------  -----------------------------------------\n";
+      for (const row of rows) {
+        const [name, line, pos, text] = row as [string | null, number | null, number | null, string | null];
+        out += `${(name ?? "").padEnd(30)}  ${`${line ?? "?"}/${pos ?? "?"}`.padEnd(8)}  ${text ?? ""}\n`;
+      }
+    } else {
+      for (const row of rows) {
+        const [type, name, line, pos, text] = row as [string | null, string | null, number | null, number | null, string | null];
+        out += `${type ?? ""} ${schema}${name ?? ""}\n  Line ${line ?? "?"}/${pos ?? "?"}: ${text ?? ""}\n`;
+      }
+    }
+
+    this.push({ kind: "info", text: out });
   }
 
   private handleDefine(args: string[]): void {

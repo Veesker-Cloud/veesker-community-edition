@@ -1047,6 +1047,7 @@
       connectionName={meta.name}
       connectionUser={info?.user ?? null}
       connectionService={info?.serviceName ?? null}
+      connectionVersion={info?.serverVersion ?? null}
       isProductionLocked={meta.psdpmMode ?? (meta.env === "prod" || meta.env === "staging")}
     />
   </div>
