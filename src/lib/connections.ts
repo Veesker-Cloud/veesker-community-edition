@@ -19,8 +19,9 @@ export type ConnectionSafety = {
   autoPerfAnalysis: boolean;
   /**
    * L1.2 (Sprint C): when true, every Tauri command that makes outbound HTTPS
-   * calls (cloud sync, AI, GitHub object versioning) returns -32099 while
-   * this connection is active. Default-on for prod connections at save time.
+   * calls (cloud sync, AI, GitHub object versioning, sandbox sync) returns
+   * -32099 while this connection is active. Default-on for prod connections
+   * at save time.
    */
   airgapMode: boolean;
   /**
@@ -42,10 +43,7 @@ export type ConnectionSafety = {
 /**
  * Save-time variant of {@link ConnectionSafety}. When `airgapMode`,
  * `psdpmMode` or `autoExplainMode` is left undefined the Rust persistence
- * layer derives the defaults from the connection env (`true` for prod
- * airgap, `true` for prod/staging PSDPM, `when_dml` for prod/staging
- * auto-EXPLAIN, `manual`/`false` otherwise). The form sends a concrete
- * value when the user has explicitly touched the field.
+ * layer derives the defaults from the connection env.
  */
 export type ConnectionSafetyInput = Omit<
   ConnectionSafety,
@@ -151,3 +149,11 @@ export const walletInspect = (zipPath: string) =>
  * Returns false when no workspace is open or the connection has PSDPM off.
  */
 export const psdpmActive = () => call<boolean>("psdpm_active");
+
+/** Pre-flight check that an Oracle connection has resolvable sandbox credentials
+ *  (basic-auth + keychain entry present). Returns Ok(undefined) on success or a
+ *  descriptive error. The actual password never leaves the Rust process — every
+ *  sandbox.* Tauri command resolves it server-side and forwards to the sidecar
+ *  over the trusted stdin pipe. */
+export const sandboxOracleCheck = (id: string) =>
+  call<void>("connection_sandbox_oracle_check", { id });

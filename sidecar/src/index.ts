@@ -2,9 +2,14 @@
 // Licensed under the Apache License, Version 2.0
 // https://github.com/veesker-cloud/veesker-community-edition
 
-import { parseRequest, makeError } from "./rpc";
+import { readdirSync, unlinkSync, existsSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { parseRequest, makeError, makeNotification } from "./rpc";
 import { dispatch, type HandlerMap } from "./handlers";
 import { log } from "./logger";
+import { resolveSandboxTmpDir, defaultAppDataDir } from "./sandbox-cloud/cache";
+import { clearAllSessions } from "./sandbox-cloud/session";
+import { createLastSeenStore } from "./sandbox-cloud/last-seen";
 import { embedText, type EmbedParams } from "./embedding";
 import {
   tryEnableThickMode,
@@ -22,6 +27,7 @@ import {
   objectDdl,
   objectsListPlsql,
   objectDataflow,
+  visionGraph,
   connectionCommit,
   connectionRollback,
   connectionTxState,
@@ -43,40 +49,6 @@ import {
   querySessionSelf,
   enableDbmsOutputForActiveSession,
   unlockUnsafeDml,
-  mviewDetails,
-  mviewRefresh,
-  synonymDetails,
-  dbLinksList,
-  dbLinkDdl,
-  directoriesList,
-  directoryDetails,
-  queuesList,
-  queueDetails,
-  queueDdl,
-  schedulerJobsList,
-  schedulerJobDetails,
-  legacyJobDetails,
-  schedulerJobDdl,
-  schedulerProgramDetails,
-  schedulerScheduleDetails,
-  schedulerJobPrivCheck,
-  schedulerJobRun,
-  schedulerJobEnable,
-  schedulerJobDisable,
-  dbmsJobRun,
-  dbmsJobBroken,
-  dbmsJobUnbroken,
-  userDetails,
-  userProfileDetails,
-  userQuotas,
-  sessionsListAll,
-  sessionSqlPreview,
-  sessionPrivCheck,
-  sessionKill,
-  privilegesList,
-  blockingChain,
-  ddlConfirm,
-  ddlUnlock,
 } from "./oracle";
 import { aiChat, aiSuggestEndpoint } from "./ai";
 import { resolveApproval } from "./ai-approval-state";
@@ -102,6 +74,34 @@ import {
 } from "./debug";
 import { traceProc, explainPlanFlow } from "./flow";
 import { tablesStats } from "./perf-stats";
+import {
+  handleSandboxBuild,
+  handleSandboxComputeFkClosure,
+  handleSandboxListSchemaTables,
+  handleSandboxDiscoverPlsql,
+} from "./sandbox.handler";
+import {
+  handleSandboxPublish,
+  handleSandboxRepublishProduction,
+  handleSandboxPull,
+  handleSandboxGrant,
+  handleSandboxRevoke,
+  handleSandboxList,
+  handleSandboxOpen,
+  handleSandboxQuery,
+  handleSandboxClose,
+  handleSandboxListCached,
+  handleSandboxEnsureKeypair,
+  handleSandboxSweepBuilds,
+  handleSandboxDelete,
+  handleSandboxLeave,
+} from "./sandbox-cloud/handlers";
+
+const SANDBOXES_LAST_SEEN_PATH = join(
+  defaultAppDataDir(),
+  "sandboxes-last-seen.json",
+);
+const lastSeenStore = createLastSeenStore(SANDBOXES_LAST_SEEN_PATH);
 
 const handlers: HandlerMap = {
   "connection.test": (params) => connectionTest(params as any),
@@ -136,40 +136,6 @@ const handlers: HandlerMap = {
   },
   "schema.list": () => schemaList(),
   "objects.list": (params) => objectsList(params as any),
-  "objects.list.dblinks": (params) => dbLinksList(params as any),
-  "objects.list.directories": () => directoriesList(),
-  "directory.details": (params) => directoryDetails(params as any),
-  "objects.list.queues": (params) => queuesList(params as any),
-  "queue.details": (params) => queueDetails(params as any),
-  "queue.ddl": (params) => queueDdl(params as any),
-  "objects.list.scheduler_jobs": (params) => schedulerJobsList(params as any),
-  "scheduler.job.details": (params) => schedulerJobDetails(params as any),
-  "scheduler.job.details.legacy": (params) => legacyJobDetails(params as any),
-  "scheduler.job.ddl": (params) => schedulerJobDdl(params as any),
-  "scheduler.program.details": (params) => schedulerProgramDetails(params as any),
-  "scheduler.schedule.details": (params) => schedulerScheduleDetails(params as any),
-  "scheduler.job.priv_check": () => schedulerJobPrivCheck(),
-  "scheduler.job.run": (params) => schedulerJobRun(params as any),
-  "scheduler.job.enable": (params) => schedulerJobEnable(params as any),
-  "scheduler.job.disable": (params) => schedulerJobDisable(params as any),
-  "dbms_job.run": (params) => dbmsJobRun(params as any),
-  "dbms_job.broken": (params) => dbmsJobBroken(params as any),
-  "dbms_job.unbroken": (params) => dbmsJobUnbroken(params as any),
-  "user.details": (params) => userDetails(params as any),
-  "user.profile.details": (params) => userProfileDetails(params as any),
-  "user.quotas": (params) => userQuotas(params as any),
-  "sessions.list.all": () => sessionsListAll(),
-  "session.sql.preview": (params) => sessionSqlPreview(params as any),
-  "session.priv.check": () => sessionPrivCheck(),
-  "session.kill": (params) => sessionKill(params as any),
-  "privileges.list": (params) => privilegesList(params as any),
-  "sessions.blocking.chain": () => blockingChain(),
-  "ddl.confirm": (params) => ddlConfirm(params as { kind: "ddl" | "destructive_ddl" }),
-  "ddl.unlock": () => ddlUnlock(),
-  "mview.details": (params) => mviewDetails(params as any),
-  "mview.refresh": (params) => mviewRefresh(params as any),
-  "synonym.details": (params) => synonymDetails(params as any),
-  "object.ddl.dblink": (params) => dbLinkDdl(params as any),
   "table.describe": (params) => tableDescribe(params as any),
   "query.execute": (params) => queryExecute(params as any),
   "query.cancel": (params) => queryCancel(params as any),
@@ -177,6 +143,7 @@ const handlers: HandlerMap = {
   "object.ddl": (params) => objectDdl(params as any),
   "objects.list.plsql": (params) => objectsListPlsql(params as any),
   "object.dataflow": (params) => objectDataflow(params as any),
+  "vision.graph": (params) => visionGraph(params as any),
   "table.related": (params) => tableRelated(params as any),
   "table.count_rows": (params) => tableCountRows(params as any),
   "connection.commit": () => connectionCommit(),
@@ -194,7 +161,21 @@ const handlers: HandlerMap = {
   "vector.create_index": (params) => vectorCreateIndex(params as any),
   "vector.drop_index": (params) => vectorDropIndex(params as any),
   "embed.count_pending": (params) => embedCountPending(params as any),
-  "embed.batch": (params) => embedBatch(params as any),
+  // L2.1 PSDPM: embed batches issue UPDATE statements per row; refuse them
+  // when the active connection is in PL/SQL Developer Parity Mode. The user
+  // must disable PSDPM (or run the embed UI manually, statement by statement)
+  // to vectorise rows on a locked connection.
+  "embed.batch": (params) => {
+    if (getSessionSafety()?.psdpm === true) {
+      return Promise.reject(
+        new RpcCodedError(
+          PSDPM_BLOCKED,
+          "PSDPM mode active — embed.batch issues background UPDATEs and is blocked. Disable PSDPM to run vector embedding."
+        )
+      );
+    }
+    return embedBatch(params as any);
+  },
   "ai.chat": (params) => aiChat(params as any, false),
   "ai.suggest_endpoint": (params) => aiSuggestEndpoint(params as any),
   // L3.6 (Sprint C Onda 3): host UI calls this once the user has clicked
@@ -226,7 +207,7 @@ const handlers: HandlerMap = {
   "proc.describe": (params) => procDescribe(params as any),
   "proc.execute": (params) => procExecute(params as any),
   "chart.configure": (params) => chartConfigure(params as any),
-  "chart.reset":     (params) => chartReset(params as any),
+  "chart.reset":     (params) => Promise.resolve(chartReset(params as any)),
   "ords.detect":        (params) => ordsDetect(params as any),
   "ords.modules.list":  (params) => ordsModulesList(params as any),
   "ords.module.get":    (params) => ordsModuleGet(params as any),
@@ -241,7 +222,7 @@ const handlers: HandlerMap = {
   "debug.open":              (params) => debugOpen(params as any),
   "debug.get_source":        (params) => debugGetSource(params as any),
   "debug.start":             (params) => debugStart(params as any),
-  "debug.stop":              () => debugStop(),
+  "debug.stop":              () => Promise.resolve(debugStop()),
   "debug.step_into":         () => debugStepInto(),
   "debug.step_over":         () => debugStepOver(),
   "debug.step_out":          () => debugStepOut(),
@@ -256,17 +237,68 @@ const handlers: HandlerMap = {
   "perf.stats": (params) => tablesStats(params as any),
   "dml.preview": async (p) => dmlPreview((p as any).sql ?? ""),
   "driver.mode": async () => ({ mode: getDriverMode() }),
+  "sandbox.build": (params) => handleSandboxBuild(params as any),
+  "sandbox.list-schema-tables": (params) => handleSandboxListSchemaTables(params as any),
+  "sandbox.compute-fk-closure": (params) => handleSandboxComputeFkClosure(params as any),
+  "sandbox.discover_plsql": (params) => handleSandboxDiscoverPlsql(params as any),
+  "sandbox.publish": (params) =>
+    handleSandboxPublish(params as any, { dispatchNotification }),
+  "sandbox.republish": (params) =>
+    handleSandboxRepublishProduction(params as Parameters<typeof handleSandboxRepublishProduction>[0]),
+  "sandbox.pull":    (params) => handleSandboxPull(params as any),
+  "sandbox.grant":   (params) => handleSandboxGrant(params as any),
+  "sandbox.revoke":  (params) => handleSandboxRevoke(params as any),
+  "sandbox.list":    (params) => handleSandboxList(params as any, { lastSeenStore }),
+  "sandbox.delete":  (params) => handleSandboxDelete(params as any),
+  "sandbox.leave":   (params) => handleSandboxLeave(params as any),
+  "sandbox.open":         (params) => handleSandboxOpen(params as any, dispatchNotification),
+  "sandbox.query":        (params) => handleSandboxQuery(params as any),
+  "sandbox.close":        (params) => handleSandboxClose(params as any),
+  "sandbox.list-cached":  (params) => handleSandboxListCached(params as any),
+  "sandbox.ensureKeypair": (params) => handleSandboxEnsureKeypair(params as any),
+  "sandbox.sweep-builds":  (params) => handleSandboxSweepBuilds(params as any),
+  "sandbox.markSeen": async (params: any) => {
+    if (!Array.isArray(params?.ids)) {
+      throw new Error("sandbox.markSeen: 'ids' must be an array of strings");
+    }
+    await lastSeenStore.markSeen(params.ids);
+    return { ok: true };
+  },
+  "sandbox.listLastSeen": async () => {
+    const ids = await lastSeenStore.loadLastSeenIds();
+    return { ids };
+  },
   ping: async () => ({ pong: true }),
 };
 
-function writeLine(obj: unknown) {
-  process.stdout.write(JSON.stringify(obj) + "\n");
+function writeMessage(msg: unknown): void {
+  process.stdout.write(JSON.stringify(msg) + "\n");
+}
+
+function dispatchNotification(n: { method: string; params: unknown }): void {
+  writeMessage(makeNotification(n.method, n.params));
+}
+
+function cleanupOrphanTmpFiles(): void {
+  const tmpDir = resolveSandboxTmpDir();
+  if (!existsSync(tmpDir)) return;
+  for (const f of readdirSync(tmpDir)) {
+    const p = join(tmpDir, f);
+    try {
+      if (statSync(p).isFile()) unlinkSync(p);
+    } catch {
+      /* best effort */
+    }
+  }
 }
 
 // Enable Thick mode at startup if Oracle Instant Client is available; falls back
 // to Thin mode silently if not. Thick mode supports legacy password verifiers
 // (NJS-116 errors) that older databases (9i/10g/11g) may still expose.
 tryEnableThickMode();
+
+// Sweep stale sandbox tmp files left behind by a previous crashed/killed process.
+cleanupOrphanTmpFiles();
 
 async function main() {
   const decoder = new TextDecoder();
@@ -280,13 +312,13 @@ async function main() {
       if (!line) continue;
       const req = parseRequest(line);
       if (!req) {
-        writeLine(makeError(null, -32700, "Parse error"));
+        writeMessage(makeError(null, -32700, "Parse error"));
         continue;
       }
       // Fire-and-forget: allows debug.stop to interrupt a blocking debug.start
       dispatch(handlers, req)
-        .then(writeLine)
-        .catch((err) => writeLine(makeError(req.id, -32603, String(err))));
+        .then(writeMessage)
+        .catch((err) => writeMessage(makeError(req.id, -32603, String(err))));
     }
   }
 }
@@ -312,6 +344,12 @@ async function gracefulExit(code: number): Promise<never> {
     ]);
   } catch {
     // closeSession is already best-effort internally.
+  }
+  // Drop any open sandbox-cloud sessions and remove their decrypted tmp files.
+  try {
+    await clearAllSessions();
+  } catch {
+    /* best effort */
   }
   process.exit(code);
 }

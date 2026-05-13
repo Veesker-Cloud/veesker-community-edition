@@ -46,3 +46,15 @@ export function makeError(
   if (data !== undefined) error.data = data;
   return { jsonrpc: "2.0", id, error };
 }
+
+export type JsonRpcNotification = {
+  jsonrpc: "2.0";
+  method: string;
+  params?: unknown;
+};
+
+export function makeNotification(method: string, params?: unknown): JsonRpcNotification {
+  const out: JsonRpcNotification = { jsonrpc: "2.0", method };
+  if (params !== undefined) out.params = params;
+  return out;
+}

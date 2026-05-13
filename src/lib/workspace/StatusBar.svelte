@@ -8,13 +8,14 @@
   import { sqlEditor } from "$lib/stores/sql-editor.svelte";
   import { getContext } from "svelte";
   import VeeskerMark from "$lib/VeeskerMark.svelte";
+  import type { WorkspaceSource } from "$lib/workspace/sources/types";
+  import { envTheme } from "$lib/workspace/EnvTheme.svelte";
   import { shouldShowUserHost, txButtonState } from "./status-bar-helpers";
 
   type Props = {
-    connectionName: string;
-    userLabel: string;
-    schema: string;
-    serverVersion: string;
+    source: WorkspaceSource;
+    serverVersion?: string;
+    schema?: string;
     hasPendingTx?: boolean;
     /** Item #4 Fase B: count of uncommitted statements (DML/DDL/PLSQL/TCL). */
     pendingTxCount?: number;
@@ -33,18 +34,25 @@
     onSignIn?: () => void;
     onAuditLog?: () => void;
     onSignOut?: () => void;
+    onLeave?: () => void;
+    onDelete?: () => void;
+    warnings?: string[];
     username?: string;
     serviceName?: string;
     onCommit?: () => void;
     onRollback?: () => void;
   };
   let {
-    connectionName, userLabel, schema, serverVersion,
+    source,
+    serverVersion = "",
+    schema = "",
     hasPendingTx = false, pendingTxCount = 0, chatOpen = false, onToggleChat,
     onDisconnect, onSwitchConnection,
     theme = "light", onToggleTheme,
     env, readOnly = false, airgap = false, psdpm = false,
     onSignIn, onAuditLog, onSignOut,
+    onLeave, onDelete,
+    warnings = [],
     username = "",
     serviceName = "",
     onCommit,
@@ -54,7 +62,6 @@
   const authCtx = getContext<{ tier: "ce" | "cloud"; email: string }>("auth");
   let showCloudMenu = $state(false);
 
-  // Shorten version: "Oracle AI Database 26ai Free Release 23.26.1.0.0 – ..." → "23.26.1.0.0"
   const shortVersion = $derived(
     (() => {
       const m = serverVersion.match(/(\d+\.\d+[\d.]*)/);
@@ -68,69 +75,102 @@
 </script>
 
 <div class="bar" class:bar-prod={env === "prod"} class:bar-staging={env === "staging"}>
-  <!-- Left: connection identity -->
   <div class="bar-left">
     <VeeskerMark size={22} bg={false} class="bar-mark" />
     <span class="bar-divider" aria-hidden="true"></span>
-    <span class="conn-dot" aria-label="Connected"></span>
-    <span class="conn-name">{connectionName}</span>
-    {#if env}
-      <span class="env-badge env-{env}" title="Environment tag — set on the connection">{env}</span>
+    {#if source.meta.kind === "oracle"}
+      <span class="conn-dot" aria-label="Connected"></span>
+      <span class="conn-name">{source.meta.displayName}</span>
+      {#if envTheme.current}
+        <span
+          class="env-badge env-pill-cl"
+          style="background:{envTheme.current.accentColor};border-color:{envTheme.current.accentColor};"
+          title="Environment tag — set on the connection"
+        >
+          {#if envTheme.current.env === "prod"}
+            <svg width="9" height="10" viewBox="0 0 9 10" fill="none" aria-hidden="true" style="flex-shrink:0">
+              <path d="M4.5 1L1 3.5V9h7V3.5L4.5 1z" stroke="currentColor" stroke-width="1" stroke-linejoin="round"/>
+              <rect x="3" y="6" width="3" height="3" rx="0.4" stroke="currentColor" stroke-width="0.9"/>
+            </svg>
+          {/if}
+          {envTheme.current.label}
+        </span>
+      {:else if env}
+        <span class="env-badge env-{env}" title="Environment tag — set on the connection">{env}</span>
+      {/if}
+      {#if readOnly}
+        <span class="ro-badge" title="Read-only — DML/DDL blocked on this connection">
+          <svg width="9" height="9" viewBox="0 0 9 9" fill="none" aria-hidden="true">
+            <rect x="1.5" y="3.5" width="6" height="4.5" rx="0.6" stroke="currentColor" stroke-width="1"/>
+            <path d="M3 3.5V2.5a1.5 1.5 0 013 0v1" stroke="currentColor" stroke-width="1" fill="none"/>
+          </svg>
+          RO
+        </span>
+      {/if}
+      <!-- L1.2 air-gap badge -->
+      {#if airgap}
+        <span
+          class="bar-airgap"
+          title="Air-gap mode is active for this connection. Outbound network calls (AI, cloud sync, sandbox publish/pull, version remote) are disabled."
+        >
+          🔒 AIR-GAPPED
+        </span>
+      {/if}
+      <!-- L2.1 PSDPM badge -->
+      {#if psdpm}
+        <span class="bar-psdpm" title="PSDPM active: only user-initiated SQL runs against this connection">
+          🔐 PSDPM
+        </span>
+      {/if}
+      {#if hasPendingTx}
+        <span
+          class="tx-badge tx-badge-{env ?? 'dev'}"
+          title="{pendingTxCount > 0 ? `${pendingTxCount} uncommitted statement${pendingTxCount === 1 ? '' : 's'}` : 'Uncommitted transaction'} pending — remember to COMMIT or ROLLBACK"
+        >
+          <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden="true">
+            <circle cx="4" cy="4" r="3.5" fill="currentColor"/>
+          </svg>
+          TX{pendingTxCount > 0 ? ` ${pendingTxCount}` : ""}
+        </span>
+      {/if}
+      {#if showUserHost}
+        <span class="bar-divider" aria-hidden="true"></span>
+        <span class="userhost" title="Connected as {username} on service {serviceName}">
+          {username}@{serviceName}
+        </span>
+      {/if}
+      <span class="divider" aria-hidden="true"></span>
+      <svg class="icon" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+        <ellipse cx="6" cy="4" rx="4.5" ry="1.8" stroke="currentColor" stroke-width="1.1"/>
+        <path d="M1.5 4v4c0 1 2 1.8 4.5 1.8S10.5 9 10.5 8V4" stroke="currentColor" stroke-width="1.1"/>
+      </svg>
+      <span class="meta">{schema}</span>
+      <span class="divider" aria-hidden="true"></span>
+      <svg class="icon" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+        <circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1.1"/>
+        <line x1="6" y1="3" x2="6" y2="6.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
+        <circle cx="6" cy="8" r="0.6" fill="currentColor"/>
+      </svg>
+      <span class="meta version" title={serverVersion}>{shortVersion}</span>
+    {:else}
+      <span class="conn-dot sandbox-dot" aria-label="Sandbox"></span>
+      <span class="conn-name conn-target sandbox">{source.meta.displayName}</span>
+      {#if source.meta.role}
+        <span class="role-badge {source.meta.role}">{source.meta.role}</span>
+      {/if}
+      <span class="divider" aria-hidden="true"></span>
+      <span class="expires">{source.meta.subtitle}</span>
+      {#if warnings.length > 0}
+        <span class="warn-indicator" title="{warnings.length} PL/SQL objects skipped during build">
+          ⚠ {warnings.length} skipped
+        </span>
+      {/if}
+      {#if source.meta.role === "owner" && onDelete}
+        <button class="sandbox-action-btn danger" onclick={onDelete} title="Delete sandbox">Delete</button>
+      {:else if source.meta.role === "member" && onLeave}
+        <button class="sandbox-action-btn" onclick={onLeave} title="Leave sandbox">Leave</button>
+      {/if}
     {/if}
-    {#if readOnly}
-      <span class="ro-badge" title="Read-only — DML/DDL blocked on this connection">
-        <svg width="9" height="9" viewBox="0 0 9 9" fill="none" aria-hidden="true">
-          <rect x="1.5" y="3.5" width="6" height="4.5" rx="0.6" stroke="currentColor" stroke-width="1"/>
-          <path d="M3 3.5V2.5a1.5 1.5 0 013 0v1" stroke="currentColor" stroke-width="1" fill="none"/>
-        </svg>
-        RO
-      </span>
-    {/if}
-    <!-- L1.2 air-gap badge -->
-    {#if airgap}
-      <span
-        class="bar-airgap"
-        title="Air-gap mode is active for this connection. Outbound network calls (AI, cloud sync, version remote) are disabled."
-      >
-        🔒 AIR-GAPPED
-      </span>
-    {/if}
-    <!-- L2.1 PSDPM badge -->
-    {#if psdpm}
-      <span class="bar-psdpm" title="PSDPM active: only user-initiated SQL runs against this connection">
-        🔐 PSDPM
-      </span>
-    {/if}
-    {#if hasPendingTx}
-      <span
-        class="tx-badge tx-badge-{env ?? 'dev'}"
-        title="{pendingTxCount > 0 ? `${pendingTxCount} uncommitted statement${pendingTxCount === 1 ? '' : 's'}` : 'Uncommitted transaction'} pending — remember to COMMIT or ROLLBACK"
-      >
-        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden="true">
-          <circle cx="4" cy="4" r="3.5" fill="currentColor"/>
-        </svg>
-        TX{pendingTxCount > 0 ? ` ${pendingTxCount}` : ""}
-      </span>
-    {/if}
-    {#if showUserHost}
-      <span class="bar-divider" aria-hidden="true"></span>
-      <span class="userhost" title="Connected as {username} on service {serviceName}">
-        {username}@{serviceName}
-      </span>
-    {/if}
-    <span class="divider" aria-hidden="true"></span>
-    <svg class="icon" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-      <ellipse cx="6" cy="4" rx="4.5" ry="1.8" stroke="currentColor" stroke-width="1.1"/>
-      <path d="M1.5 4v4c0 1 2 1.8 4.5 1.8S10.5 9 10.5 8V4" stroke="currentColor" stroke-width="1.1"/>
-    </svg>
-    <span class="meta">{schema}</span>
-    <span class="divider" aria-hidden="true"></span>
-    <svg class="icon" width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-      <circle cx="6" cy="6" r="4.5" stroke="currentColor" stroke-width="1.1"/>
-      <line x1="6" y1="3" x2="6" y2="6.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
-      <circle cx="6" cy="8" r="0.6" fill="currentColor"/>
-    </svg>
-    <span class="meta version" title={serverVersion}>{shortVersion}</span>
   </div>
 
   <!-- Right: actions -->
@@ -304,6 +344,15 @@
   }
   .env-staging { color: #e8c547; background: rgba(217,153,42,0.18); border: 1px solid rgba(217,153,42,0.4); }
   .env-dev { color: #4a9eda; background: rgba(74,158,218,0.18); border: 1px solid rgba(74,158,218,0.4); }
+  .env-pill-cl {
+    color: #fff;
+    border-width: 1px;
+    border-style: solid;
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+    border-radius: 4px; padding: 2px 7px;
+    animation: prod-pulse 3s ease-in-out infinite;
+  }
   .ro-badge {
     display: inline-flex; align-items: center; gap: 3px;
     font-family: "Space Grotesk", sans-serif;
@@ -634,6 +683,77 @@
     position: fixed;
     inset: 0;
     z-index: 499;
+  }
+
+  /* ── Sandbox-specific elements ───────────────────────────── */
+  .sandbox-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent, #2bb4ee);
+    box-shadow: 0 0 5px color-mix(in srgb, var(--accent, #2bb4ee) 50%, transparent);
+    flex-shrink: 0;
+  }
+  .conn-target.sandbox {
+    color: var(--accent, #2bb4ee);
+  }
+  .role-badge {
+    display: inline-flex;
+    align-items: center;
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    border-radius: 3px;
+    padding: 1px 6px;
+    flex-shrink: 0;
+  }
+  .role-badge.owner {
+    background: var(--accent, #2bb4ee);
+    color: #fff;
+  }
+  .role-badge.member {
+    background: color-mix(in srgb, var(--accent, #2bb4ee) 20%, transparent);
+    color: var(--accent, #2bb4ee);
+  }
+  .expires {
+    font-family: "JetBrains Mono", "SF Mono", monospace;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.55);
+    white-space: nowrap;
+  }
+  .warn-indicator {
+    color: #c08c00;
+    background: rgba(232, 197, 71, 0.15);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .sandbox-action-btn {
+    display: inline-flex;
+    align-items: center;
+    font-family: "Space Grotesk", sans-serif;
+    font-size: 11px;
+    padding: 2px 8px;
+    margin-left: 8px;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    color: rgba(255, 255, 255, 0.75);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s, color 0.12s;
+  }
+  .sandbox-action-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.3);
+    color: #fff;
+  }
+  .sandbox-action-btn.danger:hover {
+    background: rgba(239, 68, 68, 0.18);
+    border-color: rgba(239, 68, 68, 0.45);
+    color: #f87171;
   }
 
   .userhost {

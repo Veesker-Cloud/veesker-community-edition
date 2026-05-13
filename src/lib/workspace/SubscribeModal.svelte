@@ -44,6 +44,7 @@
   }
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === "Escape") onClose(); }} />
 <div class="backdrop" role="presentation" onclick={onClose}>
   <div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
     <button class="close-btn" aria-label="Close" onclick={onClose}>

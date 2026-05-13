@@ -144,13 +144,13 @@
     )
   );
 
+  // Untagged = editing an existing connection whose env was never set.
   const isUntagged = $derived(isEdit && !initial.safety?.env);
   const isProdUpgrade = $derived(
     isEdit && !!initial.safety?.env && initial.safety.env !== "prod" && env === "prod"
   );
   let prodUpgradeConfirmed = $state(false);
   const canSave = $derived(env !== "" && (!isProdUpgrade || prodUpgradeConfirmed));
-
   const envMismatch = $derived((() => {
     if (!env || authType !== "basic") return null;
     const h = host.toLowerCase();
@@ -226,9 +226,6 @@
       warnUnsafeDml,
       autoPerfAnalysis,
       airgapMode: airgapTouched || isEdit ? airgapMode : undefined,
-      // L2.1 PSDPM — always send the explicit value the user picked so the
-      // backend doesn't second-guess. Backend default-by-env still applies on
-      // legacy callers that omit this field entirely.
       psdpmMode,
       autoExplainMode,
     };

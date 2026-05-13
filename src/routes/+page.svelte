@@ -7,39 +7,84 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { onMount, getContext } from "svelte";
+  import { page } from "$app/state";
   import {
     listConnections,
     deleteConnection,
     type ConnectionMeta,
   } from "$lib/connections";
-  import { ask, message } from "@tauri-apps/plugin-dialog";
   import { logout } from "$lib/services/auth";
+  import { sandboxes } from "$lib/stores/sandboxes.svelte";
+  import type { SandboxSummary } from "$lib/sandbox";
   import LoginModal from "$lib/workspace/LoginModal.svelte";
   import AuditLogPanel from "$lib/workspace/AuditLogPanel.svelte";
+  import OracleConnCard from "$lib/workspace/OracleConnCard.svelte";
+  import SandboxCard from "$lib/workspace/SandboxCard.svelte";
 
   const authCtx = getContext<{ tier: "ce" | "cloud"; email: string }>("auth");
+
+  type ListItem =
+    | { kind: "oracle"; conn: ConnectionMeta }
+    | { kind: "sandbox"; sb: SandboxSummary };
 
   let connections = $state<ConnectionMeta[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let deletingId = $state<string | null>(null);
+  let confirmTarget = $state<ConnectionMeta | null>(null);
+  let confirmInput = $state("");
+  let deleteError = $state<string | null>(null);
   let query = $state("");
   let authFilter = $state<"all" | "basic" | "wallet">("all");
+  let typeFilter = $state<"all" | "oracle" | "sandbox">("all");
   let showLogin = $state(false);
   let showAccountMenu = $state(false);
   let showAuditLog = $state(false);
 
-  const filtered = $derived.by(() => {
+  $effect(() => {
+    const qp = page.url.searchParams.get("type");
+    if (qp === "sandbox" || qp === "oracle" || qp === "all") {
+      typeFilter = qp;
+    }
+  });
+
+  function matchesOracleFilter(c: ConnectionMeta): boolean {
     const q = query.trim().toLowerCase();
-    return connections.filter((c) => {
-      if (authFilter !== "all" && c.authType !== authFilter) return false;
-      if (!q) return true;
-      const haystack = c.authType === "basic"
-        ? `${c.name} ${c.username} ${c.host} ${c.serviceName}`
-        : `${c.name} ${c.username} ${c.connectAlias}`;
-      return haystack.toLowerCase().includes(q);
+    if (authFilter !== "all" && c.authType !== authFilter) return false;
+    if (!q) return true;
+    const haystack = c.authType === "basic"
+      ? `${c.name} ${c.username} ${c.host} ${c.serviceName}`
+      : `${c.name} ${c.username} ${c.connectAlias}`;
+    return haystack.toLowerCase().includes(q);
+  }
+
+  function matchesSandboxFilter(s: SandboxSummary): boolean {
+    const q = query.trim().toLowerCase();
+    if (!q) return true;
+    return `${s.name} ${s.owner_user_id}`.toLowerCase().includes(q);
+  }
+
+  const items = $derived.by<ListItem[]>(() => {
+    const oracle = typeFilter === "sandbox"
+      ? []
+      : connections
+          .filter(matchesOracleFilter)
+          .map((c) => ({ kind: "oracle" as const, conn: c }));
+    const sb = (typeFilter === "oracle" || authCtx.tier !== "cloud")
+      ? []
+      : sandboxes.all
+          .filter(matchesSandboxFilter)
+          .map((s) => ({ kind: "sandbox" as const, sb: s }));
+    return [...oracle, ...sb].sort((a, b) => {
+      const an = a.kind === "oracle" ? a.conn.name : a.sb.name;
+      const bn = b.kind === "oracle" ? b.conn.name : b.sb.name;
+      return an.localeCompare(bn);
     });
   });
+
+  const totalCount = $derived(
+    connections.length + (authCtx.tier === "cloud" ? sandboxes.all.length : 0),
+  );
 
   async function refresh() {
     loading = true;
@@ -53,7 +98,30 @@
     loading = false;
   }
 
-  onMount(refresh);
+  onMount(async () => {
+    await Promise.all([
+      refresh(),
+      authCtx.tier === "cloud" ? sandboxes.load() : Promise.resolve(),
+    ]);
+  });
+
+  // Plan 8 focus-refresh, ported from the old /sandboxes route after Plan 12
+  // unified everything onto /. Without this, the home page wouldn't re-fetch
+  // sandboxes when the user comes back from the workspace tab or after Vite
+  // HMR clears module state. 30s debounce avoids hammering on repeated focus.
+  const SANDBOX_REFRESH_DEBOUNCE_MS = 30_000;
+  let lastSandboxRefreshAt = 0;
+  $effect(() => {
+    if (authCtx.tier !== "cloud") return;
+    const onFocus = () => {
+      const now = Date.now();
+      if (now - lastSandboxRefreshAt < SANDBOX_REFRESH_DEBOUNCE_MS) return;
+      lastSandboxRefreshAt = now;
+      void sandboxes.load();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  });
 
   async function handleLogout() {
     await logout();
@@ -61,31 +129,45 @@
     authCtx.email = "";
   }
 
-  async function onDelete(e: MouseEvent, c: ConnectionMeta) {
+  function onDelete(e: MouseEvent, c: ConnectionMeta) {
     e.stopPropagation();
     if (deletingId) return;
-    if (!await ask(`Delete "${c.name}"?`, { title: "Delete connection", kind: "warning" })) return;
-    deletingId = c.id;
+    confirmTarget = c;
+    confirmInput = "";
+    deleteError = null;
+  }
+
+  function cancelDelete() {
+    confirmTarget = null;
+    confirmInput = "";
+    deleteError = null;
+  }
+
+  async function republishSandboxAction(id: string) {
     try {
-      const res = await deleteConnection(c.id);
+      const { sandboxId } = sandboxes.republish(id);
+      await goto(`/sandboxes/publish?republishId=${encodeURIComponent(sandboxId)}`);
+    } catch (e) {
+      sandboxes.error = (e as Error).message ?? String(e);
+    }
+  }
+
+  async function confirmDelete() {
+    if (!confirmTarget || confirmInput !== confirmTarget.name) return;
+    deletingId = confirmTarget.id;
+    const target = confirmTarget;
+    confirmTarget = null;
+    confirmInput = "";
+    try {
+      const res = await deleteConnection(target.id);
       if (!res.ok) {
-        await message(`Delete failed: ${res.error.message}`, { title: "Error", kind: "error" });
+        deleteError = res.error.message;
         return;
       }
       await refresh();
     } finally {
       deletingId = null;
     }
-  }
-
-  function connLabel(c: ConnectionMeta): string {
-    if (c.authType === "basic") return `${c.username}@${c.host}:${c.port}/${c.serviceName}`;
-    return `${c.username}@${c.connectAlias}`;
-  }
-
-  function connSubtitle(c: ConnectionMeta): string {
-    if (c.authType === "basic") return `${c.host}:${c.port} / ${c.serviceName}`;
-    return c.connectAlias;
   }
 </script>
 
@@ -97,18 +179,15 @@
   <header>
     <div class="brand">
       <img
-        src={authCtx.tier === "cloud" ? "/veesker-cloud-logo.png" : "/ce-logo.png"}
-        class="brand-logo"
+        src="/veesker-banner.png"
+        class="brand-banner"
         alt={authCtx.tier === "cloud" ? "Veesker Cloud" : "Veesker CE"}
       />
-      <div class="brand-text">
-        <h1>veesker</h1>
-        {#if authCtx.tier === "cloud"}
-          <p class="tagline tagline-cloud">Cloud</p>
-        {:else}
-          <p class="tagline">Community Edition</p>
-        {/if}
-      </div>
+      {#if authCtx.tier === "cloud"}
+        <p class="tagline tagline-cloud">Cloud</p>
+      {:else}
+        <p class="tagline">Community Edition</p>
+      {/if}
     </div>
     <div class="header-actions">
       {#if authCtx.tier === "cloud"}
@@ -172,6 +251,15 @@
           Sign in to Cloud
         </button>
       {/if}
+      {#if authCtx.tier === "cloud"}
+        <button class="new-btn" onclick={() => goto("/sandboxes/publish")}>
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <line x1="7" y1="2" x2="7" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <line x1="2" y1="7" x2="12" y2="7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+          Publish sandbox
+        </button>
+      {/if}
       <button class="new-btn" onclick={() => goto("/connections/new")}>
         <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
           <line x1="7" y1="2" x2="7" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -182,7 +270,14 @@
     </div>
   </header>
 
-  {#if !loading && !error && connections.length > 0}
+  {#if authCtx.tier === "cloud" && sandboxes.newCount > 0}
+    <div class="banner-info banner-new">
+      <span><strong>{sandboxes.newCount}</strong> new sandbox{sandboxes.newCount === 1 ? "" : "es"} shared with you</span>
+      <button type="button" onclick={() => void sandboxes.markAllSeen()}>Mark all as seen</button>
+    </div>
+  {/if}
+
+  {#if !loading && !error && totalCount > 0}
     <div class="filter-bar">
       <div class="search-wrap">
         <svg class="search-icon" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -192,7 +287,7 @@
         <input
           type="search"
           class="search-input"
-          placeholder="Filter connections by name, user, host…"
+          placeholder="Filter by name, user, host…"
           bind:value={query}
           autocomplete="off"
           spellcheck={false}
@@ -206,22 +301,31 @@
           >×</button>
         {/if}
       </div>
-      <div class="auth-filter" role="tablist" aria-label="Auth type filter">
-        <button class="chip" class:chip-on={authFilter === "all"}    role="tab" aria-selected={authFilter === "all"}    onclick={() => authFilter = "all"}>All</button>
-        <button class="chip" class:chip-on={authFilter === "basic"}  role="tab" aria-selected={authFilter === "basic"}  onclick={() => authFilter = "basic"}>Basic</button>
-        <button class="chip" class:chip-on={authFilter === "wallet"} role="tab" aria-selected={authFilter === "wallet"} onclick={() => authFilter = "wallet"}>Wallet</button>
+      <div class="auth-filter" role="tablist" aria-label="Type filter">
+        <button class="chip" class:chip-on={typeFilter === "all"}    role="tab" aria-selected={typeFilter === "all"}    onclick={() => typeFilter = "all"}>All</button>
+        <button class="chip" class:chip-on={typeFilter === "oracle"} role="tab" aria-selected={typeFilter === "oracle"} onclick={() => typeFilter = "oracle"}>Oracle</button>
+        {#if authCtx.tier === "cloud"}
+          <button class="chip" class:chip-on={typeFilter === "sandbox"} role="tab" aria-selected={typeFilter === "sandbox"} onclick={() => typeFilter = "sandbox"}>Sandboxes</button>
+        {/if}
       </div>
+      {#if typeFilter !== "sandbox"}
+        <div class="auth-filter" role="tablist" aria-label="Auth type filter">
+          <button class="chip" class:chip-on={authFilter === "all"}    role="tab" aria-selected={authFilter === "all"}    onclick={() => authFilter = "all"}>All</button>
+          <button class="chip" class:chip-on={authFilter === "basic"}  role="tab" aria-selected={authFilter === "basic"}  onclick={() => authFilter = "basic"}>Basic</button>
+          <button class="chip" class:chip-on={authFilter === "wallet"} role="tab" aria-selected={authFilter === "wallet"} onclick={() => authFilter = "wallet"}>Wallet</button>
+        </div>
+      {/if}
     </div>
   {/if}
 
   <div class="section-label">
     {#if !loading && !error}
-      {#if connections.length === 0}
-        No connections
-      {:else if filtered.length === connections.length}
-        {connections.length} connection{connections.length === 1 ? "" : "s"}
+      {#if totalCount === 0}
+        No connections or sandboxes
+      {:else if items.length === totalCount}
+        {totalCount} item{totalCount === 1 ? "" : "s"}
       {:else}
-        {filtered.length} of {connections.length}
+        {items.length} of {totalCount}
       {/if}
     {:else if loading}
       &nbsp;
@@ -244,7 +348,7 @@
       </svg>
       <span>{error}</span>
     </div>
-  {:else if connections.length === 0}
+  {:else if totalCount === 0}
     <div class="empty-state">
       <div class="empty-icon" aria-hidden="true">
         <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
@@ -264,85 +368,86 @@
         New connection
       </button>
     </div>
-  {:else if filtered.length === 0}
+  {:else if items.length === 0}
     <div class="empty-filter">
-      <span class="muted">No connections match the current filter.</span>
-      <button class="link-btn" onclick={() => { query = ""; authFilter = "all"; }}>Clear filters</button>
+      <span class="muted">Nothing matches the current filter.</span>
+      <button class="link-btn" onclick={() => { query = ""; authFilter = "all"; typeFilter = "all"; }}>Clear filters</button>
     </div>
   {:else}
     <ul class="list" role="list">
-      {#each filtered as c (c.id)}
-        <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
-        <li
-          class="card"
-          class:card-deleting={deletingId === c.id}
-          onclick={() => { if (deletingId !== c.id) goto(`/workspace/${c.id}`); }}
-          onkeydown={(e) => { if (e.key === "Enter" && deletingId !== c.id) goto(`/workspace/${c.id}`); }}
-          tabindex={deletingId === c.id ? -1 : 0}
-          role="button"
-          aria-disabled={deletingId === c.id}
-        >
-          <div class="card-icon" class:wallet={c.authType === "wallet"}>
-            {#if c.authType === "wallet"}
-              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                <rect x="2" y="5" width="16" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/>
-                <path d="M2 9h16" stroke="currentColor" stroke-width="1.5"/>
-                <circle cx="14" cy="13" r="1.5" fill="currentColor"/>
-                <path d="M5 3l3-1 3 1" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
-              </svg>
-            {:else}
-              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
-                <ellipse cx="10" cy="7" rx="7" ry="3" stroke="currentColor" stroke-width="1.5"/>
-                <path d="M3 7v6c0 1.7 3.1 3 7 3s7-1.3 7-3V7" stroke="currentColor" stroke-width="1.5"/>
-                <path d="M3 10c0 1.7 3.1 3 7 3s7-1.3 7-3" stroke="currentColor" stroke-width="1" stroke-dasharray="2 2"/>
-              </svg>
-            {/if}
-          </div>
-          <div class="card-body">
-            <div class="card-name">{c.name}</div>
-            <div class="card-meta">
-              <span class="card-user mono">{c.username}</span>
-              <span class="card-sep">·</span>
-              <span class="card-host mono">{connSubtitle(c)}</span>
-              {#if c.authType === "wallet"}
-                <span class="badge-wallet">wallet</span>
-              {/if}
-            </div>
-          </div>
-          <div class="card-actions" role="none">
-            <button
-              class="action-btn edit"
-              title="Edit"
-              aria-label="Edit {c.name}"
-              onclick={(e) => { e.stopPropagation(); goto(`/connections/${c.id}/edit`); }}
-            >
-              <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
-                <path d="M9 2L11 4L5 10H3V8L9 2Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-              </svg>
-              Edit
-            </button>
-            <button
-              class="action-btn delete"
-              title="Delete"
-              aria-label="Delete {c.name}"
-              disabled={deletingId === c.id}
-              onclick={(e) => onDelete(e, c)}
-            >
-              {#if deletingId === c.id}
-                <span class="action-spinner" aria-label="Deleting"></span>
-              {:else}
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-                  <path d="M2 3h8M5 3V2h2v1M10 3l-.6 7.5A1 1 0 018.4 11H3.6a1 1 0 01-1-.5L2 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-              {/if}
-            </button>
-            <span class="open-arrow" aria-hidden="true">→</span>
-          </div>
-        </li>
+      {#each items as item (item.kind === "oracle" ? `c:${item.conn.id}` : `s:${item.sb.sandbox_id}`)}
+        {#if item.kind === "oracle"}
+          <OracleConnCard
+            conn={item.conn}
+            deleting={deletingId === item.conn.id}
+            onClick={() => goto(`/workspace/${item.conn.id}`)}
+            onEdit={() => goto(`/connections/${item.conn.id}/edit`)}
+            onDelete={(e) => onDelete(e, item.conn)}
+          />
+        {:else}
+          <li class="sandbox-li">
+            <SandboxCard
+              sandbox={item.sb}
+              isPulling={sandboxes.pulling.has(item.sb.sandbox_id)}
+              isDeleting={false}
+              isLeaving={false}
+              isNew={!item.sb.cached && !sandboxes.lastSeenIds.has(item.sb.sandbox_id)}
+              isStaleVersion={sandboxes.staleVersionIds.has(item.sb.sandbox_id)}
+              onOpen={() => goto(`/workspace/${item.sb.sandbox_id}`)}
+              onPull={() => sandboxes.pull(item.sb.sandbox_id)}
+              onDelete={() => sandboxes.delete(item.sb.sandbox_id)}
+              onLeave={() => sandboxes.leave(item.sb.sandbox_id)}
+              onRepublish={item.sb.status === "ready"
+                ? () => void republishSandboxAction(item.sb.sandbox_id)
+                : undefined}
+            />
+          </li>
+        {/if}
       {/each}
     </ul>
   {/if}
 </main>
+
+{#if confirmTarget}
+  <div class="modal-backdrop" role="presentation" onclick={cancelDelete}>
+    <div class="del-modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
+      <div class="del-modal-header">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+          <path d="M9 2L16 15H2L9 2Z" stroke="#e74c3c" stroke-width="1.5" stroke-linejoin="round"/>
+          <line x1="9" y1="7" x2="9" y2="11" stroke="#e74c3c" stroke-width="1.5" stroke-linecap="round"/>
+          <circle cx="9" cy="13.5" r="0.75" fill="#e74c3c"/>
+        </svg>
+        <span>Delete connection</span>
+      </div>
+      <p class="del-modal-body">
+        This will permanently delete <strong>{confirmTarget.name}</strong> and remove
+        all stored credentials. This action cannot be undone.
+      </p>
+      <p class="del-modal-label">
+        Type <code>{confirmTarget.name}</code> to confirm:
+      </p>
+      <input
+        class="del-modal-input"
+        type="text"
+        placeholder={confirmTarget.name}
+        bind:value={confirmInput}
+        onkeydown={(e) => { if (e.key === "Enter") confirmDelete(); if (e.key === "Escape") cancelDelete(); }}
+        autofocus
+      />
+      {#if deleteError}
+        <p class="del-modal-err">{deleteError}</p>
+      {/if}
+      <div class="del-modal-actions">
+        <button class="del-btn-cancel" onclick={cancelDelete}>Cancel</button>
+        <button
+          class="del-btn-confirm"
+          disabled={confirmInput !== confirmTarget.name}
+          onclick={confirmDelete}
+        >Delete connection</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if showAuditLog}
   <AuditLogPanel onClose={() => { showAuditLog = false; }} />
@@ -358,6 +463,7 @@
         const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
         authCtx.tier = "cloud";
         authCtx.email = payload.email ?? "";
+        await sandboxes.load();
       } catch { /* ignore */ }
     }
   }} />
@@ -374,7 +480,7 @@
 
 
   main {
-    max-width: 680px;
+    max-width: 800px;
     margin: 0 auto;
     padding: 3rem 2rem 4rem;
     display: flex;
@@ -396,40 +502,26 @@
     z-index: 0;
   }
 
-  /* ── Header ─────────────────────────────────────────────── */
   header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    row-gap: 0.75rem;
     margin-bottom: 2.5rem;
   }
   .brand {
     display: flex;
-    align-items: center;
-    gap: 1rem;
-  }
-  .brand-logo {
-    width: 60px;
-    height: 60px;
-    border-radius: 14px;
-    object-fit: cover;
-    display: block;
-    box-shadow: 0 4px 16px rgba(26, 22, 18, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.08);
-  }
-  .brand-text {
-    display: flex;
     flex-direction: column;
-    gap: 0.1rem;
+    align-items: flex-start;
+    gap: 0.25rem;
   }
-  h1 {
-    font-family: "Bebas Neue", "Space Grotesk", sans-serif;
-    font-weight: 400;
-    font-size: 36px;
-    letter-spacing: 0.06em;
-    margin: 0;
-    line-height: 1;
-    color: var(--text-primary);
-    text-transform: uppercase;
+  .brand-banner {
+    height: 80px;
+    width: auto;
+    display: block;
+    object-fit: contain;
   }
   .tagline {
     font-family: "Space Grotesk", sans-serif;
@@ -444,15 +536,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-  }
-
-  /* ── Cloud brand overrides ───────────────────────────────── */
-  :global([data-tier="cloud"]) .brand-logo {
-    box-shadow: 0 4px 20px rgba(43, 180, 238, 0.3), 0 0 0 1.5px rgba(43, 180, 238, 0.35);
-  }
-  :global([data-tier="cloud"]) h1 {
-    color: #e6edf3;
-    text-shadow: 0 0 32px rgba(43, 180, 238, 0.18);
+    flex-wrap: wrap;
   }
 
   .new-btn {
@@ -585,34 +669,19 @@
     font-weight: 600;
   }
 
-  /* ── Deleting state ──────────────────────────────────────── */
-  .card-deleting {
-    opacity: 0.55;
-    pointer-events: none;
-  }
-  .card-deleting .action-btn { pointer-events: auto; }
-  .action-btn:disabled { opacity: 0.7; cursor: default; }
-  .action-spinner {
-    display: inline-block;
-    width: 12px; height: 12px;
-    border: 1.5px solid currentColor;
-    border-right-color: transparent;
-    border-radius: 50%;
-    animation: spin 0.65s linear infinite;
-  }
-
-  /* ── Filter bar ──────────────────────────────────────────── */
   .filter-bar {
     display: flex;
     align-items: center;
     gap: 0.75rem;
     margin-bottom: 0.75rem;
+    flex-wrap: wrap;
   }
   .search-wrap {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     flex: 1;
+    min-width: 220px;
     background: var(--bg-surface);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -684,7 +753,30 @@
   }
   .link-btn:hover { opacity: 0.8; }
 
-  /* ── Section label ────────────────────────────────────────── */
+  .banner-info {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: rgba(59, 130, 246, 0.12);
+    color: var(--text-primary);
+    border-left: 3px solid var(--accent, #3b82f6);
+    padding: 0.65rem 1rem;
+    border-radius: 4px;
+    margin-bottom: 1rem;
+    font-size: 13px;
+    flex-wrap: wrap;
+  }
+  .banner-info button {
+    background: var(--accent, #3b82f6);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 12px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+  }
+
   .section-label {
     font-family: "Space Grotesk", sans-serif;
     font-size: 10.5px;
@@ -695,7 +787,6 @@
     margin-bottom: 0.6rem;
   }
 
-  /* ── Loading ─────────────────────────────────────────────── */
   .loading-row {
     display: flex;
     align-items: center;
@@ -713,7 +804,6 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   .muted { color: var(--text-secondary); font-size: 13px; }
 
-  /* ── Alert ───────────────────────────────────────────────── */
   .alert {
     display: flex;
     align-items: center;
@@ -726,7 +816,6 @@
     font-size: 13px;
   }
 
-  /* ── Empty state ─────────────────────────────────────────── */
   .empty-state {
     display: flex;
     flex-direction: column;
@@ -755,7 +844,6 @@
     line-height: 1.5;
   }
 
-  /* ── Connection list ─────────────────────────────────────── */
   .list {
     list-style: none;
     padding: 0;
@@ -764,150 +852,75 @@
     flex-direction: column;
     gap: 0.4rem;
   }
+  .sandbox-li {
+    list-style: none;
+  }
 
-  .card {
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    padding: 1rem 1.1rem;
+  .modal-backdrop {
+    position: fixed; inset: 0; z-index: 500;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex; align-items: center; justify-content: center;
+    backdrop-filter: blur(2px);
+  }
+  .del-modal {
     background: var(--bg-surface-raised);
-    border: 1px solid var(--border-strong);
-    border-radius: 10px;
-    cursor: pointer;
-    transition: border-color 0.12s, box-shadow 0.12s, transform 0.1s;
-    user-select: none;
-  }
-  .card:hover {
-    background: var(--row-hover);
-    border-color: var(--border-strong);
-    box-shadow: 0 2px 10px rgba(26, 22, 18, 0.07);
-    transform: translateY(-1px);
-  }
-  .card:active {
-    transform: translateY(0);
-    box-shadow: none;
-  }
-  .card:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-
-  /* ── Card icon ───────────────────────────────────────────── */
-  .card-icon {
-    width: 40px;
-    height: 40px;
-    border-radius: 10px;
-    background: var(--row-hover);
-    color: var(--text-secondary);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    transition: background 0.12s;
-  }
-  .card:hover .card-icon {
-    background: var(--accent-shadow);
-    color: var(--accent);
-  }
-  .card-icon.wallet {
-    background: rgba(142, 68, 173, 0.08);
-    color: #8e44ad;
-  }
-  .card:hover .card-icon.wallet {
-    background: rgba(142, 68, 173, 0.14);
-    color: #8e44ad;
-  }
-
-  /* ── Card body ───────────────────────────────────────────── */
-  .card-body {
-    flex: 1 1 auto;
-    min-width: 0;
+    border: 1px solid #5a1a1a;
+    border-radius: 12px;
+    padding: 1.5rem;
+    width: 420px;
+    max-width: 90vw;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
     display: flex;
     flex-direction: column;
-    gap: 0.2rem;
+    gap: 0.85rem;
   }
-  .card-name {
+  .del-modal-header {
+    display: flex; align-items: center; gap: 0.6rem;
     font-family: "Space Grotesk", sans-serif;
-    font-weight: 500;
-    font-size: 15px;
+    font-size: 15px; font-weight: 600;
     color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
-  .card-meta {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    font-size: 11.5px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
+  .del-modal-body {
+    font-size: 13px; color: var(--text-secondary);
+    line-height: 1.55; margin: 0;
   }
-  .mono { font-family: "JetBrains Mono", "SF Mono", monospace; }
-  .card-sep { opacity: 0.4; }
-  .card-host {
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .del-modal-body strong { color: var(--text-primary); }
+  .del-modal-label {
+    font-size: 12px; color: var(--text-muted); margin: 0;
   }
-  .badge-wallet {
-    font-family: "Space Grotesk", sans-serif;
-    font-size: 9px;
-    font-weight: 600;
-    letter-spacing: 0.07em;
-    text-transform: uppercase;
-    background: rgba(142, 68, 173, 0.1);
-    color: #8e44ad;
-    padding: 1px 5px;
-    border-radius: 3px;
-    flex-shrink: 0;
+  .del-modal-label code {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11.5px; color: #e74c3c;
+    background: rgba(231, 76, 60, 0.1);
+    padding: 1px 5px; border-radius: 3px;
   }
-
-  /* ── Card actions ────────────────────────────────────────── */
-  .card-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-    flex-shrink: 0;
+  .del-modal-input {
+    background: var(--bg-surface); border: 1px solid var(--border);
+    color: var(--text-primary); font-family: "JetBrains Mono", monospace;
+    font-size: 13px; padding: 0.55rem 0.75rem;
+    border-radius: 6px; outline: none; width: 100%; box-sizing: border-box;
+    transition: border-color 0.15s;
   }
-  .action-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 0.3rem 0.55rem;
-    font-family: "Space Grotesk", sans-serif;
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    color: var(--text-secondary);
-    transition: background 0.1s, color 0.1s, border-color 0.1s;
+  .del-modal-input:focus { border-color: #e74c3c; }
+  .del-modal-err {
+    font-size: 12px; color: #e74c3c; margin: 0;
   }
-  .action-btn.edit:hover {
-    background: var(--row-hover);
-    color: var(--text-primary);
-    border-color: var(--border-strong);
+  .del-modal-actions {
+    display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.25rem;
   }
-  .action-btn.delete {
-    border-color: transparent;
-    padding: 0.3rem 0.4rem;
+  .del-btn-cancel {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text-secondary); font-family: "Space Grotesk", sans-serif;
+    font-size: 13px; font-weight: 500; padding: 0.5rem 1rem;
+    border-radius: 6px; cursor: pointer; transition: background 0.12s;
   }
-  .action-btn.delete:hover {
-    background: rgba(239, 68, 68, 0.08);
-    color: #ef4444;
-    border-color: rgba(239, 68, 68, 0.2);
+  .del-btn-cancel:hover { background: var(--row-hover); color: var(--text-primary); }
+  .del-btn-confirm {
+    background: #7f1d1d; border: 1px solid #991b1b;
+    color: #fca5a5; font-family: "Space Grotesk", sans-serif;
+    font-size: 13px; font-weight: 600; padding: 0.5rem 1.1rem;
+    border-radius: 6px; cursor: pointer; transition: background 0.12s, opacity 0.12s;
   }
-  .open-arrow {
-    font-size: 15px;
-    color: var(--text-muted);
-    margin-left: 0.25rem;
-    transition: color 0.12s, transform 0.12s;
-    line-height: 1;
-  }
-  .card:hover .open-arrow {
-    color: var(--accent);
-    transform: translateX(2px);
-  }
+  .del-btn-confirm:hover:not(:disabled) { background: #991b1b; }
+  .del-btn-confirm:disabled { opacity: 0.35; cursor: default; }
 </style>

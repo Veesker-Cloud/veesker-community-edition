@@ -23,6 +23,7 @@ describe("BYOKProvider", () => {
       "sk-test",
       [{ role: "user", content: "explain this" }],
       { activeSql: "SELECT 1 FROM DUAL" },
+      false,
     );
     expect(result).toEqual({ ok: true, data: { content: "hello", toolsUsed: [] } });
   });

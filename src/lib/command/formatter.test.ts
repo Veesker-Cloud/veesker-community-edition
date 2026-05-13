@@ -233,18 +233,14 @@ describe("formatRows — value stringification", () => {
     expect(out).toContain("false");
   });
 
-  test("Date instances render as Oracle date string (DD-MON-YY HH24:MI:SS)", () => {
+  test("Date instances render as ISO string", () => {
     const d = new Date("2026-05-07T10:00:00.000Z");
-    const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'] as const;
-    const expected =
-      `${String(d.getDate()).padStart(2,'0')}-${MONTHS[d.getMonth()]}-${String(d.getFullYear()).slice(2)}` +
-      ` ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
     const out = formatRows(
       [[d]],
       cols([["D", "DATE"]]),
       { ...DEFAULT_SETTINGS, heading: false },
     );
-    expect(out).toContain(expected);
+    expect(out).toContain("2026-05-07T10:00:00.000Z");
   });
 
   test("arrays/objects render as JSON.stringify", () => {

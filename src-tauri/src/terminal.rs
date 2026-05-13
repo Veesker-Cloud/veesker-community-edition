@@ -9,6 +9,17 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
+static TERMINAL_SESSION_CONFIRMED: Mutex<bool> = Mutex::new(false);
+
+#[tauri::command]
+pub fn terminal_confirm_session() -> Result<(), String> {
+    let mut guard = TERMINAL_SESSION_CONFIRMED
+        .lock()
+        .map_err(|e| format!("lock poisoned: {e}"))?;
+    *guard = true;
+    Ok(())
+}
+
 // portable-pty's MasterPty doesn't carry a Send bound in its trait definition,
 // but all concrete implementations (ConPtyMasterPty on Windows, UnixMasterPty
 // on macOS/Linux) use OS-level thread-safe handles internally. Access is always
@@ -60,6 +71,15 @@ pub fn terminal_create(
     cols: u16,
     rows: u16,
 ) -> Result<String, String> {
+    {
+        let guard = TERMINAL_SESSION_CONFIRMED
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+        if !*guard {
+            return Err("user_confirmation_required".into());
+        }
+    }
+
     let id = Uuid::new_v4().to_string();
 
     let pty_system = native_pty_system();

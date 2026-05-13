@@ -6,7 +6,7 @@
 
 <script lang="ts">
   import type { ObjectKind, Loadable } from "$lib/workspace";
-  import { Table, Eye, Layers, Hash, Cog, SquareFunction, Package, Zap, FileType, Webhook, Link2, ExternalLink, Folder, ListOrdered, Clock, User, Shield } from "lucide-svelte";
+  import { Table, Eye, Hash, Cog, SquareFunction, Package, Zap, FileType, Webhook } from "lucide-svelte";
 
   export type SchemaNode = {
     name: string;
@@ -23,19 +23,26 @@
     onToggle: (owner: string) => void;
     onSelect: (owner: string, name: string, kind: ObjectKind) => void;
     onRetry: (owner: string, kind: ObjectKind) => void;
+    onKindExpand?: (owner: string, kind: ObjectKind) => void;
     onRefresh?: () => void;
     refreshing?: boolean;
     onExecuteProc?: (owner: string, name: string, objectType: "PROCEDURE" | "FUNCTION") => void;
     onTestWindow?: (owner: string, name: string, kind: ObjectKind) => void;
     onExposeAsRest?: (owner: string, name: string, kind: "TABLE" | "VIEW" | "PROCEDURE" | "FUNCTION") => void;
   };
-  let { schemas, selected, onToggle, onSelect, onRetry, onRefresh, refreshing = false, onExecuteProc, onTestWindow, onExposeAsRest }: Props = $props();
+  let { schemas, selected, onToggle, onSelect, onRetry, onKindExpand, onRefresh, refreshing = false, onExecuteProc, onTestWindow, onExposeAsRest }: Props = $props();
 
   let search = $state("");
   let hiddenKinds = $state<Set<ObjectKind>>(new Set());
   let density = $state<"compact" | "comfortable">("compact");
   let showSystemSchemas = $state(false);
   let contextMenu = $state<{ x: number; y: number; owner: string; name: string; kind: ObjectKind } | null>(null);
+
+  const VIRTUALIZE_THRESHOLD = 100;
+  const ROW_HEIGHT = 24;
+  const OVERSCAN = 10;
+  const VIRT_VISIBLE_ROWS = 12;
+  const VIRT_CONTAINER_H = VIRT_VISIBLE_ROWS * ROW_HEIGHT;
 
   const SYSTEM_SCHEMAS = new Set([
     "ANONYMOUS", "APPQOSYS", "AUDSYS", "CTXSYS", "DBSFWUSER", "DBSNMP",
@@ -52,12 +59,6 @@
     PROCEDURE: "Procedures", FUNCTION: "Functions",
     PACKAGE: "Packages", TRIGGER: "Triggers", TYPE: "Types",
     REST_MODULE: "REST Modules",
-    MATERIALIZED_VIEW: "Materialized Views", SYNONYM: "Synonyms", DB_LINK: "DB Links",
-    DIRECTORY: "Directories",
-    QUEUE: "Queues",
-    SCHEDULER_JOB: "Jobs",
-    DB_USER: "Users",
-    PRIVILEGE: "Privileges",
   };
 
 
@@ -69,26 +70,23 @@
   }
 
   const KIND_GROUPS: { label: string; kinds: ObjectKind[] }[] = [
-    { label: "Data",        kinds: ["TABLE", "VIEW", "MATERIALIZED_VIEW", "SEQUENCE"] },
+    { label: "Data",        kinds: ["TABLE", "VIEW", "SEQUENCE"] },
     { label: "Code",        kinds: ["PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE"] },
-    { label: "Integration", kinds: ["REST_MODULE", "DB_LINK", "SYNONYM", "DIRECTORY", "QUEUE", "SCHEDULER_JOB"] },
-    { label: "Security",    kinds: ["DB_USER", "PRIVILEGE"] },
+    { label: "Integration", kinds: ["REST_MODULE"] },
   ];
 
   const KIND_ORDER: ObjectKind[] = KIND_GROUPS.flatMap(g => g.kinds);
 
   const KIND_COLOR: Record<ObjectKind, string> = {
-    TABLE: "#4a9eda", VIEW: "#4a9eda", MATERIALIZED_VIEW: "#4a9eda", SEQUENCE: "#4a9eda",
+    TABLE: "#4a9eda", VIEW: "#4a9eda", SEQUENCE: "#4a9eda",
     PROCEDURE: "#e67e22", FUNCTION: "#e67e22", PACKAGE: "#e67e22", TRIGGER: "#e67e22", TYPE: "#e67e22",
-    REST_MODULE: "#1a9ca6", DB_LINK: "#1a9ca6", SYNONYM: "#1a9ca6", DIRECTORY: "#1a9ca6", QUEUE: "#1a9ca6", SCHEDULER_JOB: "#1a9ca6",
-    DB_USER: "#c0392b", PRIVILEGE: "#c0392b",
+    REST_MODULE: "#1a9ca6",
   };
 
   const KIND_ICON: Record<ObjectKind, any> = {
-    TABLE: Table, VIEW: Eye, MATERIALIZED_VIEW: Layers, SEQUENCE: Hash,
+    TABLE: Table, VIEW: Eye, SEQUENCE: Hash,
     PROCEDURE: Cog, FUNCTION: SquareFunction, PACKAGE: Package, TRIGGER: Zap, TYPE: FileType,
-    REST_MODULE: Webhook, DB_LINK: Link2, SYNONYM: ExternalLink, DIRECTORY: Folder, QUEUE: ListOrdered, SCHEDULER_JOB: Clock,
-    DB_USER: User, PRIVILEGE: Shield,
+    REST_MODULE: Webhook,
   };
 
   function isSystemSchema(name: string): boolean {
@@ -109,7 +107,6 @@
   function schemaVisible(s: SchemaNode): boolean {
     if (!q) return true;
     if (s.name.toLowerCase().includes(q)) return true;
-    // Also visible if any loaded objects match
     for (const kind of KIND_ORDER) {
       const loadable = s.kinds[kind];
       if (loadable?.kind === "ok" && loadable.value.some(o => o.name.toLowerCase().includes(q))) {
@@ -147,10 +144,70 @@
     schemas.find(s => s.expanded) ??
     schemas.find(s => s.isCurrent)
   );
+
+  let openKinds = $state<Set<string>>(new Set());
+
+  function kindOpenKey(owner: string, kind: ObjectKind): string {
+    return `${owner}::${kind}`;
+  }
+
+  function isKindOpen(owner: string, kind: ObjectKind, loadable: Loadable<Array<{ name: string; status?: string }>>, schemaExpanded: boolean): boolean {
+    if (!schemaExpanded) return false;
+    const key = kindOpenKey(owner, kind);
+    return openKinds.has(key);
+  }
+
+  function handleKindToggle(owner: string, kind: ObjectKind, loadable: Loadable<Array<{ name: string; status?: string }>>, open: boolean) {
+    const key = kindOpenKey(owner, kind);
+    if (open) {
+      openKinds.add(key);
+      openKinds = new Set(openKinds);
+      if (loadable.kind === "idle" && onKindExpand) {
+        onKindExpand(owner, kind);
+      }
+    } else {
+      openKinds.delete(key);
+      openKinds = new Set(openKinds);
+    }
+  }
+
+  let virtScrollTops = $state<Map<string, number>>(new Map());
+
+  function virtKey(owner: string, kind: ObjectKind): string {
+    return `${owner}::${kind}`;
+  }
+
+  function getScrollTop(owner: string, kind: ObjectKind): number {
+    return virtScrollTops.get(virtKey(owner, kind)) ?? 0;
+  }
+
+  function setScrollTop(owner: string, kind: ObjectKind, v: number) {
+    virtScrollTops.set(virtKey(owner, kind), v);
+    virtScrollTops = new Map(virtScrollTops);
+  }
+
+  function virtSlice(total: number, scrollTop: number): { start: number; end: number; topPad: number; botPad: number } {
+    if (total === 0) return { start: 0, end: 0, topPad: 0, botPad: 0 };
+    const clampedTop = Math.max(0, Math.min(scrollTop, Math.max(0, (total - VIRT_VISIBLE_ROWS) * ROW_HEIGHT)));
+    const start = Math.max(0, Math.floor(clampedTop / ROW_HEIGHT) - OVERSCAN);
+    const end = Math.min(total, Math.ceil((clampedTop + VIRT_CONTAINER_H) / ROW_HEIGHT) + OVERSCAN);
+    return { start, end, topPad: start * ROW_HEIGHT, botPad: (total - end) * ROW_HEIGHT };
+  }
+
+  $effect(() => {
+    const validOwners = new Set(schemas.map(s => s.name));
+    for (const k of [...virtScrollTops.keys()]) {
+      const [owner] = k.split("::");
+      if (!validOwners.has(owner)) virtScrollTops.delete(k);
+    }
+    for (const k of [...openKinds]) {
+      const [owner] = k.split("::");
+      if (!validOwners.has(owner)) openKinds.delete(k);
+    }
+  });
 </script>
 
 <nav class="tree" class:comfortable={density === "comfortable"}>
-  <!-- Search + Refresh -->
   <div class="search-wrap">
     <svg class="search-icon" width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
       <circle cx="5.5" cy="5.5" r="3.5" stroke="currentColor" stroke-width="1.3"/>
@@ -197,7 +254,6 @@
     {/if}
   </div>
 
-  <!-- Kind icon toolbar -->
   <div class="kind-toolbar">
     <div class="toolbar-actions">
       <button class="toolbar-text-btn" onclick={() => hiddenKinds = new Set()}>All</button>
@@ -210,6 +266,7 @@
           {#each group.kinds as kind}
             {@const isOff = hiddenKinds.has(kind)}
             {@const count = activeSchema?.kindCounts?.[kind]}
+            {@const KindIcon = KIND_ICON[kind]}
             <button
               class="kind-icon-btn"
               class:off={isOff}
@@ -219,7 +276,7 @@
               aria-label={"Filter: " + KIND_LABELS[kind] + (count !== undefined ? ` (${count})` : "") + (isOff ? ", disabled" : ", enabled")}
               aria-pressed={!isOff}
             >
-              <svelte:component this={KIND_ICON[kind]} size={16} />
+              <KindIcon size={16} />
             </button>
           {/each}
         </div>
@@ -256,7 +313,11 @@
               {@const loadable = s.kinds[kind]!}
               {@const filtered = loadable.kind === "ok" ? filteredObjects(loadable.value, passThrough) : []}
               {#if kindVisible(loadable, passThrough) && !(loadable.kind === "ok" && filtered.length === 0)}
-              <details class="kind">
+              <details
+                class="kind"
+                open={isKindOpen(s.name, kind, loadable, s.expanded)}
+                ontoggle={(e) => handleKindToggle(s.name, kind, loadable, (e.currentTarget as HTMLDetailsElement).open)}
+              >
                 <summary class="kind-head" style="--kc:{KIND_COLOR[kind]}">
                   <span class="kind-dot" style="background:{KIND_COLOR[kind]}" aria-hidden="true"></span>
                   <span class="kind-label">{KIND_LABELS[kind]}</span>
@@ -269,7 +330,9 @@
                   {/if}
                 </summary>
                 <div class="kind-body">
-                  {#if loadable.kind === "loading"}
+                  {#if loadable.kind === "idle"}
+                    <div class="muted-row">—</div>
+                  {:else if loadable.kind === "loading"}
                     <div class="muted-row">loading…</div>
                   {:else if loadable.kind === "err"}
                     <div class="err-row">
@@ -277,43 +340,86 @@
                       <button class="retry-btn" onclick={() => onRetry(s.name, kind)}>retry</button>
                     </div>
                   {:else if loadable.kind === "ok"}
-                    {#each filtered as o}
-                      <div class="obj-row">
-                        <button
-                          class="object"
-                          class:selected={isSelected(s.name, o.name, kind)}
-                          style={isSelected(s.name, o.name, kind) ? `--kc:${KIND_COLOR[kind]}` : ""}
-                          onclick={() => onSelect(s.name, o.name, kind)}
-                          oncontextmenu={(e) => {
-                            if (!['PROCEDURE', 'FUNCTION', 'PACKAGE', 'TABLE', 'VIEW'].includes(kind as string)) return;
-                            e.preventDefault();
-                            contextMenu = { x: e.clientX, y: e.clientY, owner: s.name, name: o.name, kind: kind as ObjectKind };
-                          }}
-                          title="{s.name}.{o.name}"
-                        >
-                          <span class="obj-name">{o.name}</span>
-                          {#if kind === "TABLE" && s.vectorTables?.has(o.name)}
-                            <span class="vector-dot" title="Has VECTOR columns" aria-label="vector">⬡</span>
-                          {/if}
-                          {#if o.status && o.status !== "VALID"}
-                            <span class="invalid-dot" title="{o.status}" aria-label="invalid"></span>
-                          {/if}
-                          {#if kind === "SCHEDULER_JOB" && /^LEGACY_\d+$/.test(o.name)}
-                            <span class="legacy-badge" title="DBMS_JOB legacy">Legacy</span>
-                          {/if}
-                        </button>
-                        {#if (kind === "PROCEDURE" || kind === "FUNCTION") && onExecuteProc}
-                          <button
-                            class="exec-btn"
-                            onclick={(e) => { e.stopPropagation(); onExecuteProc!(s.name, o.name, kind as "PROCEDURE" | "FUNCTION"); }}
-                            title="Execute {o.name}"
-                            aria-label="Execute {o.name}"
-                          >▶</button>
-                        {/if}
+                    {#if filtered.length > VIRTUALIZE_THRESHOLD}
+                      {@const st = getScrollTop(s.name, kind)}
+                      {@const slice = virtSlice(filtered.length, st)}
+                      <div
+                        class="kind-virt"
+                        onscroll={(e) => setScrollTop(s.name, kind, (e.currentTarget as HTMLDivElement).scrollTop)}
+                      >
+                        <div class="kind-virt-inner" style="height:{filtered.length * ROW_HEIGHT}px">
+                          <div style="position:absolute;top:{slice.topPad}px;left:0;right:0">
+                            {#each filtered.slice(slice.start, slice.end) as o}
+                              <div class="obj-row">
+                                <button
+                                  class="object"
+                                  class:selected={isSelected(s.name, o.name, kind)}
+                                  style={isSelected(s.name, o.name, kind) ? `--kc:${KIND_COLOR[kind]}` : ""}
+                                  onclick={() => onSelect(s.name, o.name, kind)}
+                                  oncontextmenu={(e) => {
+                                    if (!['PROCEDURE', 'FUNCTION', 'PACKAGE', 'TABLE', 'VIEW'].includes(kind as string)) return;
+                                    e.preventDefault();
+                                    contextMenu = { x: e.clientX, y: e.clientY, owner: s.name, name: o.name, kind: kind as ObjectKind };
+                                  }}
+                                  title="{s.name}.{o.name}"
+                                >
+                                  <span class="obj-name">{o.name}</span>
+                                  {#if kind === "TABLE" && s.vectorTables?.has(o.name)}
+                                    <span class="vector-dot" title="Has VECTOR columns" aria-label="vector">⬡</span>
+                                  {/if}
+                                  {#if o.status && o.status !== "VALID"}
+                                    <span class="invalid-dot" title="{o.status}" aria-label="invalid"></span>
+                                  {/if}
+                                </button>
+                                {#if (kind === "PROCEDURE" || kind === "FUNCTION") && onExecuteProc}
+                                  <button
+                                    class="exec-btn"
+                                    onclick={(e) => { e.stopPropagation(); onExecuteProc!(s.name, o.name, kind as "PROCEDURE" | "FUNCTION"); }}
+                                    title="Execute {o.name}"
+                                    aria-label="Execute {o.name}"
+                                  >▶</button>
+                                {/if}
+                              </div>
+                            {/each}
+                          </div>
+                        </div>
                       </div>
                     {:else}
-                      <div class="muted-row">— none —</div>
-                    {/each}
+                      {#each filtered as o}
+                        <div class="obj-row">
+                          <button
+                            class="object"
+                            class:selected={isSelected(s.name, o.name, kind)}
+                            style={isSelected(s.name, o.name, kind) ? `--kc:${KIND_COLOR[kind]}` : ""}
+                            onclick={() => onSelect(s.name, o.name, kind)}
+                            oncontextmenu={(e) => {
+                              if (!['PROCEDURE', 'FUNCTION', 'PACKAGE', 'TABLE', 'VIEW'].includes(kind as string)) return;
+                              e.preventDefault();
+                              contextMenu = { x: e.clientX, y: e.clientY, owner: s.name, name: o.name, kind: kind as ObjectKind };
+                            }}
+                            title="{s.name}.{o.name}"
+                          >
+                            <span class="obj-name">{o.name}</span>
+                            {#if kind === "TABLE" && s.vectorTables?.has(o.name)}
+                              <span class="vector-dot" title="Has VECTOR columns" aria-label="vector">⬡</span>
+                            {/if}
+                            {#if o.status && o.status !== "VALID"}
+                              <span class="invalid-dot" title="{o.status}" aria-label="invalid"></span>
+                            {/if}
+                          </button>
+                          {#if (kind === "PROCEDURE" || kind === "FUNCTION") && onExecuteProc}
+                            <button
+                              class="exec-btn"
+                              onclick={(e) => { e.stopPropagation(); onExecuteProc!(s.name, o.name, kind as "PROCEDURE" | "FUNCTION"); }}
+                              title="Execute {o.name}"
+                              aria-label="Execute {o.name}"
+                            >▶</button>
+                          {/if}
+                        </div>
+                      {:else}
+                        <div class="muted-row">— none —</div>
+                      {/each}
+                    {/if}
                   {/if}
                 </div>
               </details>
@@ -588,6 +694,15 @@
 
   /* ── Object items ─────────────────────────────────────────── */
   .kind-body { padding-bottom: 0.2rem; }
+  /* fixed height — nested virt containers make ResizeObserver impractical; 12 rows × 24px */
+  .kind-virt {
+    height: 288px;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  .kind-virt-inner {
+    position: relative;
+  }
   .object {
     display: flex;
     align-items: center;
@@ -603,6 +718,9 @@
     cursor: pointer;
     transition: background 0.08s, color 0.08s;
     gap: 0.35rem;
+    width: 100%;
+    height: 24px;
+    box-sizing: border-box;
   }
   .object:hover {
     background: var(--row-hover);
@@ -626,17 +744,6 @@
     width: 5px; height: 5px;
     border-radius: 50%;
     background: #e74c3c;
-    flex-shrink: 0;
-  }
-  .legacy-badge {
-    font-size: 8px;
-    font-weight: 600;
-    color: hsl(35 80% 55%);
-    background: hsl(35 80% 55% / 0.12);
-    border: 1px solid hsl(35 80% 55% / 0.3);
-    border-radius: 3px;
-    padding: 0 3px;
-    line-height: 1.4;
     flex-shrink: 0;
   }
   .vector-dot {

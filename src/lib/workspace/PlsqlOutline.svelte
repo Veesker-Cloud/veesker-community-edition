@@ -70,7 +70,7 @@
         <span class="chev">{specExpanded ? "▼" : "▶"}</span> Spec
       </button>
       {#if specExpanded}
-        {#each specItems as item (item.line)}
+        {#each specItems as item, i (i)}
           <button
             class="item"
             onclick={() => handleClick(item, "spec")}
@@ -86,7 +86,7 @@
         <span class="chev">{bodyExpanded ? "▼" : "▶"}</span> Body
       </button>
       {#if bodyExpanded}
-        {#each bodyItems as item (item.line)}
+        {#each bodyItems as item, i (i)}
           <button
             class="item"
             onclick={() => handleClick(item, "body")}
@@ -99,7 +99,7 @@
         {/each}
       {/if}
     {:else}
-      {#each bodyItems as item (item.line)}
+      {#each bodyItems as item, i (i)}
         <button class="item" onclick={() => handleClick(item, undefined)}>
           <span class="icon icon-sec">§</span>
           {item.label}

@@ -49,37 +49,6 @@ export const UNSAFE_DML_STAGING    = -32038;
 export const UNSAFE_DML_PROD_BLOCKED = -32039;
 export const TRUNCATE_PROD_BLOCKED   = -32040;
 
-// Item #1A T1A.8: mview.refresh on prod requires explicit server-side confirmation.
-// Mirrors the unlockUnsafeDml pattern (security item #2) for MV refresh operations.
-export const MVIEW_REFRESH_PROD_REQUIRES_CONFIRMATION = -32043;
-
-// Item #1E: DDL/DCL confirmation gate.
-// -32041: DDL blocked — no confirmation window open for this connection.
-// -32042: destructive DDL requires explicit unlock confirmation before execution.
-export const DDL_BLOCKED         = -32041;
-export const DDL_UNLOCK_REQUIRED = -32042;
-
-// Item #1B T1B.3: DBMS_METADATA.GET_DDL('AQ_QUEUE') is not supported for this queue.
-// ORA-39200 or similar → caller shows informational message and manual reconstruction.
-// -32044 is reserved for Item #1B scheduler (jobs/programs — not yet assigned).
-export const QUEUE_DDL_UNSUPPORTED = -32045;
-
-// Item #1B T1B.1: Scheduler Jobs actions.
-// -32044 is reserved for scheduler (noted in QUEUE_DDL_UNSUPPORTED comment).
-// -32046: run job on prod requires confirmation.
-// -32047: reserved (enable prod-confirm removed by design decision).
-// -32048: disable job on prod requires confirmation.
-// -32049: identifier failed Oracle name validation in server-side defense-in-depth.
-export const JOB_RUN_PROD_REQUIRES_CONFIRMATION    = -32046;
-export const JOB_DISABLE_PROD_REQUIRES_CONFIRMATION = -32048;
-export const INVALID_IDENTIFIER                     = -32049;
-
-// Item #1C T1C.3: Session kill actions.
-// -32051: SID/SERIAL# must be positive integers within valid range.
-// -32050: prod env guard for session kill (T1A.8 pattern, 3rd replication).
-export const SESSION_KILL_PROD_REQUIRES_CONFIRMATION = -32050;
-export const INVALID_SESSION_ID                      = -32051;
-
 export class RpcCodedError extends Error {
   code: number;
   data?: Record<string, unknown>;

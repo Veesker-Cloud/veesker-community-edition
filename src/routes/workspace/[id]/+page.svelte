@@ -27,14 +27,6 @@
   import TestWindow from "$lib/workspace/TestWindow.svelte";
   import { debugStore } from "$lib/stores/debug.svelte";
   import {
-    workspaceOpen,
-    workspaceClose,
-    schemaList,
-    objectsList,
-    objectsListPlsql,
-    objectDdlGet,
-    objectDataflowGet,
-    tableDescribe,
     tableRelated,
     schemaKindCounts,
     vectorTablesInSchema,
@@ -43,14 +35,6 @@
     ordsApply,
     ordsEnableSchema,
     ordsModuleExportSql,
-    dbLinksListGet,
-    directoriesListGet,
-    queuesListGet,
-    schedulerJobsListGet,
-    userDetailsGet,
-    sessionsListAllGet,
-    sessionPrivCheckGet,
-    sessionSqlPreviewGet,
     SESSION_LOST,
     type WorkspaceInfo,
     type ObjectKind,
@@ -59,6 +43,8 @@
     type Loadable,
     type DataFlowResult,
   } from "$lib/workspace";
+  import type { WorkspaceSource, SourceError } from "$lib/workspace/sources/types";
+  import { SandboxWorkspaceSource } from "$lib/workspace/sources/sandbox";
   import { getConnection, type ConnectionMeta } from "$lib/connections";
   import { theme } from "$lib/stores/theme.svelte";
   import { ordsStore } from "$lib/stores/ords.svelte";
@@ -75,8 +61,14 @@
   import AuditLogPanel from "$lib/workspace/AuditLogPanel.svelte";
   import OperationsPanel from "$lib/workspace/OperationsPanel.svelte";
   import { operationsPanel } from "$lib/stores/operations-panel.svelte";
+  import { sandboxes } from "$lib/stores/sandboxes.svelte";
+  import { toasts } from "$lib/stores/toasts.svelte";
+  import { envTheme } from "$lib/workspace/EnvTheme.svelte";
 
   const authCtx = getContext<{ tier: "ce" | "cloud"; email: string }>("auth");
+
+  let { data }: { data: { source: WorkspaceSource } } = $props();
+  const source = $derived(data.source);
 
   const PLSQL_KINDS: ObjectKind[] = ["PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE"];
 
@@ -103,6 +95,7 @@
   let refreshing = $state(false);
   let completionSchema = $state<Record<string, string[]>>({});
   let colCache = new Map<string, string[]>();
+  let txActionInFlight = $state(false);
 
   const schemaSnapshot = $derived((() => {
     const current = schemas.find((s) => s.isCurrent);
@@ -121,8 +114,13 @@
     if (!effectiveOwner) return [];
     const cacheKey = `${effectiveOwner}.${table}`;
     if (colCache.has(cacheKey)) return colCache.get(cacheKey)!;
-    const res = await tableDescribe(effectiveOwner, table);
-    const cols = res.ok ? res.data.columns.map((c) => c.name) : [];
+    let cols: string[] = [];
+    try {
+      const td = await source.describeTable(effectiveOwner, table);
+      cols = td.columns.map((c) => c.name);
+    } catch {
+      cols = [];
+    }
     colCache.set(cacheKey, cols);
     return cols;
   }
@@ -133,6 +131,19 @@
   let dataflowError = $state<string | null>(null);
   let related = $state<Loadable<TableRelated>>({ kind: "idle" });
   let activeWsTab = $state<"schema" | "dashboard">("schema");
+
+  // Sandbox sources don't expose a Dashboard tab (capabilities.tabs = ["schema"]).
+  // If a previous Oracle session left activeWsTab on "dashboard", bring it back
+  // to "schema" before the dashboard button gating hides it for the sandbox.
+  $effect(() => {
+    if (!source.capabilities.tabs.includes(activeWsTab)) {
+      activeWsTab = "schema";
+    }
+  });
+
+  $effect(() => {
+    envTheme.setFromEnv(meta?.env);
+  });
   let ddlLoading = $state<{ owner: string; name: string } | null>(null);
   let testWindowOpen = $state(false);
   let showOrdsBootstrap = $state(false);
@@ -143,7 +154,6 @@
   let showOAuthPanel = $state(false);
   let showLogin = $state(false);
   let showAuditLog = $state(false);
-  let txActionInFlight = $state(false);
 
   // ── Panel resize (persisted) ─────────────────────────────────────────────────
   function loadPanelWidth(key: string, def: number): number {
@@ -200,14 +210,6 @@
       kinds: {
         TABLE: { kind: "idle" },
         VIEW: { kind: "idle" },
-        MATERIALIZED_VIEW: { kind: "idle" },
-        SYNONYM: { kind: "idle" },
-        DB_LINK: { kind: "idle" },
-        DIRECTORY: { kind: "idle" },
-        QUEUE: { kind: "idle" },
-        SCHEDULER_JOB: { kind: "idle" },
-        DB_USER: { kind: "idle" },
-        PRIVILEGE: { kind: "idle" },
         SEQUENCE: { kind: "idle" },
         PROCEDURE: { kind: "idle" },
         FUNCTION: { kind: "idle" },
@@ -229,81 +231,21 @@
         if (res.error.code === SESSION_LOST) sessionLost = true;
         node.kinds[kind] = { kind: "err", message: res.error.message };
       }
-    } else if (kind === "DB_LINK") {
-      // DB Links are not in ALL_OBJECTS — use the dedicated sidecar RPC
-      const res = await dbLinksListGet(node.name);
-      if (res.ok) {
-        node.kinds[kind] = { kind: "ok", value: res.data.objects.map((l) => ({ name: l.name })) };
-      } else {
-        if (res.error.code === SESSION_LOST) sessionLost = true;
-        node.kinds[kind] = { kind: "err", message: res.error.message };
-      }
-    } else if (kind === "DIRECTORY") {
-      // Directories are global Oracle objects — load only once for the current schema.
-      // Non-current schemas skip loading (they share the same global directory list).
-      if (!node.isCurrent) {
-        node.kinds[kind] = { kind: "ok", value: [] };
-      } else {
-        const res = await directoriesListGet();
-        if (res.ok) {
-          node.kinds[kind] = { kind: "ok", value: res.data.directories.map((d) => ({ name: d.name })) };
-        } else {
-          if (res.error.code === SESSION_LOST) sessionLost = true;
-          node.kinds[kind] = { kind: "err", message: res.error.message };
-        }
-      }
-    } else if (kind === "QUEUE") {
-      const res = await queuesListGet(node.name);
-      if (res.ok) {
-        node.kinds[kind] = { kind: "ok", value: res.data.queues.map((q) => ({ name: q.name })) };
-      } else {
-        if (res.error.code === SESSION_LOST) sessionLost = true;
-        node.kinds[kind] = { kind: "err", message: res.error.message };
-      }
-    } else if (kind === "SCHEDULER_JOB") {
-      const res = await schedulerJobsListGet(node.name);
-      if (res.ok) {
-        const schedulerItems = res.data.jobs.map((j) => ({ name: j.name, status: j.state }));
-        const legacyItems = res.data.legacyJobs.map((j) => ({ name: `LEGACY_${j.jobId}` }));
-        node.kinds[kind] = { kind: "ok", value: [...schedulerItems, ...legacyItems] };
-      } else {
-        if (res.error.code === SESSION_LOST) sessionLost = true;
-        node.kinds[kind] = { kind: "err", message: res.error.message };
-      }
-    } else if (kind === "DB_USER") {
-      const res = await userDetailsGet(node.name);
-      if (res.ok) {
-        node.kinds[kind] = res.data
-          ? { kind: "ok", value: [{ name: node.name, status: res.data.accountStatus || undefined }] }
-          : { kind: "ok", value: [] };
-      } else {
-        if (res.error.code === SESSION_LOST) sessionLost = true;
-        node.kinds[kind] = { kind: "err", message: res.error.message };
-      }
-    } else if (kind === "PRIVILEGE") {
-      node.kinds[kind] = { kind: "ok", value: [{ name: node.name }] };
-    } else if (PLSQL_KINDS.includes(kind)) {
-      const res = await objectsListPlsql(node.name, kind);
-      if (res.ok) {
-        node.kinds[kind] = { kind: "ok", value: res.data };
-      } else {
-        if (res.error.code === SESSION_LOST) sessionLost = true;
-        node.kinds[kind] = { kind: "err", message: res.error.message };
-      }
     } else {
-      const res = await objectsList(node.name, kind);
-      if (res.ok) {
-        node.kinds[kind] = { kind: "ok", value: res.data };
-      } else {
-        if (res.error.code === SESSION_LOST) sessionLost = true;
-        node.kinds[kind] = { kind: "err", message: res.error.message };
+      try {
+        const data = await source.listObjects(node.name, kind);
+        node.kinds[kind] = { kind: "ok", value: data };
+      } catch (e) {
+        const err = e as SourceError;
+        if (err?.code === SESSION_LOST) sessionLost = true;
+        node.kinds[kind] = { kind: "err", message: err?.message ?? String(e) };
       }
     }
   }
 
   function expandIfNeeded(node: SchemaNode): void {
     const kinds: ObjectKind[] = [
-      "TABLE", "VIEW", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB", "DB_USER", "PRIVILEGE", "SEQUENCE",
+      "TABLE", "VIEW", "SEQUENCE",
       "PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE",
       "REST_MODULE",
     ];
@@ -315,13 +257,7 @@
     if (!node.kindCounts) {
       void schemaKindCounts(node.name).then((res) => {
         if (res.ok) {
-          // ALL_OBJECTS uses 'MATERIALIZED VIEW' (with space); map to the ObjectKind key
-          const counts = { ...res.data.counts };
-          if ("MATERIALIZED VIEW" in counts) {
-            counts["MATERIALIZED_VIEW"] = counts["MATERIALIZED VIEW"];
-            delete counts["MATERIALIZED VIEW"];
-          }
-          node.kindCounts = counts;
+          node.kindCounts = res.data.counts;
         }
       });
     }
@@ -341,6 +277,14 @@
     if (node.expanded) expandIfNeeded(node);
   }
 
+  function onKindExpand(owner: string, kind: ObjectKind): void {
+    const node = schemas.find((s) => s.name === owner);
+    if (!node) return;
+    if (node.kinds[kind]?.kind === "idle") {
+      void loadKind(node, kind);
+    }
+  }
+
   function onRetryKind(owner: string, kind: ObjectKind): void {
     const node = schemas.find((s) => s.name === owner);
     if (!node) return;
@@ -351,27 +295,33 @@
     dataflow = null;
     dataflowLoading = true;
     dataflowError = null;
-    const res = await objectDataflowGet(owner, objectType, objectName);
+    const res = await source.loadDataflow(owner, objectName, objectType as ObjectKind);
     dataflowLoading = false;
-    if (res.ok) {
+    if (res.kind === "ok") {
       dataflow = res.data;
+    } else if (res.kind === "unsupported") {
+      dataflow = null;
+      dataflowError = null;
     } else {
-      dataflowError = res.error.message;
+      dataflowError = res.error;
     }
   }
 
   async function loadDetails(owner: string, name: string, kind: ObjectKind): Promise<void> {
     details = { kind: "loading" };
     related = { kind: "loading" };
-    const [res, relRes] = await Promise.all([
-      tableDescribe(owner, name),
+    const [descSettled, relRes] = await Promise.all([
+      source.describeTable(owner, name).then(
+        (data) => ({ ok: true as const, data }),
+        (e) => ({ ok: false as const, err: e as SourceError }),
+      ),
       tableRelated(owner, name),
     ]);
-    if (res.ok) {
-      details = { kind: "ok", value: res.data };
+    if (descSettled.ok) {
+      details = { kind: "ok", value: descSettled.data };
     } else {
-      if (res.error.code === SESSION_LOST) sessionLost = true;
-      details = { kind: "err", message: res.error.message };
+      if (descSettled.err?.code === SESSION_LOST) sessionLost = true;
+      details = { kind: "err", message: descSettled.err?.message ?? String(descSettled.err) };
     }
     related = relRes.ok
       ? { kind: "ok", value: relRes.data }
@@ -390,13 +340,12 @@
       details = { kind: "idle" };
       ddlLoading = { owner, name };
       void (async () => {
-        const res = await objectDdlGet(owner, kind, name);
+        const res = await source.loadDdl(owner, name, kind);
         if (ddlLoading?.owner === owner && ddlLoading?.name === name) ddlLoading = null;
-        if (res.ok) {
+        if (res.kind === "ok") {
           const connId = page.params.id!;
-          const ddlData = res.data;
-          if (kind === "PACKAGE" && ddlData.spec && ddlData.body) {
-            sqlEditor.openWithDdl(`${owner}.${name}`, ddlData.body, {
+          if (kind === "PACKAGE" && res.spec && res.body) {
+            sqlEditor.openWithDdl(`${owner}.${name}`, res.body, {
               connectionId: connId,
               owner,
               objectType: "PACKAGE BODY",
@@ -404,31 +353,33 @@
             });
             const activeTab = sqlEditor.active;
             if (activeTab) {
-              sqlEditor.setPackageSpec(activeTab.id, ddlData.spec, {
+              sqlEditor.setPackageSpec(activeTab.id, res.spec, {
                 connectionId: connId,
                 owner,
                 objectType: "PACKAGE",
                 objectName: name,
               });
             }
-            void objectVersionCapture(connId, owner, "PACKAGE", name, ddlData.spec, "baseline");
-            void objectVersionCapture(connId, owner, "PACKAGE BODY", name, ddlData.body, "baseline");
+            void objectVersionCapture(connId, owner, "PACKAGE", name, res.spec, "baseline");
+            void objectVersionCapture(connId, owner, "PACKAGE BODY", name, res.body, "baseline");
           } else {
-            sqlEditor.openWithDdl(`${owner}.${name}`, ddlData.ddl, {
+            sqlEditor.openWithDdl(`${owner}.${name}`, res.ddl, {
               connectionId: connId,
               owner,
               objectType: kind,
               objectName: name,
             });
-            void objectVersionCapture(connId, owner, kind, name, ddlData.ddl, "baseline");
+            void objectVersionCapture(connId, owner, kind, name, res.ddl, "baseline");
           }
+        } else if (res.kind === "unsupported") {
+          detailError = "DDL not available for this source";
         } else {
-          if (res.error.code === SESSION_LOST) {
+          if (res.code === SESSION_LOST) {
             sessionLost = true;
-          } else if (/ORA-31603/.test(res.error.message)) {
+          } else if (/ORA-31603/.test(res.error)) {
             detailError = `DDL not available for ${owner}.${name} — Oracle built-in objects cannot be exported via DBMS_METADATA.`;
           } else {
-            detailError = `Failed to load DDL: ${res.error.message}`;
+            detailError = `Failed to load DDL: ${res.error}`;
           }
         }
       })();
@@ -441,10 +392,6 @@
       return;
     }
     if (kind === "REST_MODULE") {
-      details = { kind: "idle" };
-      return;
-    }
-    if (kind === "MATERIALIZED_VIEW" || kind === "SYNONYM" || kind === "DB_LINK" || kind === "DIRECTORY" || kind === "QUEUE" || kind === "SCHEDULER_JOB" || kind === "DB_USER" || kind === "PRIVILEGE") {
       details = { kind: "idle" };
       return;
     }
@@ -467,7 +414,7 @@
       previewSql = res.data.sql;
       previewConfig = config;
     } else {
-      alert("Failed to generate SQL: " + res.error.message);
+      toasts.error("Failed to generate SQL: " + res.error.message);
     }
   }
 
@@ -510,10 +457,8 @@
     selectObject(prev.owner, prev.name, prev.kind);
   }
 
-  const NO_DETAIL_KINDS: ObjectKind[] = ["SEQUENCE", "REST_MODULE", "MATERIALIZED_VIEW", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE", "SCHEDULER_JOB", "DB_USER", "PRIVILEGE"];
-
   function onRetryDetails(): void {
-    if (selected && !NO_DETAIL_KINDS.includes(selected.kind) && !PLSQL_KINDS.includes(selected.kind)) {
+    if (selected && selected.kind !== "SEQUENCE" && !PLSQL_KINDS.includes(selected.kind)) {
       void loadDetails(selected.owner, selected.name, selected.kind);
     }
   }
@@ -524,58 +469,72 @@
     colCache.clear();
     const id = page.params.id!;
 
-    const metaRes = await getConnection(id);
-    if (!metaRes.ok) {
-      fatal = `Could not load connection: ${metaRes.error.message}`;
-      return;
+    // Oracle-only metadata lookup. Sandbox sources don't have a row in the
+    // connection store — Plan 12 routes them through the source strategy
+    // directly. Skip getConnection + sqlEditor.setConnectionContext + ords
+    // wiring when the source isn't an Oracle connection.
+    if (source.meta.kind === "oracle") {
+      const metaRes = await getConnection(id);
+      if (!metaRes.ok) {
+        fatal = `Could not load connection: ${metaRes.error.message}`;
+        return;
+      }
+      meta = metaRes.data.meta;
+      const hostOrAlias = meta.authType === "basic" ? meta.host : meta.connectAlias;
+      // PROD-002 (audit 2026-04-30): forward env so the audit uploader can
+      // switch to metadata-only mode automatically for prod-tagged connections.
+      // L3.2 (Onda 3): forward autoExplainMode so runActive can decide whether
+      // to fire EXPLAIN PLAN in parallel with the user's statement.
+      sqlEditor.setConnectionContext(
+        meta.id,
+        meta.name,
+        meta.username,
+        hostOrAlias,
+        meta.env ?? null,
+        meta.autoExplainMode ?? "always",
+      );
+    } else {
+      // Sandbox path: no Oracle connection meta. Set a minimal sql editor
+      // context so audit log + status bar render the sandbox identity.
+      sqlEditor.setConnectionContext(source.meta.id, source.meta.displayName, "", "", null);
     }
-    meta = metaRes.data.meta;
-    const hostOrAlias = meta.authType === "basic" ? meta.host : meta.connectAlias;
-    // L3.2 (Onda 3): forward autoExplainMode so runActive can decide whether
-    // to fire EXPLAIN PLAN in parallel with the user's statement.
-    sqlEditor.setConnectionContext(
-      meta.id,
-      meta.name,
-      meta.username,
-      hostOrAlias,
-      meta.autoExplainMode ?? "always",
-      meta.env,
-    );
 
-    const openRes = await workspaceOpen(id);
+    const openRes = await source.open();
     if (!openRes.ok) {
-      fatal = openRes.error.message;
+      fatal = openRes.error;
       return;
     }
-    info = openRes.data;
+    if (openRes.info) info = openRes.info;
 
-    const schemaRes = await schemaList();
-    if (!schemaRes.ok) {
-      fatal = schemaRes.error.message;
+    try {
+      schemas = await source.listSchemas();
+    } catch (e) {
+      fatal = (e as SourceError)?.message ?? String(e);
       return;
     }
-    schemas = schemaRes.data.map((s) => newSchemaNode(s.name, s.isCurrent));
     const current = schemas.find((s) => s.isCurrent);
     if (current) expandIfNeeded(current);
-    ordsStore.setConnectionId(meta.id);
-    void ordsStore.refresh().then(() => {
-      const s = ordsStore.state;
-      if (!s) return;
-      if (!s.installed || !s.userHasAccess || !s.currentSchemaEnabled || !s.hasAdminRole || !s.ordsBaseUrl) {
-        showOrdsBootstrap = true;
-      }
-    });
+    if (source.meta.kind === "oracle" && meta) {
+      ordsStore.setConnectionId(meta.id);
+      void ordsStore.refresh().then(() => {
+        const s = ordsStore.state;
+        if (!s) return;
+        if (!s.installed || !s.userHasAccess || !s.currentSchemaEnabled || !s.hasAdminRole || !s.ordsBaseUrl) {
+          showOrdsBootstrap = true;
+        }
+      });
+    }
 
     if (current) {
-      const [tablesRes, viewsRes] = await Promise.allSettled([
-        objectsList(current.name, "TABLE"),
-        objectsList(current.name, "VIEW"),
+      const [tablesSettled, viewsSettled] = await Promise.allSettled([
+        source.listObjects(current.name, "TABLE"),
+        source.listObjects(current.name, "VIEW"),
       ]);
       const schema: Record<string, string[]> = {};
-      if (tablesRes.status === "fulfilled" && tablesRes.value.ok)
-        for (const t of tablesRes.value.data) schema[t.name] = [];
-      if (viewsRes.status === "fulfilled" && viewsRes.value.ok)
-        for (const v of viewsRes.value.data) schema[v.name] = [];
+      if (tablesSettled.status === "fulfilled")
+        for (const t of tablesSettled.value) schema[t.name] = [];
+      if (viewsSettled.status === "fulfilled")
+        for (const v of viewsSettled.value) schema[v.name] = [];
       completionSchema = schema;
     }
   }
@@ -590,15 +549,17 @@
 
   async function handleLogout(): Promise<void> {
     await logout();
+    authCtx.tier = "ce";
+    authCtx.email = "";
   }
 
   async function onDisconnect(): Promise<void> {
-    await workspaceClose();
+    await source.close();
     await goto("/");
   }
 
   async function onSwitchConnection(): Promise<void> {
-    await workspaceClose();
+    await source.close();
     await goto("/");
   }
 
@@ -607,9 +568,13 @@
     refreshing = true;
     try {
       const expandedNames = new Set(schemas.filter(s => s.expanded).map(s => s.name));
-      const schemaRes = await schemaList();
-      if (!schemaRes.ok) return;
-      schemas = schemaRes.data.map((s) => newSchemaNode(s.name, s.isCurrent));
+      let nodes: SchemaNode[];
+      try {
+        nodes = await source.listSchemas();
+      } catch {
+        return;
+      }
+      schemas = nodes;
       for (const node of schemas) {
         if (expandedNames.has(node.name)) {
           node.expanded = true;
@@ -629,7 +594,7 @@
       const ok = await invoke<boolean>("confirm_rollback_tx");
       if (ok) await sqlEditor.rollback();
     } catch (e) {
-      console.error("Rollback failed:", e);
+      toasts.error("Rollback failed: " + String(e));
     } finally {
       txActionInFlight = false;
     }
@@ -641,7 +606,7 @@
     try {
       await sqlEditor.commit();
     } catch (e) {
-      console.error("Commit failed:", e);
+      toasts.error("Commit failed: " + String(e));
     } finally {
       txActionInFlight = false;
     }
@@ -808,7 +773,7 @@
       window.removeEventListener("keydown", onKeydown);
       sqlEditor.reset();
       if (debugStore.status !== 'idle') await debugStore.stop();
-      await workspaceClose();
+      await source.close();
     };
   });
 
@@ -829,19 +794,18 @@
       <button onclick={() => goto("/")}>Back to connections</button>
     </div>
   </main>
-{:else if !meta || !info}
+{:else if source.meta.kind === "oracle" && (!meta || !info)}
   <main class="loading">Loading workspace…</main>
 {:else}
-  <div class="shell">
+  <div class="shell" style={envTheme.cssVar}>
     <StatusBar
-      connectionName={meta.name}
-      userLabel={userLabel(meta)}
-      schema={info.currentSchema}
-      serverVersion={info.serverVersion}
+      {source}
+      schema={info?.currentSchema ?? ""}
+      serverVersion={info?.serverVersion ?? ""}
       hasPendingTx={sqlEditor.pendingTx}
       pendingTxCount={sqlEditor.txState.pendingStatements}
-      username={info.user ?? ""}
-      serviceName={info.serviceName ?? ""}
+      username={info?.user ?? ""}
+      serviceName={info?.serviceName ?? ""}
       onCommit={handleCommit}
       onRollback={handleRollbackWithConfirm}
       chatOpen={showChat}
@@ -850,13 +814,24 @@
       onSwitchConnection={onSwitchConnection}
       theme={theme.current}
       onToggleTheme={() => theme.toggle()}
-      env={meta.env}
-      readOnly={meta.readOnly ?? false}
-      airgap={meta.airgapMode ?? false}
-      psdpm={meta.psdpmMode ?? (meta.env === "prod" || meta.env === "staging")}
+      env={meta?.env}
+      readOnly={meta?.readOnly ?? false}
+      airgap={meta?.airgapMode ?? false}
+      psdpm={meta?.psdpmMode ?? (meta?.env === "prod" || meta?.env === "staging")}
       onSignIn={() => { showLogin = true; }}
       onAuditLog={() => { showAuditLog = true; }}
       onSignOut={handleLogout}
+      warnings={source.meta.kind === "sandbox" ? (source as SandboxWorkspaceSource).getWarnings() : []}
+      onDelete={async () => {
+        if (source.meta.kind !== "sandbox") return;
+        await sandboxes.delete(source.meta.id);
+        await goto("/");
+      }}
+      onLeave={async () => {
+        if (source.meta.kind !== "sandbox") return;
+        await sandboxes.leave(source.meta.id);
+        await goto("/");
+      }}
     />
     <div class="body" class:body-collapsed={sqlEditor.editorExpanded}>
       <div class="panel-wrap" style="width: {schemaWidth}px; min-width: 160px; max-width: 480px;">
@@ -866,6 +841,7 @@
           onToggle={onToggle}
           onSelect={onSelect}
           onRetry={onRetryKind}
+          onKindExpand={onKindExpand}
           onRefresh={refreshSchemas}
           {refreshing}
           onExecuteProc={(owner, name, objectType) => {
@@ -895,16 +871,20 @@
             class:active={activeWsTab === "schema"}
             onclick={() => (activeWsTab = "schema")}
           >Schema</button>
-          <button
-            class="ws-tab"
-            class:active={activeWsTab === "dashboard"}
-            onclick={() => (activeWsTab = "dashboard")}
-          >📊 Dashboard</button>
-          <button
-            class="ws-tab"
-            onclick={() => (showOAuthPanel = true)}
-            title="Manage OAuth Clients"
-          >🔐 OAuth</button>
+          {#if source.capabilities.tabs.includes("dashboard")}
+            <button
+              class="ws-tab"
+              class:active={activeWsTab === "dashboard"}
+              onclick={() => (activeWsTab = "dashboard")}
+            >📊 Dashboard</button>
+          {/if}
+          {#if source.capabilities.kinds.has("REST_MODULE")}
+            <button
+              class="ws-tab"
+              onclick={() => (showOAuthPanel = true)}
+              title="Manage OAuth Clients"
+            >🔐 OAuth</button>
+          {/if}
         </div>
         {#if activeWsTab === "schema"}
           {#if selected && selected.kind === "REST_MODULE"}
@@ -918,7 +898,7 @@
                 const baseUrl = ordsStore.state?.ordsBaseUrl?.replace(/\/$/, "") ?? "";
                 const schema = (selected?.owner ?? "").toLowerCase();
                 if (!baseUrl) {
-                  alert("ORDS base URL not configured. Open the bootstrap modal to set it.");
+                  toasts.warning("ORDS base URL not configured. Open the bootstrap modal to set it.");
                   return;
                 }
                 void openUrl(`${baseUrl}/${schema}/open-api-catalog${modulePath}`);
@@ -930,7 +910,7 @@
                 if (res.ok) {
                   sqlEditor.openWithDdl(`Export: ${selected.name}`, res.data.sql);
                 } else {
-                  alert("Export failed: " + res.error.message);
+                  toasts.error("Export failed: " + res.error.message);
                 }
               }}
             />
@@ -949,18 +929,18 @@
               canGoBack={navHistory.length > 0}
               backLabel={navHistory.length > 0 ? navHistory[navHistory.length - 1].name : undefined}
               onBack={onBack}
-              connectionEnv={meta?.env ?? ""}
               onNavigateDataflow={(owner, objectType, name) => onSelect(owner, name, objectType as ObjectKind)}
               onNavigate={(owner, kind, name) => onSelect(owner, name, kind as ObjectKind)}
+              connectionId={page.params.id}
+              onSignIn={() => { showLogin = true; }}
               onViewDdl={async (owner, kind, name) => {
                 ddlLoading = { owner, name };
                 try {
-                  const res = await objectDdlGet(owner, kind as any, name);
-                  if (res.ok) {
+                  const res = await source.loadDdl(owner, name, kind as ObjectKind);
+                  if (res.kind === "ok") {
                     const connId = page.params.id!;
-                    const ddlData = res.data;
-                    if (kind === "PACKAGE" && ddlData.spec && ddlData.body) {
-                      sqlEditor.openWithDdl(`${owner}.${name}`, ddlData.body, {
+                    if (kind === "PACKAGE" && res.spec && res.body) {
+                      sqlEditor.openWithDdl(`${owner}.${name}`, res.body, {
                         connectionId: connId,
                         owner,
                         objectType: "PACKAGE BODY",
@@ -968,30 +948,32 @@
                       });
                       const activeTab = sqlEditor.active;
                       if (activeTab) {
-                        sqlEditor.setPackageSpec(activeTab.id, ddlData.spec, {
+                        sqlEditor.setPackageSpec(activeTab.id, res.spec, {
                           connectionId: connId,
                           owner,
                           objectType: "PACKAGE",
                           objectName: name,
                         });
                       }
-                      void objectVersionCapture(connId, owner, "PACKAGE", name, ddlData.spec, "baseline");
-                      void objectVersionCapture(connId, owner, "PACKAGE BODY", name, ddlData.body, "baseline");
+                      void objectVersionCapture(connId, owner, "PACKAGE", name, res.spec, "baseline");
+                      void objectVersionCapture(connId, owner, "PACKAGE BODY", name, res.body, "baseline");
                     } else {
-                      sqlEditor.openWithDdl(`${owner}.${name}`, ddlData.ddl, {
+                      sqlEditor.openWithDdl(`${owner}.${name}`, res.ddl, {
                         connectionId: connId,
                         owner,
                         objectType: kind,
                         objectName: name,
                       });
-                      void objectVersionCapture(connId, owner, kind, name, ddlData.ddl, "baseline");
+                      void objectVersionCapture(connId, owner, kind, name, res.ddl, "baseline");
                     }
-                  } else if (res.error.code === SESSION_LOST) {
+                  } else if (res.kind === "unsupported") {
+                    detailError = "DDL not available for this source";
+                  } else if (res.code === SESSION_LOST) {
                     sessionLost = true;
-                  } else if (/ORA-31603/.test(res.error.message)) {
+                  } else if (/ORA-31603/.test(res.error)) {
                     detailError = `DDL not available for ${owner}.${name} — Oracle built-in objects cannot be exported via DBMS_METADATA.`;
                   } else {
-                    detailError = `Failed to load DDL: ${res.error.message}`;
+                    detailError = `Failed to load DDL: ${res.error}`;
                   }
                 } finally {
                   if (ddlLoading?.owner === owner && ddlLoading?.name === name) ddlLoading = null;
@@ -1018,13 +1000,15 @@
         <div class="panel-wrap" style="width: {chatWidth}px; min-width: 240px; max-width: 620px;">
           <SheepChat
             context={{
-              currentSchema: info.currentSchema,
+              currentSchema: info?.currentSchema ?? source.meta.displayName,
               selectedOwner: selected?.owner,
               selectedName: selected?.name,
               selectedKind: selected?.kind,
               activeSql: sqlEditor.active?.sql ?? undefined,
               schemaObjects: schemaSnapshot,
             }}
+            connectionEnv={meta?.env ?? null}
+            connectionName={meta?.name ?? source.meta.displayName}
             onClose={() => showChat = false}
             pendingMessage={chatPendingMessage}
             {analyzePayload}
@@ -1043,12 +1027,12 @@
       onAnalyze={handleAnalyze}
       {completionSchema}
       {getColumns}
-      env={meta.env}
-      connectionName={meta.name}
+      env={meta?.env}
+      connectionName={meta?.name}
       connectionUser={info?.user ?? null}
       connectionService={info?.serviceName ?? null}
       connectionVersion={info?.serverVersion ?? null}
-      isProductionLocked={meta.psdpmMode ?? (meta.env === "prod" || meta.env === "staging")}
+      isProductionLocked={meta?.psdpmMode ?? (meta?.env === "prod" || meta?.env === "staging")}
     />
   </div>
   {#if showPalette}
@@ -1097,7 +1081,7 @@
       onEnableSchema={async () => {
         const res = await ordsEnableSchema();
         if (!res.ok) {
-          alert("Failed to enable schema: " + res.error.message);
+          toasts.error("Failed to enable schema: " + res.error.message);
           return;
         }
         await ordsStore.refresh();
@@ -1145,7 +1129,7 @@
   {/if}
   {#if operationsPanel.isOpen}
     <div class="activity-ledger-wrap">
-      <OperationsPanel onClose={() => operationsPanel.close()} connectionEnv={meta?.env ?? ""} />
+      <OperationsPanel onClose={() => operationsPanel.close()} />
     </div>
   {:else}
     <button

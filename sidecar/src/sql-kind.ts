@@ -140,31 +140,6 @@ export function isTruncateSql(sql: string): boolean {
   return stripLeadingComments(sql).trimStart().toUpperCase().startsWith("TRUNCATE ");
 }
 
-/** Risk level for DDL statements, used by the DDL confirmation gate (Item #1E). */
-export type DdlRiskLevel = "destructive_ddl" | "ddl" | "comment";
-
-const _DESTRUCTIVE_DDL_PATTERNS: readonly RegExp[] = [
-  /^\s*DROP\s+/i,
-  /^\s*TRUNCATE\s+/i,
-  /^\s*ALTER\s+TABLE\b[\s\S]*?\bDROP\s+COLUMN\b/i,
-  /^\s*ALTER\s+TABLE\b[\s\S]*?\bDROP\s+CONSTRAINT\b/i,
-  /^\s*ALTER\s+TABLE\b[\s\S]*?\bDROP\s+PARTITION\b/i,
-];
-
-const _COMMENT_DDL_PATTERN = /^\s*COMMENT\s+ON\b/i;
-
-/**
- * Sub-classifies a statement already known to be DDL (classifySql returns "ddl").
- * Callers MUST check classifySql() first — passing non-DDL SQL here is undefined behaviour.
- * Returns "comment" for COMMENT ON, "destructive_ddl" for DROP/TRUNCATE/ALTER...DROP,
- * "ddl" for CREATE/ALTER(non-drop)/GRANT/REVOKE/RENAME.
- */
-export function classifyDdl(sql: string): DdlRiskLevel {
-  if (_COMMENT_DDL_PATTERN.test(sql)) return "comment";
-  if (_DESTRUCTIVE_DDL_PATTERNS.some((p) => p.test(sql))) return "destructive_ddl";
-  return "ddl";
-}
-
 /**
  * Extract the primary target table from a DML statement as UPPERCASE "SCHEMA.TABLE" or "TABLE".
  * Returns empty string when unparseable. Used by the unsafe-DML enforcement layer

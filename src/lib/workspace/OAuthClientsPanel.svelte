@@ -34,6 +34,32 @@
 
   let revokingName = $state<string | null>(null);
 
+  // Tauri 2's WebView blocks window.confirm() — render an inline alertdialog
+  // instead so the destructive action doesn't silently auto-cancel.
+  let pendingRevokeName = $state<string | null>(null);
+
+  function requestRevoke(name: string) {
+    pendingRevokeName = name;
+  }
+
+  function cancelRevoke() {
+    pendingRevokeName = null;
+  }
+
+  async function confirmRevoke() {
+    const name = pendingRevokeName;
+    pendingRevokeName = null;
+    if (!name) return;
+    revokingName = name;
+    const res = await ordsClientsRevoke(name);
+    revokingName = null;
+    if (res.ok) {
+      await load();
+    } else {
+      error = res.error.message;
+    }
+  }
+
   async function load() {
     loading = true;
     error = null;
@@ -74,6 +100,7 @@
     }
   }
 
+
   async function handleRevoke(name: string) {
     if (!confirm(`Revoke client "${name}"? This action is irreversible.`)) return;
     revokingName = name;
@@ -91,10 +118,19 @@
   }
 </script>
 
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && pendingRevokeName) {
+      e.stopPropagation();
+      cancelRevoke();
+    }
+  }}
+/>
+
 <div
   class="modal-backdrop"
   onclick={onClose}
-  onkeydown={(e) => e.key === "Escape" && onClose()}
+  onkeydown={(e) => e.key === "Escape" && !pendingRevokeName && onClose()}
   role="presentation"
 >
   <div
@@ -181,10 +217,10 @@
                 <td>
                   <button
                     class="btn small danger"
-                    onclick={() => void handleRevoke(c.name)}
+                    onclick={() => requestRevoke(c.name)}
                     disabled={revokingName === c.name}
                   >
-                    {revokingName === c.name ? "…" : "Revogar"}
+                    {revokingName === c.name ? "…" : "Revoke"}
                   </button>
                 </td>
               </tr>
@@ -195,11 +231,24 @@
     </div>
   </div>
 
+  {#if pendingRevokeName}
+    <div class="confirm-modal" role="alertdialog" aria-modal="true" aria-label="Confirm revoke">
+      <div class="confirm-card">
+        <h3>Revoke OAuth client "{pendingRevokeName}"?</h3>
+        <p class="confirm-text">This action cannot be undone. Applications using this client will lose access immediately.</p>
+        <div class="confirm-actions">
+          <button type="button" class="btn-cancel" onclick={cancelRevoke}>Cancel</button>
+          <button type="button" class="btn-confirm" onclick={() => void confirmRevoke()}>Revoke</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if createdSecret}
     <div class="secret-modal" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" tabindex="-1">
       <div class="secret-card">
-        <h3>Client criado: {createdSecret.name}</h3>
-        <p class="secret-warn">⚠ <strong>Salve agora.</strong> Não conseguiremos mostrar o secret novamente.</p>
+        <h3>Client created: {createdSecret.name}</h3>
+        <p class="secret-warn">⚠ <strong>Save now.</strong> We will not be able to show the secret again.</p>
         <div class="cred-row">
           <span class="cred-label">Client ID:</span>
           <code class="cred-value">{createdSecret.clientId}</code>
@@ -211,7 +260,7 @@
           <button class="btn small" onclick={() => copyToClipboard(createdSecret!.clientSecret)}>📋</button>
         </div>
         <div class="form-actions">
-          <button class="btn primary" onclick={() => createdSecret = null}>Já salvei</button>
+          <button class="btn primary" onclick={() => createdSecret = null}>Done</button>
         </div>
       </div>
     </div>
@@ -322,4 +371,46 @@
     font-size: 10.5px; color: var(--text-primary); word-break: break-all;
   }
   .cred-value.secret { color: #f5a08a; font-weight: 600; }
+
+  .confirm-modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center; z-index: 1100;
+  }
+  .confirm-card {
+    background: var(--bg-surface); border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 8px;
+    padding: 20px; max-width: 480px; width: 90vw;
+  }
+  .confirm-card h3 { margin: 0 0 10px; font-size: 14px; color: var(--text-primary); }
+  .confirm-text {
+    margin: 0 0 14px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.45;
+  }
+  .confirm-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+  .btn-cancel {
+    background: transparent;
+    color: var(--text-muted);
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: "Inter", -apple-system, system-ui, sans-serif;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .btn-confirm {
+    background: rgba(239, 68, 68, 0.85);
+    color: white;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-family: "Inter", -apple-system, system-ui, sans-serif;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .btn-confirm:hover { background: rgba(239, 68, 68, 1); }
 </style>

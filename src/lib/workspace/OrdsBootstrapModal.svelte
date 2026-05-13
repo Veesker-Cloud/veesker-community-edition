@@ -52,32 +52,32 @@
   </div>
   <div class="panel-body">
     {#if variant === "not-installed"}
-      <p class="label-warn">ORDS não detectado</p>
-      <p class="hint">Peça ao DBA para executar:</p>
+      <p class="label-warn">ORDS not detected</p>
+      <p class="hint">Ask the DBA to run:</p>
       <pre class="cmd">@$ORACLE_HOME/ords/install.sql</pre>
       <p class="hint">
-        <a href="https://docs.oracle.com/en/database/oracle/oracle-rest-data-services/" target="_blank" rel="noopener">Documentação oficial</a>
+        <a href="https://docs.oracle.com/en/database/oracle/oracle-rest-data-services/" target="_blank" rel="noopener">Official documentation</a>
       </p>
     {:else if variant === "no-access"}
-      <p class="label-warn">Sem acesso ao ORDS</p>
+      <p class="label-warn">No access to ORDS</p>
       <p class="hint">User <code>{schemaName}</code> needs the grant:</p>
       <pre class="cmd">GRANT ORDS_ADMINISTRATOR_ROLE TO {schemaName};</pre>
     {:else if variant === "schema-disabled"}
-      <p class="label-warn">Schema não habilitado</p>
+      <p class="label-warn">Schema not enabled</p>
       <p class="hint">Schema <code>{schemaName}</code> must be enabled for ORDS.</p>
       <button class="primary-btn" onclick={() => void handleEnable()} disabled={enabling}>
-        {enabling ? "Habilitando…" : "Habilitar agora"}
+        {enabling ? "Enabling…" : "Enable now"}
       </button>
     {:else if variant === "no-privilege"}
-      <p class="label-warn">Privilégio insuficiente</p>
-      <p class="hint">Grant necessário (executar como SYS):</p>
+      <p class="label-warn">Insufficient privilege</p>
+      <p class="hint">Required grant (run as SYS):</p>
       <pre class="cmd">GRANT ORDS_ADMINISTRATOR_ROLE TO {schemaName};</pre>
     {:else if variant === "no-url"}
-      <p class="label-warn">URL do ORDS não detectada</p>
+      <p class="label-warn">ORDS URL not detected</p>
       <input
         class="url-input"
         type="text"
-        placeholder="https://servidor:8443/ords"
+        placeholder="https://server:8443/ords"
         bind:value={baseUrlInput}
         onkeydown={(e) => e.key === "Enter" && handleSetUrl()}
       />
@@ -85,7 +85,7 @@
         Save
       </button>
     {:else}
-      <p class="label-ok">ORDS {result.version ?? ""} configurado.</p>
+      <p class="label-ok">ORDS {result.version ?? ""} configured.</p>
     {/if}
   </div>
 </div>

@@ -40,8 +40,39 @@
     pendingMessage?: string;
     analyzePayload?: AnalyzePayload | null;
     onChartAdded?: () => void;
+    // PROD-001 (audit 2026-04-30): when env='prod', AI calls are gated behind
+    // a per-session unlock to prevent accidental data egress to Anthropic.
+    connectionEnv?: "local" | "dev" | "staging" | "prod" | null;
+    connectionName?: string;
   };
-  let { context, onClose, pendingMessage = "", analyzePayload = null, onChartAdded }: Props = $props();
+  let {
+    context,
+    onClose,
+    pendingMessage = "",
+    analyzePayload = null,
+    onChartAdded,
+    connectionEnv = null,
+    connectionName = "this connection",
+  }: Props = $props();
+
+  // PROD-001: per-session unlock state. Reset on every component mount
+  // (a new chat session = a new acknowledgment).
+  let prodAiUnlocked = $state(false);
+  let showProdUnlockModal = $state(false);
+  let prodUnlockTyped = $state("");
+  const isProdConn = $derived(connectionEnv === "prod");
+  const aiAllowed = $derived(!isProdConn || prodAiUnlocked);
+
+  function unlockProdAi() {
+    if (prodUnlockTyped.trim() !== connectionName) return;
+    prodAiUnlocked = true;
+    showProdUnlockModal = false;
+    prodUnlockTyped = "";
+  }
+  function cancelProdUnlock() {
+    showProdUnlockModal = false;
+    prodUnlockTyped = "";
+  }
 
   let messages = $state<ChatMessage[]>([]);
   let input = $state("");
@@ -317,6 +348,13 @@
     const text = input.trim();
     if (!text || loading) return;
 
+    // PROD-001: open the unlock modal instead of sending when env='prod'
+    // and the user hasn't acknowledged this session yet.
+    if (isProdConn && !prodAiUnlocked) {
+      showProdUnlockModal = true;
+      return;
+    }
+
     input = "";
     if (inputEl) { inputEl.style.height = "auto"; }
     error = null;
@@ -335,6 +373,7 @@
       apiKey,
       messages: messages.map(({ role, content }) => ({ role, content })),
       context,
+      acknowledgeProdAi: prodAiUnlocked,
     });
     loading = false;
 
@@ -557,6 +596,56 @@
 {/if}
 {#if showLoginModal}
   <LoginModal onClose={() => { showLoginModal = false; }} />
+{/if}
+
+<!-- PROD-001 (audit 2026-04-30): per-session unlock modal for AI on prod connections. -->
+{#if showProdUnlockModal}
+  <div class="prod-modal-backdrop" role="presentation" onclick={cancelProdUnlock}>
+    <div
+      class="prod-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="prod-modal-title"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <div class="prod-modal-icon" aria-hidden="true">⚠️</div>
+      <h2 id="prod-modal-title">Production AI access</h2>
+      <p class="prod-modal-lead">
+        This connection is tagged <code>prod</code>. AI tools may read any data
+        your Oracle user has access to and send it to <strong>Anthropic's API</strong>
+        for processing.
+      </p>
+      <p class="prod-modal-detail">
+        Anthropic's data handling policy:
+        <a href="https://www.anthropic.com/legal/aup" target="_blank" rel="noopener noreferrer">
+          anthropic.com/legal/aup
+        </a>
+      </p>
+      <p class="prod-modal-confirm">
+        Type <code>{connectionName}</code> to enable AI for this session:
+      </p>
+      <input
+        class="prod-modal-input"
+        type="text"
+        bind:value={prodUnlockTyped}
+        onkeydown={(e) => { if (e.key === "Enter") unlockProdAi(); if (e.key === "Escape") cancelProdUnlock(); }}
+        placeholder={connectionName}
+        autofocus
+      />
+      <div class="prod-modal-actions">
+        <button class="prod-btn-cancel" onclick={cancelProdUnlock}>Cancel</button>
+        <button
+          class="prod-btn-confirm"
+          disabled={prodUnlockTyped.trim() !== connectionName}
+          onclick={unlockProdAi}
+        >Enable AI for this session</button>
+      </div>
+      <p class="prod-modal-note">
+        This unlock applies only to the current chat session. It resets when
+        the chat panel closes or the app restarts.
+      </p>
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -1015,4 +1104,68 @@
   }
   :global([data-tier="cloud"]) .ycol-submit { background: #2bb4ee; }
   :global([data-tier="cloud"]) .ycol-submit:hover:not(:disabled) { background: #40bdee; }
+
+  /* PROD-001 — production AI unlock modal */
+  .prod-modal-backdrop {
+    position: fixed; inset: 0; z-index: 600;
+    background: rgba(0, 0, 0, 0.66);
+    backdrop-filter: blur(3px);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .prod-modal {
+    background: var(--bg-surface-raised); border: 1px solid #5a1a1a;
+    border-radius: 12px; padding: 1.75rem 1.5rem;
+    width: 460px; max-width: 92vw;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+    display: flex; flex-direction: column; gap: 0.85rem;
+  }
+  .prod-modal-icon { font-size: 28px; align-self: center; }
+  .prod-modal h2 {
+    margin: 0; font-family: "Space Grotesk", sans-serif;
+    font-size: 17px; font-weight: 600; color: var(--text-primary);
+    text-align: center;
+  }
+  .prod-modal-lead {
+    font-size: 13px; color: var(--text-secondary); line-height: 1.55; margin: 0;
+  }
+  .prod-modal-lead strong { color: var(--text-primary); }
+  .prod-modal-lead code,
+  .prod-modal-confirm code {
+    font-family: "JetBrains Mono", monospace; font-size: 11.5px;
+    color: #e74c3c; background: rgba(231, 76, 60, 0.1);
+    padding: 1px 5px; border-radius: 3px;
+  }
+  .prod-modal-detail { font-size: 12px; color: var(--text-muted); margin: 0; }
+  .prod-modal-detail a { color: #4a9eda; text-decoration: underline; }
+  .prod-modal-confirm { font-size: 12px; color: var(--text-muted); margin: 0; }
+  .prod-modal-input {
+    background: var(--bg-surface); border: 1px solid var(--border);
+    color: var(--text-primary); font-family: "JetBrains Mono", monospace;
+    font-size: 13px; padding: 0.55rem 0.75rem;
+    border-radius: 6px; outline: none; width: 100%; box-sizing: border-box;
+    transition: border-color 0.15s;
+  }
+  .prod-modal-input:focus { border-color: #e74c3c; }
+  .prod-modal-actions {
+    display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.25rem;
+  }
+  .prod-btn-cancel {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text-secondary); font-family: "Space Grotesk", sans-serif;
+    font-size: 13px; font-weight: 500; padding: 0.5rem 1rem;
+    border-radius: 6px; cursor: pointer; transition: background 0.12s;
+  }
+  .prod-btn-cancel:hover { background: var(--row-hover); color: var(--text-primary); }
+  .prod-btn-confirm {
+    background: #7f1d1d; border: 1px solid #991b1b;
+    color: #fca5a5; font-family: "Space Grotesk", sans-serif;
+    font-size: 13px; font-weight: 600; padding: 0.5rem 1.1rem;
+    border-radius: 6px; cursor: pointer; transition: background 0.12s, opacity 0.12s;
+  }
+  .prod-btn-confirm:hover:not(:disabled) { background: #991b1b; }
+  .prod-btn-confirm:disabled { opacity: 0.35; cursor: default; }
+  .prod-modal-note {
+    font-size: 11px; color: var(--text-muted); text-align: center;
+    margin: 0.25rem 0 0; font-style: italic;
+  }
 </style>

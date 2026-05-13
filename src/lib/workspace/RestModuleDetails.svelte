@@ -45,7 +45,7 @@
 
 <div class="rest-details">
   {#if loading}
-    <div class="state-msg">Carregando módulo…</div>
+    <div class="state-msg">Loading module…</div>
   {:else if error}
     <div class="state-msg error">{error}</div>
   {:else if detail}
@@ -75,13 +75,13 @@
     <div class="section">
       <h3>Templates ({detail.templates.length})</h3>
       {#if detail.templates.length === 0}
-        <div class="empty">Este módulo não tem templates definidos.</div>
+        <div class="empty">This module has no templates defined.</div>
       {/if}
       {#each detail.templates as tpl (tpl.uriTemplate)}
         <div class="template">
           <div class="tpl-uri"><code>{tpl.uriTemplate || "/"}</code></div>
           {#if tpl.handlers.length === 0}
-            <div class="empty sub">Nenhum handler neste template.</div>
+            <div class="empty sub">No handlers for this template.</div>
           {/if}
           {#each tpl.handlers as h (tpl.uriTemplate + "-" + h.method)}
             {@const key = `${tpl.uriTemplate}-${h.method}`}

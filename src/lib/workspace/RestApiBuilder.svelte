@@ -48,7 +48,7 @@
   let sourceObject = $state<{ owner: string; name: string; kind: string } | null>(
     initialObject ? { ...initialObject, kind: (initialKind ?? "TABLE").toUpperCase() } : null
   );
-  let sourceSql = $state("SELECT col1, col2 FROM tabela WHERE id = :id");
+  let sourceSql = $state("SELECT col1, col2 FROM table_name WHERE id = :id");
   let operations = $state<string[]>(["GET", "POST", "PUT", "DELETE", "GET_BY_ID"]);
   let moduleMode = $state<"new" | "existing">("new");
   let moduleName = $state("");
@@ -203,11 +203,11 @@
   const previewUrls = $derived.by(() => {
     if (endpointType !== "auto-crud" || !sourceObject) return [];
     const out: { method: string; path: string; label: string }[] = [];
-    if (operations.includes("GET")) out.push({ method: "GET", path: basePath, label: "lista" });
-    if (operations.includes("GET_BY_ID")) out.push({ method: "GET", path: basePath + ":id/", label: "detalhe" });
+    if (operations.includes("GET")) out.push({ method: "GET", path: basePath, label: "list" });
+    if (operations.includes("GET_BY_ID")) out.push({ method: "GET", path: basePath + ":id/", label: "detail" });
     if (operations.includes("POST")) out.push({ method: "POST", path: basePath, label: "create" });
     if (operations.includes("PUT")) out.push({ method: "PUT", path: basePath + ":id/", label: "update" });
-    if (operations.includes("DELETE")) out.push({ method: "DELETE", path: basePath + ":id/", label: "remover" });
+    if (operations.includes("DELETE")) out.push({ method: "DELETE", path: basePath + ":id/", label: "delete" });
     return out;
   });
 </script>
@@ -229,7 +229,7 @@
     <div class="modal-head">
       <span class="title">Create REST Endpoint</span>
       <div class="head-actions">
-        <button class="sheep-btn" onclick={() => showSheepOverlay = true} title="Descrever em linguagem natural">✨ Sheep</button>
+        <button class="sheep-btn" onclick={() => showSheepOverlay = true} title="Describe in natural language">✨ Sheep</button>
         <button class="close-btn" onclick={onCancel} aria-label="Close">✕</button>
       </div>
     </div>
@@ -240,23 +240,23 @@
           <div class="sheep-card">
             <div class="sheep-head">
               <img src="/veesker-sheep.png" class="sheep-icon" alt="" />
-              <span>Descreva o endpoint que você quer:</span>
+              <span>Describe the endpoint you want:</span>
               <button class="close-x" onclick={() => showSheepOverlay = false} aria-label="Close">✕</button>
             </div>
             <textarea
               class="sheep-input"
               bind:value={sheepDescription}
               rows="3"
-              placeholder="ex: API que lista funcionários ativos do departamento X..."
+              placeholder="e.g. API that lists active employees from department X..."
             ></textarea>
             {#if sheepError}<div class="sheep-error">{sheepError}</div>{/if}
             {#if sheepSuggestion}
               <div class="sheep-suggestion">
-                <strong>Sugestão:</strong> {sheepSuggestion.reasoning ?? ""}
+                <strong>Suggestion:</strong> {sheepSuggestion.reasoning ?? ""}
                 <pre class="suggestion-json">{JSON.stringify(sheepSuggestion, null, 2)}</pre>
                 <div class="sheep-actions">
-                  <button class="btn" onclick={() => { sheepSuggestion = null; }}>Tentar de novo</button>
-                  <button class="btn primary" onclick={applySuggestion}>Aplicar ao form</button>
+                  <button class="btn" onclick={() => { sheepSuggestion = null; }}>Try again</button>
+                  <button class="btn primary" onclick={applySuggestion}>Apply to form</button>
                 </div>
               </div>
             {:else}
@@ -267,7 +267,7 @@
                   onclick={() => void requestSuggestion()}
                   disabled={sheepLoading || !sheepDescription.trim()}
                 >
-                  {sheepLoading ? "Pensando…" : "Enviar"}
+                  {sheepLoading ? "Thinking…" : "Send"}
                 </button>
               </div>
             {/if}
@@ -275,7 +275,7 @@
         </div>
       {/if}
       <div class="row">
-        <span class="label">Tipo:</span>
+        <span class="label">Type:</span>
         <label class="radio"><input type="radio" bind:group={endpointType} value="auto-crud" /> Auto-CRUD</label>
         <label class="radio"><input type="radio" bind:group={endpointType} value="custom-sql" /> Custom SQL</label>
         <label class="radio"><input type="radio" bind:group={endpointType} value="procedure" /> Procedure/Function</label>
@@ -286,9 +286,9 @@
 
         {#if endpointType === "auto-crud"}
           <div class="row">
-            <span class="label">Tabela/View:</span>
+            <span class="label">Table/View:</span>
             <select class="input" bind:value={selectedObjectKey} onchange={onObjectChange}>
-              <option value="" disabled>Selecione…</option>
+              <option value="" disabled>Select…</option>
               <optgroup label="Tables">
                 {#each tablesList as t (t.name)}<option value={"TABLE:" + t.name}>{t.name}</option>{/each}
               </optgroup>
@@ -298,7 +298,7 @@
             </select>
           </div>
           <div class="row">
-            <span class="label">Operações:</span>
+            <span class="label">Operations:</span>
             <div class="ops">
               {#each ["GET", "POST", "PUT", "DELETE", "GET_BY_ID"] as op}
                 <label class="op-cb">
@@ -322,29 +322,29 @@
             class="sql-area"
             bind:value={sourceSql}
             rows="6"
-            placeholder="SELECT col1, col2 FROM tabela WHERE id = :id"
+            placeholder="SELECT col1, col2 FROM table_name WHERE id = :id"
           ></textarea>
           <div class="row">
-            <span class="label">Rota:</span>
+            <span class="label">Route:</span>
             <input class="input" bind:value={routePattern} placeholder="/by-id/:id" />
-            <span class="label" style="min-width: 60px">Método:</span>
+            <span class="label" style="min-width: 60px">Method:</span>
             <select class="input" bind:value={method} style="flex: 0 0 100px">
               <option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option>
             </select>
           </div>
           <div class="hint">
-            Bind variables no SQL: {detectedBinds.join(", ") || "(nenhuma)"}
+            Bind variables in SQL: {detectedBinds.join(", ") || "(none)"}
           </div>
           <div class="hint">
-            Path params na rota: {detectedPathParams.join(", ") || "(nenhum)"}
+            Path params in route: {detectedPathParams.join(", ") || "(none)"}
           </div>
         {/if}
 
         {#if endpointType === "procedure"}
           <div class="row">
-            <span class="label">Objeto:</span>
+            <span class="label">Object:</span>
             <select class="input" bind:value={selectedObjectKey} onchange={onObjectChange}>
-              <option value="" disabled>Selecione…</option>
+              <option value="" disabled>Select…</option>
               <optgroup label="Procedures">
                 {#each proceduresList as p (p.name)}<option value={"PROCEDURE:" + p.name}>{p.name}</option>{/each}
               </optgroup>
@@ -354,28 +354,28 @@
             </select>
           </div>
           <div class="row">
-            <span class="label">Rota:</span>
+            <span class="label">Route:</span>
             <input class="input" bind:value={routePattern} placeholder="/" />
-            <span class="label" style="min-width: 60px">Método:</span>
+            <span class="label" style="min-width: 60px">Method:</span>
             <select class="input" bind:value={method} style="flex: 0 0 100px">
               <option>POST</option><option>GET</option><option>PUT</option><option>DELETE</option>
             </select>
           </div>
           <div class="hint">
-            Os parâmetros IN da procedure/function virão do {method === "GET" ? "query string" : "body JSON"}.
-            OUT params e SYS_REFCURSOR vão para o response JSON.
+            IN parameters of the procedure/function will come from the {method === "GET" ? "query string" : "JSON body"}.
+            OUT params and SYS_REFCURSOR go to the JSON response.
           </div>
         {/if}
       </div>
 
       <div class="section">
-        <h3>Roteamento</h3>
+        <h3>Routing</h3>
         <div class="row">
           <label class="radio"><input type="radio" bind:group={moduleMode} value="new" /> New module:</label>
-          <input class="input" bind:value={moduleName} placeholder="meu-modulo" disabled={moduleMode !== "new"} />
+          <input class="input" bind:value={moduleName} placeholder="my-module" disabled={moduleMode !== "new"} />
         </div>
         <div class="row">
-          <label class="radio"><input type="radio" bind:group={moduleMode} value="existing" /> Módulo existente</label>
+          <label class="radio"><input type="radio" bind:group={moduleMode} value="existing" /> Existing module</label>
         </div>
         <div class="row">
           <span class="label">Base path:</span>
@@ -385,13 +385,13 @@
 
       <div class="section">
         <h3>Auth</h3>
-        <div class="row"><label class="radio"><input type="radio" bind:group={authMode} value="none" /> Público (sem auth)</label></div>
-        <div class="row"><label class="radio"><input type="radio" bind:group={authMode} value="role" /> Role do banco</label></div>
+        <div class="row"><label class="radio"><input type="radio" bind:group={authMode} value="none" /> Public (no auth)</label></div>
+        <div class="row"><label class="radio"><input type="radio" bind:group={authMode} value="role" /> Database role</label></div>
         {#if authMode === "role"}
           <div class="row" style="margin-left: 22px">
             <span class="label">Role:</span>
             <select class="input" bind:value={authRole}>
-              <option value={null} disabled>Selecione…</option>
+              <option value={null} disabled>Select…</option>
               {#each rolesList as r (r)}<option value={r}>{r}</option>{/each}
             </select>
           </div>
@@ -406,7 +406,7 @@
 
       {#if endpointType === "auto-crud" && sourceObject && previewUrls.length > 0}
         <div class="section">
-          <h3>Preview da URL</h3>
+          <h3>URL Preview</h3>
           <div class="urls">
             {#each previewUrls as u}
               <div class="url-row">
@@ -426,7 +426,7 @@
         class="btn primary"
         onclick={handlePreview}
         disabled={!sourceObject && endpointType !== "custom-sql"}
-      >Visualizar SQL →</button>
+      >Preview SQL →</button>
     </div>
   </div>
 </div>

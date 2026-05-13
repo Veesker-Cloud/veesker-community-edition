@@ -52,34 +52,34 @@
     tabindex="-1"
   >
     <div class="head">
-      <span class="title">Confirmar deploy</span>
+      <span class="title">Confirm deploy</span>
       <button class="close" onclick={onCancel} disabled={applying} aria-label="Close">✕</button>
     </div>
 
     <div class="body">
       <div class="conn">
-        Será executado contra: <strong>{connectionLabel}</strong>
+        Will run against: <strong>{connectionLabel}</strong>
       </div>
       <pre class="sql">{sql}</pre>
       {#if stmtCount > 0}
         <div class="warn">
-          ⚠ Vai chamar {stmtCount} {stmtCount === 1 ? "rotina" : "rotinas"} <code>ORDS.*</code>
-          {#if hasCommit}e fazer <code>COMMIT</code>{/if}.
+          ⚠ Will call {stmtCount} <code>ORDS.*</code> {stmtCount === 1 ? "routine" : "routines"}
+          {#if hasCommit}and issue a <code>COMMIT</code>{/if}.
         </div>
       {/if}
       {#if error}
         <div class="error">
-          <strong>Erro:</strong> {error}
+          <strong>Error:</strong> {error}
         </div>
       {/if}
     </div>
 
     <div class="foot">
-      <button class="btn" onclick={onCopyToTab} disabled={applying}>Copiar para SQL tab</button>
+      <button class="btn" onclick={onCopyToTab} disabled={applying}>Copy to SQL tab</button>
       <span class="spacer"></span>
-      <button class="btn" onclick={onCancel} disabled={applying}>Cancelar</button>
+      <button class="btn" onclick={onCancel} disabled={applying}>Cancel</button>
       <button class="btn primary" onclick={() => void handleApply()} disabled={applying}>
-        {applying ? "Aplicando…" : "Aplicar"}
+        {applying ? "Applying…" : "Apply"}
       </button>
     </div>
   </div>

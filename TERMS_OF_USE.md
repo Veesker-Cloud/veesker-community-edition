@@ -61,6 +61,29 @@ The unlock applies only to the current chat session and resets when the chat pan
 
 Once unlocked, the same data flow as section 6 applies: query content (including any data the user's Oracle account can read) may be sent to Anthropic for processing. Anthropic's data handling is governed by their [Acceptable Use Policy](https://www.anthropic.com/legal/aup) and [Privacy Policy](https://www.anthropic.com/legal/privacy).
 
+Veesker does not store AI prompts or responses on its own servers.
+
+## 6.2 Cloud audit logging (Cloud Edition only)
+
+When the Cloud Audit feature is enabled (Veesker Cloud subscription), Veesker uploads metadata about queries executed via the desktop application to Veesker Cloud's secure audit log. Two modes are available:
+
+**Metadata-only (default for production-tagged connections):**
+- Sent: timestamp, connection name, statement type (SELECT / INSERT / UPDATE / DDL / etc.), row count, duration, error codes
+- **NOT sent: SQL text, query parameters, query results**
+- Use case: compliance audit trail without data exposure
+
+**Full SQL with redaction (default for non-production connections):**
+- Sent: redacted SQL text + all metadata-only fields
+- Redacted patterns: `IDENTIFIED BY '...'`, `IDENTIFIED BY VALUES '...'`, `IDENTIFIED GLOBALLY AS '...'`, `PASSWORD '...'`, `BFILENAME(...)`, `USING '...'`. Replaced with `***REDACTED***`.
+- **NOT redacted automatically: PII (emails, names), PHI, PCI, application secrets in SQL literals.** Use this mode only when you have reviewed your queries for sensitive data.
+- NOT sent: query results
+
+The mode is determined automatically by the connection's `env` tag and can be overridden per connection in the audit settings.
+
+Existing audit log entries are not retroactively redacted or downgraded when settings change.
+
+You can disable Cloud Audit at any time. When disabled, no SQL or metadata is uploaded.
+
 ## 7. Database operations
 
 Veesker can execute SQL, PL/SQL, DDL, and DML statements directly against connected Oracle databases, including operations that modify or delete data. Veesker provides safety mechanisms (DML confirmation modal, audit logging, preview before apply for ORDS), but **the user is responsible for the consequences of any operation executed**.

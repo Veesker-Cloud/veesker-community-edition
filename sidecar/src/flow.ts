@@ -150,7 +150,7 @@ export async function traceProc(p: TraceProcParams): Promise<TraceResult> {
     const paramMeta = (desc.params ?? []) as Array<{ name: string; dataType: string; direction: string }>;
 
     const ORACLE_IDENT_RE = /^[A-Za-z][A-Za-z0-9_$#]{0,127}$/;
-    const binds: Record<string, oracledb.BindDefinition> = {};
+    const binds: Record<string, oracledb.BindParameter> = {};
     const callArgs: string[] = [];
     const cursorBindNames: string[] = [];
 
@@ -321,24 +321,25 @@ async function getSourceLine(
   line: number,
 ): Promise<string> {
   const key = `${owner}.${objectName}`;
-  let lines = cache.get(key);
+  let lines: string[] | undefined = cache.get(key);
   if (!lines) {
     try {
-      const r = await conn.execute<{ TEXT: string }>(
+      const r = await conn.execute(
         `SELECT text FROM all_source WHERE owner = :o AND name = :n AND type IN ('PROCEDURE','FUNCTION','PACKAGE','PACKAGE BODY','TRIGGER','TYPE','TYPE BODY') ORDER BY line`,
         { o: owner.toUpperCase(), n: objectName.toUpperCase() },
         { outFormat: 4002 /* OUT_FORMAT_OBJECT */ },
       );
-      lines = (r.rows ?? []).map((row: any) => (row.TEXT ?? "").replace(/\r?\n$/, ""));
+      lines = ((r.rows ?? []) as any[]).map((row: any) => String(row.TEXT ?? "").replace(/\r?\n$/, ""));
       cache.set(key, lines);
     } catch {
       lines = [];
       cache.set(key, lines);
     }
   }
+  const safeLines: string[] = lines ?? [];
   // line numbers are 1-based; line 0 happens for some Oracle anonymous frames
-  if (line < 1 || line > lines.length) return "";
-  return lines[line - 1] ?? "";
+  if (line < 1 || line > safeLines.length) return "";
+  return safeLines[line - 1] ?? "";
 }
 
 import type { ExplainNodeEvent, TraceSqlParams } from "./flow-types";

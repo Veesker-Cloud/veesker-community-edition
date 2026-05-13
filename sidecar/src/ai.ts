@@ -5,6 +5,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { tableDescribe, objectDdl, objectsList, queryExecute } from "./oracle";
 import { getSessionSafety } from "./state";
+import { maskRowsPii, normalizeSqlLiterals } from "./pii";
 import {
   requestApproval as defaultRequestApproval,
   type ApprovalDecision,
@@ -273,23 +274,28 @@ export async function executeTool(
         const res = await queryExecute({
           sql: sql.endsWith(";") ? sql.slice(0, -1) : sql,
           requestId,
+          // L2.1: tag the origin so the sidecar PSDPM gate can identify this
+          // call as AI-initiated. Belt-and-braces with the early return above.
+          origin: "ai_tool",
         });
         if ("results" in res) {
           const first = (res as any).results?.[0];
-          return JSON.stringify({ columns: first?.columns, rows: first?.rows?.slice(0, 50) }, null, 2);
+          const rows = first?.rows?.slice(0, 50) ?? [];
+          return JSON.stringify({ columns: first?.columns, rows: maskRowsPii(rows) }, null, 2);
         }
-        return JSON.stringify({ columns: (res as any).columns, rows: (res as any).rows?.slice(0, 50) }, null, 2);
+        const rows = (res as any).rows?.slice(0, 50) ?? [];
+        return JSON.stringify({ columns: (res as any).columns, rows: maskRowsPii(rows) }, null, 2);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         return `Error executing query: ${msg}`;
       }
     }
     case "get_ddl": {
-      const res = await objectDdl({ owner: input.owner, kind: input.kind as any, name: input.name });
+      const res = await objectDdl({ owner: input.owner, objectType: input.kind as any, objectName: input.name });
       return (res as any).ddl ?? JSON.stringify(res);
     }
     case "list_objects": {
-      const items = await objectsList({ owner: input.schema, kind: input.kind as any });
+      const items = await objectsList({ owner: input.schema, type: input.kind as any });
       return JSON.stringify(items.objects.map((o) => o.name), null, 2);
     }
     default:
@@ -312,7 +318,7 @@ export function buildSystem(ctx: AiContext, tools: boolean): string {
   }
   // Active SQL always included — user is asking about what's on screen
   if (ctx.activeSql?.trim()) {
-    const safeSql = ctx.activeSql.slice(0, 800).replace(/`{3,}/g, "~~~");
+    const safeSql = normalizeSqlLiterals(ctx.activeSql.slice(0, 800)).replace(/`{3,}/g, "~~~");
     ctxLines.push(`Active SQL in editor:\n\`\`\`sql\n${safeSql}\n\`\`\``);
   }
 
@@ -384,6 +390,7 @@ export async function aiChat(params: AiChatParams, tools: boolean = false): Prom
   // PROD-001 (audit 2026-04-30): refuse AI calls on prod-tagged connections
   // unless the caller explicitly acknowledged the data-flow disclaimer for
   // this session. This is the sidecar-level gate; the UI also gates earlier.
+  // Both layers exist so a compromised renderer can't bypass the protection.
   const safety = getSessionSafety();
   if (safety.env === "prod" && !params.acknowledgeProdAi) {
     throw {

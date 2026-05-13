@@ -22,32 +22,48 @@
   let subPolling = false;
   let authToken = $state("");
 
+  // CRITICAL-002 (audit 2026-04-30): nonce binds the polling client to the original sender.
+  // Generated client-side at session creation, sent with both /send and /poll, never appears
+  // in the email link. Even if attacker captures the magic-link URL, they cannot poll
+  // without this nonce. 32 bytes of random → base64url (43 chars).
+  function generateNonce(): string {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    return btoa(String.fromCharCode(...bytes))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=/g, "");
+  }
+
   async function sendLink() {
     if (!email.trim()) return;
     const sessionId = crypto.randomUUID();
+    const nonce = generateNonce();
     try {
       const res = await fetch("https://api.veesker.cloud/v1/auth/magic-link/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim(), session_id: sessionId }),
+        body: JSON.stringify({ email: email.trim(), session_id: sessionId, nonce }),
       });
       if (!res.ok) throw new Error("send_failed");
       authState = "waiting";
-      startPoll(sessionId);
+      startPoll(sessionId, nonce);
     } catch {
       authState = "error";
       errorMessage = "Failed to send email. Please try again.";
     }
   }
 
-  async function startPoll(sessionId: string) {
+  async function startPoll(sessionId: string, nonce: string) {
     polling = true;
     const deadline = Date.now() + 5 * 60 * 1000;
     while (polling && Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 3000));
       if (!polling) break;
       try {
-        const res = await fetch(`https://api.veesker.cloud/v1/auth/poll/${sessionId}`);
+        const res = await fetch(
+          `https://api.veesker.cloud/v1/auth/poll/${sessionId}?nonce=${encodeURIComponent(nonce)}`,
+        );
         const data = await res.json();
         if (data.status === "authenticated") {
           await invoke("auth_token_set", { token: data.token });
@@ -132,6 +148,7 @@
   onDestroy(() => { polling = false; subPolling = false; });
 </script>
 
+<svelte:window onkeydown={(e) => { if (e.key === "Escape") handleClose(); }} />
 <div class="backdrop" role="presentation" onclick={handleClose}>
   <div class="modal" role="dialog" aria-modal="true" onclick={(e) => e.stopPropagation()}>
     <button class="close-btn" aria-label="Close" onclick={handleClose}>

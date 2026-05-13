@@ -1,10 +1,15 @@
 import { describe, expect, test, beforeEach, mock } from "bun:test";
-import { setSession, clearSession, setSessionSafety } from "../src/state";
-import { queryExecute } from "../src/oracle";
+import { setSession, clearSession } from "../src/state";
+import { queryExecute, type QueryResult, type MultiQueryResult } from "../src/oracle";
 import { NO_ACTIVE_SESSION, ORACLE_ERR, RpcCodedError } from "../src/errors";
 
 function fakeConn(executeImpl: (...a: any[]) => any) {
   return { execute: mock(executeImpl) } as any;
+}
+
+function asSingle(r: QueryResult | MultiQueryResult): QueryResult {
+  if ("multi" in r) throw new Error("expected single QueryResult, got MultiQueryResult");
+  return r;
 }
 
 describe("queryExecute", () => {
@@ -25,7 +30,7 @@ describe("queryExecute", () => {
       rows: [[1, "Alice"], [2, "Bob"]],
     }));
     setSession(conn, "SCOTT");
-    const r = await queryExecute({ sql: "SELECT id, name FROM users" });
+    const r = asSingle(await queryExecute({ sql: "SELECT id, name FROM users" }));
     expect(r.columns).toEqual([
       { name: "ID", dataType: "NUMBER(10)" },
       { name: "NAME", dataType: "VARCHAR2(50)" },
@@ -42,7 +47,7 @@ describe("queryExecute", () => {
       rowsAffected: 3,
     }));
     setSession(conn, "SCOTT");
-    const r = await queryExecute({ sql: "UPDATE users SET name='X'" });
+    const r = asSingle(await queryExecute({ sql: "UPDATE users SET name='X'" }));
     expect(r.columns).toEqual([]);
     expect(r.rows).toEqual([]);
     expect(r.rowCount).toBe(3);
@@ -55,8 +60,7 @@ describe("queryExecute", () => {
       rowsAffected: undefined,
     }));
     setSession(conn, "SCOTT");
-    setSessionSafety({ env: "dev" });
-    const r = await queryExecute({ sql: "CREATE TABLE t (id NUMBER)" });
+    const r = asSingle(await queryExecute({ sql: "CREATE TABLE t (id NUMBER)" }));
     expect(r.rowCount).toBe(0);
   });
 
@@ -78,10 +82,10 @@ describe("queryExecute", () => {
       rows: [[vec]],
     }));
     setSession(conn, "SCOTT");
-    const r = await queryExecute({ sql: "SELECT emb FROM v" });
-    expect(Array.isArray(r.rows[0][0])).toBe(true);
-    expect((r.rows[0][0] as number[]).length).toBe(3);
-    expect((r.rows[0][0] as number[])[0]).toBeCloseTo(0.1, 5);
+    const r = asSingle(await queryExecute({ sql: "SELECT emb FROM v" }));
+    expect(Array.isArray(r.rows[0]![0])).toBe(true);
+    expect((r.rows[0]![0] as number[]).length).toBe(3);
+    expect((r.rows[0]![0] as number[])[0]).toBeCloseTo(0.1, 5);
   });
 
   test("throws ORACLE_ERR when driver rejects with ORA-message", async () => {
@@ -108,7 +112,7 @@ describe("queryExecute", () => {
       rows: [],
     }));
     setSession(conn, "SCOTT");
-    const r = await queryExecute({ sql: "SELECT * FROM t" });
+    const r = asSingle(await queryExecute({ sql: "SELECT * FROM t" }));
     expect(r.columns).toEqual([
       { name: "PRICE", dataType: "NUMBER(10,2)" },
       { name: "TS", dataType: "TIMESTAMP(6)" },

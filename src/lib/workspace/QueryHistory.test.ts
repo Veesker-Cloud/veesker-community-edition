@@ -149,13 +149,16 @@ describe("QueryHistory", () => {
     const entry = makeEntry({ id: 4, sql: "SELECT 1" });
     mockedHistoryList.mockResolvedValue({ ok: true, data: [entry] });
     mockedHistoryClear.mockResolvedValue({ ok: true, data: 1 });
-    vi.spyOn(window, "confirm").mockReturnValue(true);
 
     render(QueryHistory);
     await waitFor(() => expect(screen.getByText("✓")).toBeInTheDocument());
 
+    // QueryHistory uses an inline alertdialog (Tauri 2 blocks window.confirm).
+    // Open the dialog, then click the inner Clear button.
     const clearBtn = screen.getByRole("button", { name: /clear history/i });
     await fireEvent.click(clearBtn);
+    const confirmBtn = await screen.findByRole("button", { name: /^Clear$/i });
+    await fireEvent.click(confirmBtn);
 
     expect(mockedHistoryClear).toHaveBeenCalledWith("conn-1");
     await waitFor(() => {

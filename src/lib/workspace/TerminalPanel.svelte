@@ -10,6 +10,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import "@xterm/xterm/css/xterm.css";
+  import TerminalConfirmModal from "./TerminalConfirmModal.svelte";
 
   type Props = {
     onClose: () => void;
@@ -29,6 +30,61 @@
   let unlistenExit: UnlistenFn | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let dead = $state(false);
+  let confirmModalOpen = $state(false);
+  let pendingTerminalParams = $state<{ cols: number; rows: number } | null>(null);
+
+  async function startTerminal(cols: number, rows: number) {
+    if (!term || !host) return;
+    try {
+      termId = await invoke<string>("terminal_create", { cols, rows });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("user_confirmation_required")) {
+        pendingTerminalParams = { cols, rows };
+        confirmModalOpen = true;
+        return;
+      }
+      term.write(`\r\n\x1b[31mFailed to start terminal: ${msg}\x1b[0m\r\n`);
+      return;
+    }
+
+    unlistenData = await listen<string>(`terminal:data:${termId}`, (ev) => {
+      term?.write(ev.payload);
+    });
+
+    unlistenExit = await listen(`terminal:exit:${termId}`, () => {
+      dead = true;
+      term?.write("\r\n\x1b[2m[process exited — press any key to close]\x1b[0m\r\n");
+    });
+
+    term.onData((data) => {
+      if (dead) { onClose(); return; }
+      if (termId) invoke("terminal_write", { id: termId, data }).catch(() => {});
+    });
+
+    resizeObserver = new ResizeObserver(() => {
+      if (!host || host.clientWidth === 0) return;
+      fit?.fit();
+      if (term && termId) {
+        invoke("terminal_resize", { id: termId, cols: term.cols, rows: term.rows }).catch(() => {});
+      }
+    });
+    resizeObserver.observe(host);
+
+    term.focus();
+  }
+
+  async function onConfirmed() {
+    if (!pendingTerminalParams) return;
+    const { cols, rows } = pendingTerminalParams;
+    pendingTerminalParams = null;
+    try {
+      await startTerminal(cols, rows);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      term?.write(`\r\n\x1b[31mFailed to open terminal: ${msg}\x1b[0m\r\n`);
+    }
+  }
 
   onMount(async () => {
     if (!host) return;
@@ -70,38 +126,7 @@
     fit.fit();
 
     const { cols, rows } = term;
-
-    try {
-      termId = await invoke<string>("terminal_create", { cols, rows });
-    } catch (e) {
-      term.write(`\r\n\x1b[31mFailed to start terminal: ${e}\x1b[0m\r\n`);
-      return;
-    }
-
-    unlistenData = await listen<string>(`terminal:data:${termId}`, (ev) => {
-      term?.write(ev.payload);
-    });
-
-    unlistenExit = await listen(`terminal:exit:${termId}`, () => {
-      dead = true;
-      term?.write("\r\n\x1b[2m[process exited — press any key to close]\x1b[0m\r\n");
-    });
-
-    term.onData((data) => {
-      if (dead) { onClose(); return; }
-      if (termId) invoke("terminal_write", { id: termId, data }).catch(() => {});
-    });
-
-    resizeObserver = new ResizeObserver(() => {
-      if (!host || host.clientWidth === 0) return;
-      fit?.fit();
-      if (term && termId) {
-        invoke("terminal_resize", { id: termId, cols: term.cols, rows: term.rows }).catch(() => {});
-      }
-    });
-    resizeObserver.observe(host);
-
-    term.focus();
+    await startTerminal(cols, rows);
   });
 
   onDestroy(() => {
@@ -176,6 +201,8 @@
   </div>
   <div bind:this={host} class="tp-host" class:tp-host-hidden={minimized}></div>
 </div>
+
+<TerminalConfirmModal bind:open={confirmModalOpen} {onConfirmed} />
 
 <style>
   .tp-wrap {

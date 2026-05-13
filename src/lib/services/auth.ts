@@ -24,6 +24,12 @@ export async function initAuth(): Promise<void> {
     return;
   }
 
+  // LOW-004 (audit 2026-04-30): cached features in localStorage are advisory
+  // only. The authoritative gate is server-side: every API call validated
+  // against the user's JWT claims + org tier. A user tampering with this
+  // localStorage entry can flip UI affordances client-side, but the server
+  // refuses any actual feature usage they're not entitled to. Documented as
+  // accepted residual risk in REMEDIATION_NOTES.md.
   const stored = localStorage.getItem("veesker:features");
   if (stored) {
     try {
@@ -35,26 +41,23 @@ export async function initAuth(): Promise<void> {
     }
   }
 
-  // Background refresh — don't await, don't block startup
-  void fetch("https://api.veesker.cloud/v1/auth/me", {
-    headers: { Authorization: `Bearer ${token}` },
-  }).then(async (res) => {
-    if (res.status === 401) {
+  // Background refresh via Tauri command (no CORS, works in dev + prod)
+  void invoke<{ features?: Record<string, boolean> }>("cloud_api_get", {
+    path: "/v1/auth/me",
+    params: {},
+  }).then((data) => {
+    if (data.features) {
+      applyFeatureFlags(data.features);
+      localStorage.setItem("veesker:features", JSON.stringify(data.features));
+      if (data.features.cloudAudit) CloudAuditService.start();
+    }
+  }).catch(async (e: unknown) => {
+    if (String(e).includes("server_error_401") || String(e).includes("not_authenticated")) {
       await invoke("auth_token_clear");
       resetFeatures();
       localStorage.removeItem("veesker:features");
-      return;
     }
-    if (res.ok) {
-      const data = await res.json();
-      if (data.features) {
-        applyFeatureFlags(data.features);
-        localStorage.setItem("veesker:features", JSON.stringify(data.features));
-        if (data.features.cloudAudit) CloudAuditService.start();
-      }
-    }
-  }).catch(() => {
-    // offline — already applied from localStorage above
+    // Other errors (network, etc.) — already applied from localStorage above
   });
 }
 

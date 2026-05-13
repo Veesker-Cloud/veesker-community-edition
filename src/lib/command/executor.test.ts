@@ -464,7 +464,6 @@ describe("CommandExecutor — reset / loadInitialHistory", () => {
         },
       ],
       inaccessibleCount: 0,
-      historyDisabled: false,
     });
     const exec = new CommandExecutor(state, ctx);
     await exec.loadInitialHistory();

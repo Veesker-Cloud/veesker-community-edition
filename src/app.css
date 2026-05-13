@@ -19,6 +19,13 @@
   --accent-border: rgba(179, 62, 31, 0.2);
   --accent-border-focus: rgba(179, 62, 31, 0.5);
   --accent-shadow: rgba(179, 62, 31, 0.1);
+  /* Status text colors — picked for AA contrast against the corresponding
+     translucent overlay background (rgba(245,158,11,0.15) etc) on each
+     theme. Dark-mode variants use lighter shades (amber-400 / red-400)
+     because amber-700 / red-700 fall to ~4.0:1 contrast on dark surfaces. */
+  --warn-text: #b45309;
+  --error-text: #b91c1c;
+  --success-text: #047857;
 }
 
 [data-tier="cloud"] {
@@ -42,6 +49,9 @@
   --border-strong: rgba(70, 78, 88, 0.9);
   --row-hover: rgba(255, 255, 255, 0.04);
   --bg: #111318;
+  --warn-text: #fbbf24;
+  --error-text: #f87171;
+  --success-text: #34d399;
 }
 
 [data-theme="dark"] {
@@ -58,4 +68,7 @@
   --row-alt: rgba(255, 255, 255, 0.02);
   --scrollbar-thumb: rgba(255, 255, 255, 0.12);
   --bg: #1a1612;
+  --warn-text: #fbbf24;
+  --error-text: #f87171;
+  --success-text: #34d399;
 }

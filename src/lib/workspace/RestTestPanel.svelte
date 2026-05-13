@@ -111,11 +111,11 @@
       const parsed = JSON.parse(res.data.body);
       token = parsed.access_token ?? null;
     } catch {
-      oauthError = "Resposta sem JSON válido: " + res.data.body.slice(0, 200);
+      oauthError = "Response has no valid JSON: " + res.data.body.slice(0, 200);
       return;
     }
     if (!token) {
-      oauthError = "Resposta não contém access_token";
+      oauthError = "Response does not contain access_token";
       return;
     }
 
@@ -159,10 +159,10 @@
         <button class="rm-btn" onclick={() => removeHeader(i)} aria-label="Remove header">✕</button>
       </div>
     {/each}
-    <button class="add-btn" onclick={addHeader}>+ adicionar header</button>
+    <button class="add-btn" onclick={addHeader}>+ add header</button>
 
     <button class="oauth-btn" onclick={() => showOAuthHelper = !showOAuthHelper}>
-      {showOAuthHelper ? "▾ Ocultar OAuth" : "▸ Obter Bearer token (OAuth)"}
+      {showOAuthHelper ? "▾ Hide OAuth" : "▸ Get Bearer token (OAuth)"}
     </button>
 
     {#if showOAuthHelper}
@@ -181,10 +181,10 @@
           onclick={() => void fetchToken()}
           disabled={oauthFetching || !oauthClientId.trim() || !oauthClientSecret.trim()}
         >
-          {oauthFetching ? "Solicitando…" : "Solicitar token e injetar header"}
+          {oauthFetching ? "Requesting…" : "Request token and inject header"}
         </button>
         <div class="oauth-hint">
-          O token será obtido via <code>POST /oauth/token</code> (grant <code>client_credentials</code>) e adicionado como <code>Authorization: Bearer ...</code> nos headers.
+          The token will be fetched via <code>POST /oauth/token</code> (grant <code>client_credentials</code>) and injected as <code>Authorization: Bearer ...</code> in the headers.
         </div>
       </div>
     {/if}
@@ -195,11 +195,11 @@
     {/if}
 
     <button class="send-btn" onclick={() => void send()} disabled={sending}>
-      {sending ? "Enviando…" : "▶ Send"}
+      {sending ? "Sending…" : "▶ Send"}
     </button>
 
     {#if error}
-      <div class="error"><strong>Erro:</strong> {error}</div>
+      <div class="error"><strong>Error:</strong> {error}</div>
     {/if}
 
     {#if response}

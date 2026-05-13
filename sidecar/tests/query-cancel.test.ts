@@ -140,6 +140,7 @@ describe("queryExecute — backward compat (no requestId)", () => {
     }));
     setSession(conn, "SCOTT");
     const r = await queryExecute({ sql: "SELECT 1 FROM DUAL" });
+    if ("multi" in r) throw new Error("expected single QueryResult");
     expect(r.rowCount).toBe(1);
     // _running should be cleared after completion.
     expect(_getRunning()).toBeNull();

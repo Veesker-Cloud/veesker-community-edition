@@ -106,10 +106,22 @@
     return () => observer.disconnect();
   });
 
-  // ── Clear history ─────────────────────────────────────────────────────────────
-  async function handleClear(): Promise<void> {
+  // Tauri 2's WebView blocks window.confirm() — render an inline alertdialog
+  // instead so the destructive action doesn't silently auto-cancel.
+  let showConfirmClear = $state(false);
+
+  function requestClear(): void {
     if (connectionId === null) return;
-    if (!confirm("Clear all history for this connection?")) return;
+    showConfirmClear = true;
+  }
+
+  function cancelClear(): void {
+    showConfirmClear = false;
+  }
+
+  async function confirmClear(): Promise<void> {
+    showConfirmClear = false;
+    if (connectionId === null) return;
     const res = await historyClear(connectionId);
     if (res.ok) {
       entries = [];
@@ -126,6 +138,15 @@
   }
 </script>
 
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && showConfirmClear) {
+      e.stopPropagation();
+      cancelClear();
+    }
+  }}
+/>
+
 <div class="history-panel">
   <div class="history-header">
     <span class="history-title">History</span>
@@ -140,11 +161,21 @@
       <button
         class="history-clear"
         aria-label="Clear history"
-        onclick={handleClear}
+        onclick={requestClear}
         disabled={connectionId === null}
       >✕</button>
     </div>
   </div>
+
+  {#if showConfirmClear}
+    <div class="confirm-row" role="alertdialog" aria-modal="true" aria-label="Confirm clear history">
+      <p class="confirm-text">Clear all history for this connection? This cannot be undone.</p>
+      <div class="confirm-actions">
+        <button type="button" class="btn-cancel" onclick={cancelClear}>Cancel</button>
+        <button type="button" class="btn-confirm" onclick={() => void confirmClear()}>Clear</button>
+      </div>
+    </div>
+  {/if}
 
   <div class="history-list" role="list">
     {#if connectionId === null}
@@ -395,4 +426,48 @@
     color: var(--text-muted);
     text-align: center;
   }
+
+  .confirm-row {
+    margin: 6px 8px;
+    padding: 8px;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    border-radius: 6px;
+    background: rgba(239, 68, 68, 0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .confirm-text {
+    margin: 0;
+    font-family: "Inter", -apple-system, system-ui, sans-serif;
+    font-size: 11px;
+    color: var(--text-primary);
+    line-height: 1.4;
+  }
+  .confirm-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+  .btn-cancel {
+    background: transparent;
+    color: var(--text-muted);
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    font-family: "Inter", -apple-system, system-ui, sans-serif;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .btn-confirm {
+    background: rgba(239, 68, 68, 0.85);
+    color: white;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-family: "Inter", -apple-system, system-ui, sans-serif;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .btn-confirm:hover { background: rgba(239, 68, 68, 1); }
 </style>

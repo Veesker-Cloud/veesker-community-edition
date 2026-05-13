@@ -19,14 +19,17 @@
   "scripts": {
     "test": "bun test",
     "_": "--minify breaks oracledb's native binding loader when combined with --compile (NJS-045 at runtime). Do not add it back without re-verifying Thick mode works.",
-    "build:win-x64":   "bun build src/index.ts --compile --target=bun-windows-x64  --outfile ../src-tauri/binaries/veesker-sidecar-x86_64-pc-windows-msvc.exe",
-    "build:mac-x64":   "bun build src/index.ts --compile --target=bun-darwin-x64   --outfile ../src-tauri/binaries/veesker-sidecar-x86_64-apple-darwin",
-    "build:mac-arm64": "bun build src/index.ts --compile --target=bun-darwin-arm64 --outfile ../src-tauri/binaries/veesker-sidecar-aarch64-apple-darwin",
-    "build:linux-x64": "bun build src/index.ts --compile --target=bun-linux-x64    --outfile ../src-tauri/binaries/veesker-sidecar-x86_64-unknown-linux-gnu",
+    "_2": "DuckDB bindings are platform-specific via optionalDependencies. bun install only installs the host platform's binding, so bun --compile must externalize the others or it fails resolving them at compile time.",
+    "build:win-x64": "bun build src/index.ts --compile --target=bun-windows-x64  --external @duckdb/node-bindings-darwin-arm64 --external @duckdb/node-bindings-darwin-x64 --external @duckdb/node-bindings-linux-arm64 --external @duckdb/node-bindings-linux-x64 --external @duckdb/node-bindings-win32-arm64 --outfile ../src-tauri/binaries/veesker-sidecar-x86_64-pc-windows-msvc.exe",
+    "build:mac-x64": "bun build src/index.ts --compile --target=bun-darwin-x64   --external @duckdb/node-bindings-darwin-arm64 --external @duckdb/node-bindings-linux-arm64 --external @duckdb/node-bindings-linux-x64 --external @duckdb/node-bindings-win32-arm64 --external @duckdb/node-bindings-win32-x64 --outfile ../src-tauri/binaries/veesker-sidecar-x86_64-apple-darwin",
+    "build:mac-arm64": "bun build src/index.ts --compile --target=bun-darwin-arm64 --external @duckdb/node-bindings-darwin-x64 --external @duckdb/node-bindings-linux-arm64 --external @duckdb/node-bindings-linux-x64 --external @duckdb/node-bindings-win32-arm64 --external @duckdb/node-bindings-win32-x64 --outfile ../src-tauri/binaries/veesker-sidecar-aarch64-apple-darwin",
+    "build:linux-x64": "bun build src/index.ts --compile --target=bun-linux-x64    --external @duckdb/node-bindings-darwin-arm64 --external @duckdb/node-bindings-darwin-x64 --external @duckdb/node-bindings-linux-arm64 --external @duckdb/node-bindings-win32-arm64 --external @duckdb/node-bindings-win32-x64 --outfile ../src-tauri/binaries/veesker-sidecar-x86_64-unknown-linux-gnu",
     "build": "bun run build:mac-x64"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.2",
+    "@veesker/engine": "workspace:*",
+    "jose": "^6.2.3",
     "oracledb": "^6.6.0"
   },
   "devDependencies": {

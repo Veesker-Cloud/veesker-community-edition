@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -48,6 +48,30 @@ fn resolve_oracledb_binding_dir(app: &AppHandle) -> Option<String> {
     None
 }
 
+/// Locate the directory containing duckdb.dll. Bun's --compile bundles duckdb.node into
+/// the binary's virtual filesystem; at runtime the .node is extracted to a temp dir and
+/// LoadLibrary is called on it, but its sibling duckdb.dll is NOT extracted alongside,
+/// so the load fails with ERR_DLOPEN_FAILED. We work around this by ensuring duckdb.dll
+/// is reachable via the spawned process's PATH.
+fn resolve_duckdb_binding_dir(app: &AppHandle) -> Option<String> {
+    // Dev mode: src-tauri/binaries/duckdb.dll (manually copied here from
+    // ce/node_modules/.bun/.../duckdb.dll alongside the sidecar exe).
+    if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
+        let dev = PathBuf::from(manifest).join("binaries");
+        if dev.join("duckdb.dll").is_file() {
+            return dev.canonicalize().ok().map(strip_extended_prefix);
+        }
+    }
+    // Production: bundled into resource_dir/binaries/ via tauri.conf.json bundle.resources.
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let prod = res_dir.join("binaries");
+        if prod.join("duckdb.dll").is_file() {
+            return prod.canonicalize().ok().map(strip_extended_prefix);
+        }
+    }
+    None
+}
+
 /// On Windows, std::fs::canonicalize returns paths with the `\\?\` extended-length prefix.
 /// Node.js's require() and oracledb's binary loader can't handle that format and fail
 /// silently with NJS-045. Strip the prefix so we pass plain `C:\foo\bar` style paths.
@@ -71,6 +95,18 @@ pub struct Response {
     pub result: Option<Value>,
     #[serde(default)]
     pub error: Option<RpcError>,
+}
+
+/// JSON-RPC 2.0 notification: like a request but with no `id` field, so the
+/// server (sidecar) doesn't expect a reply. The sidecar uses these to push
+/// async events to the host (e.g. `sandbox.revoked`). We forward the `method`
+/// and `params` to the renderer as a Tauri event so frontends can `listen()`.
+#[derive(Debug, Deserialize)]
+struct Notification {
+    #[allow(dead_code)] // jsonrpc field is part of the protocol but unused here
+    jsonrpc: Option<String>,
+    method: String,
+    params: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +144,17 @@ impl Sidecar {
             cmd = cmd.env("VEESKER_ORACLEDB_BINARY_DIR", dir);
         }
 
+        // Prepend the directory containing duckdb.dll to PATH so that Windows LoadLibrary
+        // can find it when Bun extracts duckdb.node from the binary's virtual filesystem
+        // to a temp directory at runtime. Without this, the .node load fails with
+        // ERR_DLOPEN_FAILED because duckdb.dll isn't in the temp dir alongside the .node.
+        if let Some(duckdb_dir) = resolve_duckdb_binding_dir(app) {
+            let current_path = std::env::var("PATH").unwrap_or_default();
+            let separator = if cfg!(windows) { ";" } else { ":" };
+            let new_path = format!("{duckdb_dir}{separator}{current_path}");
+            cmd = cmd.env("PATH", new_path);
+        }
+
         // Where the sidecar writes its rotating log file. We point it at
         // <app_data>/logs/sidecar.log so users can attach the file when
         // reporting bugs without us having to surface a separate UI.
@@ -141,6 +188,7 @@ impl Sidecar {
         // Demux stdout into pending oneshots. Stdout chunks may split a JSON line
         // across events, so accumulate in a buffer and only consume complete lines.
         let pending_clone = pending.clone();
+        let app_clone = app.clone();
         tauri::async_runtime::spawn(async move {
             let mut buffer = String::new();
             while let Some(event) = rx.recv().await {
@@ -151,6 +199,28 @@ impl Sidecar {
                             let line = buffer[..idx].trim().to_string();
                             buffer.drain(..=idx);
                             if line.is_empty() {
+                                continue;
+                            }
+                            // JSON-RPC: notifications have no `id`, responses always do.
+                            // Try notification first — if the line carries a `method` field,
+                            // it is structurally a notification and we forward it to the
+                            // renderer as a Tauri event under the JSON-RPC method name
+                            // (e.g. "sandbox.revoked" → frontend's `listen("sandbox-revoked", …)`).
+                            //
+                            // Tauri 2's app.emit() validates event names against
+                            // [A-Za-z0-9-/:_] — the JSON-RPC convention uses dotted
+                            // method names. Normalize '.' to '-' so the renderer can
+                            // listen with valid Tauri event names without forcing the
+                            // sidecar to mirror Tauri's char rules in its method names.
+                            if let Ok(notification) = serde_json::from_str::<Notification>(&line) {
+                                let event_name = notification.method.replace('.', "-");
+                                if let Err(err) = app_clone.emit(&event_name, &notification.params)
+                                {
+                                    eprintln!(
+                                        "sidecar notification emit failed: method={} event={} err={}",
+                                        notification.method, event_name, err
+                                    );
+                                }
                                 continue;
                             }
                             match serde_json::from_str::<Response>(&line) {

@@ -60,9 +60,9 @@ pub struct ConnectionRow {
     /// Default-on for prod connections, off otherwise.
     pub airgap_mode: bool,
     /// L2.1 PSDPM (PL/SQL Developer Parity Mode): when true, only user-initiated
-    /// SQL is allowed against this connection. AI tools (CL), embed batches,
-    /// and any non-user RPC origins are blocked. Schema browser still
-    /// lazy-loads on expand. Defaults ON for env=prod / env=staging at save.
+    /// SQL is allowed against this connection. AI tools, embed batches, and any
+    /// non-user RPC origins are blocked. Schema browser still lazy-loads on
+    /// expand. Defaults ON for env=prod / env=staging at save.
     pub psdpm_mode: bool,
     /// L3.2 (Onda 3): per-connection auto-EXPLAIN mode.
     /// "manual" | "always" | "when_dml". Default per env at save time:
@@ -203,11 +203,7 @@ fn add_safety_columns_if_missing(conn: &Connection) -> rusqlite::Result<()> {
                CHECK (airgap_mode IN (0, 1));",
         )?;
     }
-    // L2.1 PSDPM (PL/SQL Developer Parity Mode) — separate migration step so it
-    // doesn't collide with the parallel airgap_mode addition. Default 0 (off);
-    // the connection-save layer flips it on for env=prod / env=staging at save
-    // time. Existing rows keep PSDPM off until the user explicitly toggles or
-    // re-saves.
+    // L2.1 PSDPM (PL/SQL Developer Parity Mode) — separate migration step.
     if !has_column(conn, "connections", "psdpm_mode")? {
         conn.execute_batch(
             "ALTER TABLE connections ADD COLUMN psdpm_mode INTEGER NOT NULL DEFAULT 0 \
@@ -266,6 +262,8 @@ fn add_safety_columns_if_missing(conn: &Connection) -> rusqlite::Result<()> {
                 ON pending_tx_keep_open (expires_at);",
         )?;
     }
+    // Security item #1: the env CHECK constraint must include 'sandbox'. SQLite
+    // cannot ALTER a CHECK constraint — a full table rebuild is required for
     // Security item #1 (updated): env CHECK must include 'local'. Full table
     // rebuild required — SQLite cannot ALTER a CHECK constraint. Also converts
     // any existing 'sandbox' rows to 'local'.
@@ -814,8 +812,6 @@ mod tests {
         assert!(create(&c, &row).is_err());
     }
 
-    // L1.2 (Sprint C): air-gap column round-trips and migration adds it to
-    // older v4-shaped tables (post-auto_perf_analysis but pre-airgap).
     #[test]
     fn airgap_field_round_trip() {
         let c = fresh();
@@ -828,7 +824,6 @@ mod tests {
 
     #[test]
     fn psdpm_mode_round_trips() {
-        // L2.1: PSDPM column persists across save/load cycles.
         let c = fresh();
         let mut row = sample("p1", "Psdpm");
         row.psdpm_mode = true;
@@ -836,7 +831,6 @@ mod tests {
         let got = get(&c, "p1").unwrap().unwrap();
         assert!(got.psdpm_mode, "psdpm_mode should round-trip true");
 
-        // Toggle off via update.
         let mut updated = got;
         updated.psdpm_mode = false;
         updated.updated_at = "2026-05-06T00:00:00Z".into();
@@ -969,8 +963,6 @@ mod tests {
 
     #[test]
     fn migration_adds_safety_columns_to_v4_schema() {
-        // V4 schema (post-auto_perf_analysis) — both airgap_mode AND psdpm_mode
-        // are added by add_safety_columns_if_missing.
         let c = Connection::open_in_memory().unwrap();
         c.execute_batch(
             "CREATE TABLE connections (
@@ -996,6 +988,6 @@ mod tests {
 
         let row = get(&c, "v4-1").unwrap().unwrap();
         assert!(!row.airgap_mode, "airgap default should be false");
-        assert!(!row.psdpm_mode, "psdpm default should be false (off)");
+        assert!(!row.psdpm_mode, "psdpm default should be false");
     }
 }

@@ -1,8 +1,4 @@
-// Copyright 2022-2026 Geraldo Ferreira Viana Júnior
-// Licensed under the Apache License, Version 2.0
-// https://github.com/veesker-cloud/veesker-community-edition
-
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{Hmac, Mac};
 use keyring::Entry;
 use sha2::{Digest, Sha256};
 
@@ -57,6 +53,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // L2.2 / Sprint B sanity: the HMAC chain is computed over the body JSON,
+    // so adding the `origin` and `originDetail` fields to the body MUST be
+    // covered by the hash. A verifier that strips hmac/prevHash and rehashes
+    // the remaining fields should reproduce the same hmac.
     #[test]
     fn hmac_chain_validates_with_origin_fields() {
         let key = vec![42u8; 32];
@@ -80,9 +80,13 @@ mod tests {
         });
         let body_str = body.to_string();
         let hmac1 = compute_hmac(&key, prev, &body_str);
+
+        // Re-derive on the verifier side from the same body shape — must match.
         let hmac2 = compute_hmac(&key, prev, &body_str);
         assert_eq!(hmac1, hmac2);
 
+        // Tampering with origin must change the HMAC (proves origin is part of
+        // the integrity-protected body).
         let tampered = json!({
             "ts":           "2026-05-06T12:00:00.000Z",
             "connectionId": "conn-1",
@@ -96,7 +100,7 @@ mod tests {
             "errorMessage": null,
             "source":       "user",
             "env":          "PROD",
-            "origin":       "ai_approved",
+            "origin":       "ai_approved", // changed
             "originDetail": null,
         });
         let hmac_tampered = compute_hmac(&key, prev, &tampered.to_string());
@@ -109,44 +113,8 @@ mod tests {
         let body = "{\"a\":1}";
         let h1 = compute_hmac(&key, "00", body);
         let h2 = compute_hmac(&key, &h1, body);
+        // Same body, different prev_hash => different HMAC, proving the chain
+        // links each entry to the previous.
         assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn compute_hmac_same_inputs_deterministic() {
-        let key = vec![1u8; 32];
-        let h1 = compute_hmac(&key, "genesis", "{\"sql\":\"SELECT 1 FROM DUAL\"}");
-        let h2 = compute_hmac(&key, "genesis", "{\"sql\":\"SELECT 1 FROM DUAL\"}");
-        assert_eq!(h1, h2);
-    }
-
-    #[test]
-    fn compute_hmac_different_body_different_output() {
-        let key = vec![1u8; 32];
-        let h1 = compute_hmac(&key, "genesis", "{\"sql\":\"SELECT 1 FROM DUAL\"}");
-        let h2 = compute_hmac(&key, "genesis", "{\"sql\":\"DROP TABLE employees\"}");
-        assert_ne!(h1, h2);
-    }
-
-    #[test]
-    fn key_generation_returns_32_bytes() {
-        let zeroed = vec![0u8; 32];
-        assert_eq!(zeroed.len(), 32);
-        let from_slice = vec![99u8; 32];
-        assert_eq!(from_slice.len(), 32);
-    }
-
-    #[test]
-    fn keychain_unavailable_returns_zeroed_key() {
-        // Simulate keychain failure by calling get_or_create_key() in a context
-        // where it would fall back. We can't easily simulate keyring failure in
-        // unit tests, but we verify the zeroed fallback path computes a valid HMAC.
-        let zeroed_key = vec![0u8; 32];
-        let hmac = compute_hmac(&zeroed_key, "genesis", "{\"test\":true}");
-        assert!(!hmac.is_empty());
-        assert_ne!(hmac, "hmac-error");
-        // Zero key still produces consistent output
-        let hmac2 = compute_hmac(&zeroed_key, "genesis", "{\"test\":true}");
-        assert_eq!(hmac, hmac2);
     }
 }

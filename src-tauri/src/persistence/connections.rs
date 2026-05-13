@@ -33,9 +33,9 @@ pub struct ConnectionSafety {
     /// active. Default-on for prod, off elsewhere; user can flip after save.
     pub airgap_mode: bool,
     /// L2.1 PSDPM (PL/SQL Developer Parity Mode): when true, only user-initiated
-    /// SQL is allowed. AI tools (CL only), embed batches (CL only), and any
-    /// non-user RPC origins are blocked. Defaults ON when env=prod or
-    /// env=staging, OFF for env=dev / unspecified at save time.
+    /// SQL is allowed. AI tools, embed batches, and any non-user RPC origins
+    /// are blocked. Defaults ON when env=prod or env=staging, OFF for env=dev /
+    /// unspecified at save time.
     pub psdpm_mode: bool,
     /// L3.2 (Onda 3): per-connection auto-EXPLAIN mode.
     /// "manual" | "always" | "when_dml". Default per env at save time:
@@ -194,17 +194,9 @@ pub enum ConnectionInput {
     },
 }
 
-/// L1.2 (Sprint C): resolve the persisted `airgap_mode` value.
-///
-/// Hard-lock policy when env=prod: airgap_mode is FORCED true regardless of
-/// explicit user override. The 4-layer enforcement is documented in
-/// `docs/superpowers/specs/2026-05-06-sprint-c-geraldo-trust-edition.md`.
-/// Layer 2 (this function) refuses to persist airgap_mode=false on a prod
-/// connection. To enable AI on a prod connection, the user must DELETE and
-/// recreate the connection with a non-prod env (F2 immutability rule).
-///
-/// When env != prod and explicit is provided, persistence honors it.
-/// When explicit is None, default to true iff env is prod.
+/// L1.2 (Sprint C) hard-lock: airgap_mode is FORCED true on env=prod regardless
+/// of explicit override. To enable AI on prod, user must DELETE and recreate
+/// with a non-prod env (F2 immutability rule).
 fn resolve_airgap_default(env: &Option<String>, explicit: Option<bool>) -> bool {
     if matches!(env.as_deref(), Some("prod")) {
         return true;
@@ -216,7 +208,7 @@ fn resolve_airgap_default(env: &Option<String>, explicit: Option<bool>) -> bool 
 }
 
 /// L2.1 (Sprint C) hard-lock: psdpm_mode is FORCED true on env=prod regardless
-/// of explicit override. Same rationale as `resolve_airgap_default`.
+/// of explicit override.
 pub(crate) fn resolve_psdpm_default(env: Option<&str>, explicit: Option<bool>) -> bool {
     if matches!(env, Some("prod")) {
         return true;
@@ -579,6 +571,48 @@ impl ConnectionService {
         }
     }
 
+    /// Resolve the flat `{user, password, connectString}` shape the Plan 5b
+    /// sandbox sidecar handlers consume. Reads the user password from the OS
+    /// keychain just like `sidecar_params`, but returns the slimmer envelope
+    /// `openOracleConnection` expects (no wallet/safety fields). Wallet-auth
+    /// connections are rejected — Plan 5b's owner publish wizard supports
+    /// basic auth only (matches the sidecar surface).
+    pub fn sandbox_oracle_config(&self, id: &str) -> Result<serde_json::Value, ConnectionError> {
+        let row = {
+            let conn = self.lock()?;
+            store::get(&conn, id)?.ok_or_else(ConnectionError::not_found)?
+        };
+        let row_id = row.id.clone();
+        let meta = ConnectionMeta::try_from(row)?;
+
+        let password = match secrets::get_password(&row_id) {
+            Ok(p) => p,
+            Err(e) if secrets::is_missing(&e) => {
+                return Err(ConnectionError::invalid(
+                    "user password missing from keychain — edit the connection and re-enter the password",
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        match meta {
+            ConnectionMeta::Basic {
+                host,
+                port,
+                service_name,
+                username,
+                ..
+            } => Ok(serde_json::json!({
+                "user": username,
+                "password": password,
+                "connectString": format!("{}:{}/{}", host, port, service_name),
+            })),
+            ConnectionMeta::Wallet { .. } => Err(ConnectionError::invalid(
+                "sandbox publish wizard does not support wallet connections yet — pick a basic-auth connection",
+            )),
+        }
+    }
+
     pub fn save(&self, input: ConnectionInput) -> Result<ConnectionMeta, ConnectionError> {
         let now = Utc::now().to_rfc3339();
         match input {
@@ -758,11 +792,6 @@ impl ConnectionService {
                         "cannot change auth type — delete and recreate the connection",
                     ));
                 }
-                // F2 (Sprint C, updated): env change rules —
-                //   UNTAGGED (None) → any: allowed (first-time tagging)
-                //   non-prod → prod: allowed one-way upgrade (UI shows double-confirm)
-                //   prod → any other: blocked unconditionally
-                //   lateral moves (dev↔staging, etc.): blocked
                 match (existing.env.as_deref(), safety.env.as_deref()) {
                     (a, b) if a == b => {}
                     (None, _) => {}
@@ -996,6 +1025,8 @@ impl ConnectionService {
         command_history::clear_inaccessible(&conn, self.command_history_key.as_deref())
             .map_err(map_command_history_err)
     }
+
+    // ── Item #4 Phase C — pending_tx_keep_open ───────────────────────────────
 
     pub fn keep_open_record(
         &self,
@@ -1407,14 +1438,12 @@ mod encryption_tests {
 
         migrate_plaintext_to_encrypted(&db, &pragma).unwrap();
 
-        // Reopened with the right key, the row is still there.
         let conn = open_with_pragma_key(&db, &pragma).unwrap();
         let payload: String = conn
             .query_row("SELECT payload FROM t WHERE id = 1", [], |r| r.get(0))
             .unwrap();
         assert_eq!(payload, "survived migration");
 
-        // A `<stem>.legacy.<ts>.db` backup exists so the user can recover.
         let entries: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -1445,33 +1474,10 @@ mod encryption_tests {
     }
 
     #[test]
-    fn open_encrypted_handles_zeroed_key_fallback() {
-        // Validates that db_key_as_sqlcipher_pragma_arg accepts a zeroed key
-        // (the fallback path when the OS keychain is unavailable, per NB-2 of
-        // Item #1D) and that SQLCipher can open/close the DB without panicking.
-        let dir = TempDir::new().unwrap();
-        let db = dir.path().join("zeroed.db");
-        let zeroed_key = vec![0u8; 32];
-        let pragma = crate::crypto::db_key_as_sqlcipher_pragma_arg(&zeroed_key);
-
-        let conn = open_with_pragma_key(&db, &pragma).unwrap();
-        conn.execute_batch("CREATE TABLE t (k TEXT); INSERT INTO t VALUES ('ok');")
-            .unwrap();
-        drop(conn);
-
-        let conn2 = open_with_pragma_key(&db, &pragma).unwrap();
-        let v: String = conn2
-            .query_row("SELECT k FROM t", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(v, "ok");
-    }
-
-    #[test]
     fn open_encrypted_or_migrate_migrates_legacy_plaintext_db() {
         let dir = TempDir::new().unwrap();
         let db = dir.path().join("veesker.db");
         write_plaintext_db_with_one_row(&db);
-        // Sanity: file is plaintext to start.
         assert!(is_plaintext_sqlite(&db).unwrap());
 
         let conn = open_encrypted_or_migrate(&db).unwrap();
@@ -1481,7 +1487,6 @@ mod encryption_tests {
         assert_eq!(payload, "survived migration");
         drop(conn);
 
-        // After migration, the file is no longer plaintext.
         assert!(!is_plaintext_sqlite(&db).unwrap());
     }
 }

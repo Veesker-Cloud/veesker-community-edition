@@ -73,11 +73,13 @@ describe("initAuth", () => {
   });
 
   it("clears token and resets features when /me returns 401", async () => {
-    vi.mocked(invoke).mockResolvedValue(makeJwt(FUTURE_EXP));
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 401 }));
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(makeJwt(FUTURE_EXP)) // auth_token_get
+      .mockRejectedValueOnce(new Error("server_error_401")) // cloud_api_get → 401
+      .mockResolvedValueOnce(undefined); // auth_token_clear
     const { initAuth } = await import("./auth");
     await initAuth();
-    await new Promise((resolve) => setTimeout(resolve, 0)); // flush background .then()
+    await new Promise((resolve) => setTimeout(resolve, 0)); // flush background .catch()
     expect(invoke).toHaveBeenCalledWith("auth_token_clear");
     expect(FEATURES.cloudAI).toBe(false);
   });

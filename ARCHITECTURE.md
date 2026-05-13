@@ -164,9 +164,6 @@ The full RPC surface — 28 methods — is grouped below.
 | `-32012` | Object not found |
 | `-32013` | Oracle error (wrapped from `node-oracledb`) |
 | `-32014` | SQL splitter error |
-| `-32028` | `AUTOCOMMIT_VIOLATION` — driver flipped `autoCommit`; rejected by `assertAutoCommitFalse` (`oracle.ts:531-548`) |
-| `-32029` | `QUERY_CANCELLED` — in-flight query cancelled via `conn.break()` (`oracle.ts:1443-1456`) |
-| `-32030` | `READ_ONLY_VIOLATION` — non-SELECT statement on a read-only connection (`oracle.ts:1217`) |
 
 ---
 
@@ -253,7 +250,7 @@ The sidecar is compiled first:
 
 ```bash
 cd sidecar
-bun build src/index.ts --compile \
+bun build src/index.ts --compile --minify \
   --outfile ../src-tauri/binaries/veesker-sidecar-<target-triple>
 ```
 
@@ -267,42 +264,17 @@ Each target platform requires its own sidecar binary compiled on (or cross-compi
 
 ---
 
-## Known Limitations and Current Work
+## Known Limitations and Future Work
 
-macOS and Windows are functional and pass CI. Linux builds run from source; a packaged `.deb`/`.AppImage` is planned for v1.0. The primary Linux blocker is libsecret / D-Bus availability for the OS keychain in headless environments.
+macOS is the only fully supported platform at this time. Windows and Linux builds are in progress; the primary blockers are platform-specific keychain behavior (Linux Secret Service requires D-Bus, which has additional setup requirements in some environments) and the `bun build --compile` Windows target, which has some known limitations in the current Bun release.
 
-The AI assistant uses Claude (Anthropic) exclusively. OpenAI and Ollama support for the AI chat (not embeddings — those support multiple providers) is not in the current roadmap.
+The AI assistant uses Claude exclusively. OpenAI and Ollama providers for the AI chat (as opposed to embeddings, which already support both) are on the roadmap.
 
-Query history search uses SQL `LIKE` matching. SQLite FTS5 is a future consideration.
+Query history search uses SQL `LIKE` matching. This is adequate for most use cases but misses fuzzy matches and tokenized full-text search. Moving to SQLite FTS5 is planned.
 
-There is no SQL formatter in the editor. A PL/SQL-aware formatter is not yet scoped.
+There is no SQL formatter integrated in the editor yet. Formatting PL/SQL correctly is non-trivial — most open-source SQL formatters handle standard SQL well but struggle with PL/SQL block structure. A PL/SQL-aware formatter is planned but not yet scoped.
 
-**Single-connection model:** the current architecture holds one Oracle session per app instance — a module-level `currentSession` in `sidecar/src/state.ts`. Item #5 (multi-connection workspaces) replaces this singleton with a `Map<ConnectionId, ConnectionState>` pool; schema migrations M1/M2/M3 are complete in the CL worktree at commit `c6bb462`. F0b (non-return-point schema migration) and the full sidecar pool refactor (F1–F6) are pending user authorization.
-
-**Auto-update** is implemented via `tauri-plugin-updater` with Ed25519-signed update manifests distributed through GitHub Releases. The updater verifies the signature before applying any update.
-
-**Note on the build command:** `--minify` must NOT be used when compiling the sidecar. Bun's minifier mangles the path resolution that `oracledb`'s native binding loader relies on, causing `NJS-045` at runtime even when the `.node` files are present. The `--compile` flag without `--minify` is the correct invocation; see `CLAUDE.md` for details.
-
----
-
-## Roadmap of Architectural Changes
-
-The following structural changes are planned or in development. Each is tracked in the internal roadmap (`docs/superpowers/roadmap/2026-05-09-master-roadmap.md`).
-
-**Item #5 — Multi-connection workspace model (in progress):**  
-Replace the singleton `currentSession` in `sidecar/src/state.ts` with a `Map<ConnectionId, ConnectionState>` pool. Each workspace gets independent Oracle connections; `TxState` moves from global to per-connection. Schema migrations M1/M2/M3 are complete in the CL worktree; F0b (non-return-point migration), F1 (pool refactor), and F2–F6 (frontend + sidebar) follow.
-
-**Item #6 — Multi SQL windows:**  
-SQL editor windows gain independent Oracle connections rather than all sharing one session. Depends on Item #5 connection pool.
-
-**Item #7 — Edit-in-grid SELECT FOR UPDATE:**  
-`ResultGrid.svelte` gains an editable mode backed by Oracle's `SELECT ... FOR UPDATE`. Cell-level diff before COMMIT, ROWID-tracked rows, conflict detection (`ORA-00060`, `ORA-08177`). Depends on Items #5 and #6 for per-window connection context.
-
-**Item #4 Phase D — TX close hooks:**  
-Five additional hook points for the pending-TX modal: window close, SvelteKit navigation, tab close, tray quit, and `session_lost` event. Depends on Items #5 and #6.
-
-**Phase 1 — HMAC chain CE:**  
-Port `cl/src-tauri/src/audit/chain.rs` to CE. Each JSONL line will include `prev_hmac` and `hmac_chain` fields; a verifier detects tampering or deletion. UI badge in the audit viewer ("Chain intact ✓ since YYYY-MM-DD").
+Collaborative features — shared read-only schema views, shared query history, team connections — are not in the current architecture. Veesker is designed as a single-user local tool. Adding collaboration would require a server component that does not currently exist and is not in the near-term roadmap.
 
 ---
 

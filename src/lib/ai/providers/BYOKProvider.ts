@@ -8,7 +8,12 @@ import type { AIProvider, ChatParams, ChatResult, ProviderError } from "../AIPro
 export function BYOKProvider(): AIProvider {
   return {
     async chat(params: ChatParams): Promise<{ ok: true; data: ChatResult } | { ok: false; error: ProviderError }> {
-      return aiChat(params.apiKey, params.messages, params.context) as Promise<{ ok: true; data: ChatResult } | { ok: false; error: ProviderError }>;
+      return aiChat(
+        params.apiKey,
+        params.messages,
+        params.context,
+        params.acknowledgeProdAi ?? false,
+      ) as Promise<{ ok: true; data: ChatResult } | { ok: false; error: ProviderError }>;
     },
   };
 }

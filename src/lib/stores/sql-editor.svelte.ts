@@ -7,10 +7,11 @@ import { queryExecute, queryExecuteMulti, queryCancel, type QueryResult, type Sq
 import { splitSql } from "$lib/sql-splitter";
 import { historySave, type HistoryEntry } from "$lib/query-history";
 import { saveAs, saveExisting, openFile } from "$lib/sql-files";
-import { compileErrorsGet, connectionCommit, connectionRollback, connectionTxState, explainPlanGet, ddlConfirm, auditDdlEvent, type ProcExecuteResult, type Result, type TxStateView } from "$lib/workspace";
+import { compileErrorsGet, connectionCommit, connectionRollback, connectionTxState, explainPlanGet, type ProcExecuteResult, type Result, type TxStateView } from "$lib/workspace";
 import { detectDestructive, type DestructiveOp } from "$lib/sql-safety";
 import { objectVersionCapture } from "$lib/object-versions";
 import { CloudAuditService } from "$lib/services/CloudAuditService";
+import { toasts } from "$lib/stores/toasts.svelte";
 import type { SharedExecResult } from "$lib/command/types";
 
 export type CompileError = {
@@ -120,7 +121,9 @@ let _connectionId: string | null = null;
 let _connectionName: string | null = null;
 let _connectionUsername: string | null = null;
 let _connectionHost: string | null = null;
-let _connectionEnv: string | null = null;
+// PROD-002 (audit 2026-04-30): track the connection's safety env so the audit
+// uploader can switch to metadata-only mode automatically for prod connections.
+let _connectionEnv: "local" | "dev" | "staging" | "prod" | null = null;
 // L3.2 (Onda 3): per-connection auto-EXPLAIN policy. Drives runActive's
 // parallel EXPLAIN PLAN fetch after a successful SELECT/DML.
 let _autoExplainMode: "manual" | "always" | "when_dml" = "always";
@@ -137,34 +140,6 @@ type PendingUnsafeDml = {
   resolve: (confirmed: boolean) => void;
 };
 let _pendingUnsafeDml = $state<PendingUnsafeDml | null>(null);
-
-// Item #1E — DDL confirmation gate
-type PendingDdl = {
-  riskLevel: "destructive_ddl" | "ddl";
-  statements: string[];
-  resolve: (confirmed: boolean) => void;
-};
-let _pendingDdl = $state<PendingDdl | null>(null);
-
-const DDL_BLOCKED_CODE = -32041;
-const DDL_UNLOCK_REQUIRED_CODE = -32042;
-
-function isDdlBlockedError(error: { code: number; message: string } | null | undefined): boolean {
-  return error?.code === DDL_BLOCKED_CODE || error?.code === DDL_UNLOCK_REQUIRED_CODE;
-}
-
-async function askDdlConfirm(statements: string[], riskLevel: "destructive_ddl" | "ddl"): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    _pendingDdl = {
-      riskLevel,
-      statements,
-      resolve: (confirmed) => {
-        _pendingDdl = null;
-        resolve(confirmed);
-      },
-    };
-  });
-}
 
 // Authoritative TX state — sourced from sidecar `connection.txState` RPC, which
 // reads `DBMS_TRANSACTION.LOCAL_TRANSACTION_ID`. Replaces the previous boolean
@@ -352,7 +327,12 @@ function findTab(id: string): SqlTab | null {
   return _tabs.find((t) => t.id === id) ?? null;
 }
 
+// Matches anonymous PL/SQL blocks (BEGIN...END; / DECLARE...END;).
+// These blocks must retain their trailing semicolon — the sidecar handles
+// driver-mode-specific stripping (Thick needs it; Thin strips to avoid a
+// driver bug where passing options causes incorrect auto-stripping).
 const _PLSQL_ANON_RE = /^(?:[ \t]*--[^\n]*\n)*[ \t]*(?:BEGIN|DECLARE)\b/i;
+
 function stripTrailingSemicolon(sql: string): string {
   const trimmed = sql.trim();
   if (_PLSQL_ANON_RE.test(trimmed)) return trimmed;
@@ -397,17 +377,22 @@ function pushHistory(sql: string, r: TabResult): void {
     username: _connectionUsername,
     host: _connectionHost,
   }).catch((e) => console.warn("history save failed:", e));
-  void CloudAuditService.push({
-    connectionId: _connectionId || null,
-    connectionName: _connectionName || null,
-    host: _connectionHost || null,
-    sql,
-    success,
-    rowCount,
-    elapsedMs: r.elapsedMs,
-    errorCode,
-    errorMessage,
-  });
+  void CloudAuditService.push(
+    {
+      connectionId: _connectionId || null,
+      connectionName: _connectionName || null,
+      host: _connectionHost || null,
+      sql,
+      success,
+      rowCount,
+      elapsedMs: r.elapsedMs,
+      errorCode,
+      errorMessage,
+    },
+    // PROD-002: forwards env so the service can switch to metadata-only mode
+    // automatically for prod-tagged connections.
+    _connectionEnv,
+  );
 }
 
 function askConfirm(sql: string): true | Promise<boolean> {
@@ -446,15 +431,15 @@ export const sqlEditor = {
     name: string | null,
     username: string | null,
     host: string | null,
+    env: "local" | "dev" | "staging" | "prod" | null = null,
     autoExplainMode: "manual" | "always" | "when_dml" = "manual",
-    env?: string | null,
   ): void {
     _connectionId = id;
     _connectionName = name;
     _connectionUsername = username;
     _connectionHost = host;
+    _connectionEnv = env;
     _autoExplainMode = autoExplainMode;
-    _connectionEnv = env ?? null;
   },
   get pendingConfirm(): PendingConfirm | null { return _pendingConfirm; },
   confirmRun(confirmed: boolean): void {
@@ -469,15 +454,6 @@ export const sqlEditor = {
     if (_pendingUnsafeDml) {
       _pendingUnsafeDml.resolve(confirmed);
       _pendingUnsafeDml = null;
-    }
-  },
-
-  // Item #1E — DDL confirmation gate
-  get pendingDdl(): PendingDdl | null { return _pendingDdl; },
-  resolveDdl(confirmed: boolean): void {
-    if (_pendingDdl) {
-      _pendingDdl.resolve(confirmed);
-      _pendingDdl = null;
     }
   },
   // Backwards-compat boolean — true iff there's any uncommitted work.
@@ -708,21 +684,6 @@ export const sqlEditor = {
         res = await queryExecute(cleaned, requestId, false, true, opts.origin);
       }
     }
-    // Item #1E: DDL gate
-    if (!res.ok && isDdlBlockedError(res.error)) {
-      const riskLevel = res.error?.code === DDL_UNLOCK_REQUIRED_CODE ? "destructive_ddl" : "ddl";
-      const ack = await askDdlConfirm([cleaned], riskLevel);
-      if (!ack) {
-        return { ok: false, error: { code: -32098, message: "Operation cancelled by user." } };
-      }
-      const windowRes = await ddlConfirm(riskLevel);
-      if (windowRes.ok) {
-        res = await queryExecute(cleaned, requestId, false, false, opts.origin);
-        if (res.ok) {
-          void auditDdlEvent({ riskLevel, statement: cleaned, env: _connectionEnv ?? "", windowAgeMs: 0 });
-        }
-      }
-    }
     if (!res.ok) {
       return { ok: false, error: res.error ?? { code: -32000, message: "Unknown error" } };
     }
@@ -765,23 +726,6 @@ export const sqlEditor = {
           return;
         }
         res = await queryExecute(sql, requestId, false, true);
-      }
-      // Item #1E: DDL gate — server blocks DDL until window is open.
-      if (!res.ok && isDdlBlockedError(res.error)) {
-        const riskLevel = res.error?.code === DDL_UNLOCK_REQUIRED_CODE ? "destructive_ddl" : "ddl";
-        const ack = await askDdlConfirm([sql], riskLevel);
-        if (!ack) {
-          tab.results = [];
-          tab.activeResultId = null;
-          return;
-        }
-        const windowRes = await ddlConfirm(riskLevel);
-        if (windowRes.ok) {
-          res = await queryExecute(sql, requestId);
-          if (res.ok) {
-            void auditDdlEvent({ riskLevel, statement: sql, env: _connectionEnv ?? "", windowAgeMs: 0 });
-          }
-        }
       }
       const tabResult: TabResult = {
         id: resultId,
@@ -888,9 +832,6 @@ export const sqlEditor = {
     tab.activeResultId = null;
 
     try {
-      // Track whether the user already acknowledged unsafe DML — needed to carry
-      // the ack through a subsequent DDL confirmation retry (Opus finding #2).
-      let unsafeDmlAcked = false;
       let res = await queryExecuteMulti(sql, requestId);
       if (!res.ok && isUnsafeDmlError(res.error)) {
         const ack = await askUnsafeDml(sql, res.error?.message ?? "");
@@ -899,30 +840,7 @@ export const sqlEditor = {
           tab.activeResultId = null;
           return;
         }
-        unsafeDmlAcked = true;
         res = await queryExecuteMulti(sql, requestId, true);
-      }
-      // Item #1E: DDL gate — batch may contain DDL blocked by the server.
-      if (!res.ok && isDdlBlockedError(res.error)) {
-        const riskLevel = res.error?.code === DDL_UNLOCK_REQUIRED_CODE ? "destructive_ddl" : "ddl";
-        const ddlStmts = preflight.filter((s) => {
-          const t = s.replace(/^\s*--[^\n]*\n/g, "").replace(/^\s*\/\*[\s\S]*?\*\//g, "").trim().toUpperCase();
-          return /^(CREATE|ALTER|DROP|TRUNCATE|RENAME|GRANT|REVOKE|COMMENT)\b/.test(t);
-        });
-        const ack = await askDdlConfirm(ddlStmts.length > 0 ? ddlStmts : [sql], riskLevel);
-        if (!ack) {
-          tab.results = [];
-          tab.activeResultId = null;
-          return;
-        }
-        const windowRes = await ddlConfirm(riskLevel);
-        if (windowRes.ok) {
-          // Preserve the unsafeDml acknowledgement so the user is not asked twice.
-          res = await queryExecuteMulti(sql, requestId, unsafeDmlAcked);
-          if (res.ok) {
-            void auditDdlEvent({ riskLevel, statement: `${ddlStmts.length} DDL statement(s)`, env: _connectionEnv ?? "", windowAgeMs: 0 });
-          }
-        }
       }
       if (!res.ok) {
         // Server-side error (e.g. splitter error from sidecar, or session lost)
@@ -1255,7 +1173,7 @@ export const sqlEditor = {
       liveTab.savedContent = sqlToSave;
       liveTab.isDirty = false;
     } catch (e) {
-      alert(`Save failed: ${String(e)}`);
+      toasts.error(`Save failed: ${String(e)}`);
     }
   },
 
@@ -1278,7 +1196,7 @@ export const sqlEditor = {
       liveTab.savedContent = sqlToSave;
       liveTab.isDirty = liveTab.sql !== sqlToSave;
     } catch (e) {
-      alert(`Save failed: ${String(e)}`);
+      toasts.error(`Save failed: ${String(e)}`);
     }
   },
 
@@ -1296,7 +1214,7 @@ export const sqlEditor = {
       _activeId = tab.id;
       _drawerOpen = true;
     } catch (e) {
-      alert(`Open failed: ${String(e)}`);
+      toasts.error(`Open failed: ${String(e)}`);
     }
   },
 
@@ -1440,6 +1358,7 @@ export const sqlEditor = {
     _connectionName = null;
     _connectionUsername = null;
     _connectionHost = null;
+    _connectionEnv = null;
     _autoExplainMode = "manual";
     _pendingConfirm = null;
     _pendingUnsafeDml = null;

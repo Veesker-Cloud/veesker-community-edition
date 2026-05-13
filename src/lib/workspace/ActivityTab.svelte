@@ -10,7 +10,6 @@
   import { save } from "@tauri-apps/plugin-dialog";
   import { writeTextFile } from "@tauri-apps/plugin-fs";
   import { onMount, onDestroy } from "svelte";
-  import { auditVerifyChain, type ChainVerifyResult } from "$lib/workspace";
 
   type AuditEntry = {
     ts: string;
@@ -57,9 +56,6 @@
   let filterOrigins = $state<Set<string>>(new Set());
   let unlisten: UnlistenFn | null = null;
   let loadingInitial = $state(true);
-  let chainResult = $state<ChainVerifyResult | null>(null);
-  let chainChecking = $state(false);
-  let chainToast = $state<string | null>(null);
 
   const filtered = $derived(
     filterOrigins.size === 0
@@ -130,22 +126,7 @@
     return `${ms}ms`;
   }
 
-  async function verifyChain() {
-    chainChecking = true;
-    chainToast = null;
-    const res = await auditVerifyChain();
-    chainChecking = false;
-    if (res.ok) {
-      chainResult = res.data;
-    } else {
-      chainResult = null;
-      chainToast = String(res.error).includes("RATE_LIMITED")
-        ? "Verify rate-limited — wait 60 s"
-        : "Chain verify failed";
-    }
-  }
-
-  // Export the currently filtered view as JSONL. Each line includes the full
+  // Export the currently filtered view as JSONL via Tauri save dialog.
   async function exportJsonl() {
     const lines = filtered.map((e) => JSON.stringify(e)).join("\n");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
@@ -163,36 +144,8 @@
     <span class="count">
       {#if loadingInitial}loading…{:else}{filtered.length} / {entries.length}{/if}
     </span>
-    <div class="head-actions">
-      {#if chainResult}
-        <span
-          class="chain-badge"
-          class:chain-ok={chainResult.ok}
-          class:chain-fail={!chainResult.ok}
-          title="{chainResult.checked} checked · {chainResult.skippedLegacy} legacy · {chainResult.subChains} sub-chain(s)"
-        >
-          {chainResult.ok ? "chain ✓" : "chain ✗"}
-        </span>
-      {/if}
-      <button
-        class="head-btn"
-        onclick={() => void verifyChain()}
-        disabled={chainChecking}
-        title="Verify HMAC audit chain"
-      >
-        {chainChecking ? "verifying…" : "Verify Chain"}
-      </button>
-      <button class="head-btn" onclick={() => void exportJsonl()} title="Export JSONL">Export</button>
-    </div>
+    <button class="head-btn" onclick={exportJsonl} title="Export JSONL">Export</button>
   </div>
-  {#if chainResult && !chainResult.ok && chainResult.brokenAt}
-    <div class="chain-broken-banner">
-      Chain break detected at entry #{chainResult.brokenAt.index} ({chainResult.brokenAt.ts}) — reason: {chainResult.brokenAt.reason}
-    </div>
-  {/if}
-  {#if chainToast}
-    <div class="chain-toast">{chainToast}</div>
-  {/if}
   <div class="filters">
     {#each Object.keys(ORIGIN_COLORS) as origin (origin)}
       <button
@@ -251,7 +204,6 @@
     flex-shrink: 0;
   }
   .count { color: var(--text-muted); font-size: 11px; font-family: "JetBrains Mono", monospace; }
-  .head-actions { display: flex; align-items: center; gap: 6px; }
   .head-btn {
     background: transparent;
     border: 1px solid var(--border);
@@ -262,33 +214,6 @@
     font-size: 11px;
   }
   .head-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
-  .head-btn:disabled { opacity: 0.5; cursor: default; }
-  .chain-badge {
-    font-size: 10px;
-    font-family: "JetBrains Mono", monospace;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-weight: 600;
-  }
-  .chain-ok { background: rgba(22, 163, 74, 0.15); color: #16a34a; border: 1px solid #16a34a; }
-  .chain-fail { background: rgba(220, 38, 38, 0.12); color: #dc2626; border: 1px solid #dc2626; }
-  .chain-broken-banner {
-    background: rgba(220, 38, 38, 0.1);
-    border-bottom: 1px solid rgba(220, 38, 38, 0.4);
-    color: #dc2626;
-    font-size: 11px;
-    font-family: "JetBrains Mono", monospace;
-    padding: 6px 12px;
-    flex-shrink: 0;
-  }
-  .chain-toast {
-    background: rgba(100, 100, 100, 0.12);
-    border-bottom: 1px solid var(--border);
-    color: var(--text-muted);
-    font-size: 11px;
-    padding: 4px 12px;
-    flex-shrink: 0;
-  }
 
   .filters {
     display: flex;

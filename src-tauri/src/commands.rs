@@ -14,6 +14,54 @@ use tauri::Manager;
 use crate::sidecar::acquire;
 use crate::tray::{self, ActiveConnection, TrayState};
 
+pub struct ActiveSessionEnv(pub tokio::sync::Mutex<Option<String>>);
+
+// L2.1 PSDPM (PL/SQL Developer Parity Mode) — per-session active flag mirrored
+// from the saved connection. Workspace_open populates it from the connection
+// row; workspace_close clears it. The sidecar enforces the gate on incoming
+// non-user-initiated RPCs (AI tools, embed batches, query.execute origins).
+pub struct PsdpmState(pub tokio::sync::Mutex<bool>);
+
+pub struct AuditChainState(pub tokio::sync::Mutex<String>);
+
+/// L1.2 (Sprint C — Air-gap mode). When `true`, every Tauri command that makes
+/// outbound HTTPS calls (cloud_api_*, auth_token_*, ai_*, embed_*,
+/// object_version_push, object_version_get_remote, sandbox_*) short-circuits
+/// with the shared `-32099` JSON-RPC error. The state is loaded from
+/// `connection.airgap_mode` on `workspace_open` and reset on `workspace_close`,
+/// so toggling is per-connection and resets between sessions.
+///
+/// Note: `tauri-plugin-updater` runs its own check on app start. Air-gap mode
+/// does NOT disable that startup check; it only gates renderer-initiated
+/// network commands. True air-gap requires running the app with
+/// `VEESKER_DISABLE_UPDATER=1` set; the env-var support is tracked separately.
+/// This struct gates renderer-controllable egress only.
+pub struct AirGapState(pub tokio::sync::Mutex<bool>);
+
+/// Shared error message and code for every air-gap-blocked command. -32099 is
+/// outside the standard JSON-RPC reserved range so the renderer can match it
+/// reliably.
+pub(crate) const AIRGAP_ERR_CODE: i32 = -32099;
+pub(crate) const AIRGAP_ERR_MSG: &str =
+    "Air-gap mode active: outbound network calls are disabled for this connection";
+
+pub(crate) fn airgap_blocked_err() -> ConnectionTestErr {
+    ConnectionTestErr {
+        code: AIRGAP_ERR_CODE,
+        message: AIRGAP_ERR_MSG.to_string(),
+    }
+}
+
+pub(crate) fn airgap_blocked_string() -> String {
+    format!("airgap_blocked: {AIRGAP_ERR_MSG}")
+}
+
+/// Read the current air-gap state. Awaits the lock briefly and returns the
+/// inner bool — callers should use this at the top of every gated command.
+async fn airgap_active(app: &AppHandle) -> bool {
+    *app.state::<AirGapState>().0.lock().await
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "authType")]
 pub enum ConnectionConfig {
@@ -143,83 +191,6 @@ use crate::persistence::connections::{
 use crate::persistence::history::{HistoryEntry, HistorySaveInput};
 use crate::persistence::keep_open::KeepOpenRecord;
 
-pub struct ActiveSessionEnv(pub tokio::sync::Mutex<Option<String>>);
-
-/// L1.2 (Sprint C — Air-gap mode). When `true`, every Tauri command that makes
-/// outbound HTTPS calls (cloud_api_*, auth_token_*, ai_*, embed_*,
-/// object_version_push, object_version_get_remote) short-circuits with the
-/// shared `-32099` JSON-RPC error. The state is loaded from
-/// `connection.airgap_mode` on `workspace_open` and reset on `workspace_close`,
-/// so toggling is per-connection and resets between sessions.
-///
-/// Note: `tauri-plugin-updater` runs its own check on app start. Air-gap mode
-/// does NOT disable that startup check; it only gates renderer-initiated
-/// network commands. True air-gap requires running the app with
-/// `VEESKER_DISABLE_UPDATER=1` set; the env-var support is tracked separately.
-/// This struct gates renderer-controllable egress only.
-pub struct AirGapState(pub tokio::sync::Mutex<bool>);
-
-/// Shared error message and code for every air-gap-blocked command. -32099 is
-/// outside the standard JSON-RPC reserved range so the renderer can match it
-/// reliably.
-pub(crate) const AIRGAP_ERR_CODE: i32 = -32099;
-pub(crate) const AIRGAP_ERR_MSG: &str =
-    "Air-gap mode active: outbound network calls are disabled for this connection";
-
-pub(crate) fn airgap_blocked_err() -> ConnectionTestErr {
-    ConnectionTestErr {
-        code: AIRGAP_ERR_CODE,
-        message: AIRGAP_ERR_MSG.to_string(),
-    }
-}
-
-pub(crate) fn airgap_blocked_string() -> String {
-    format!("airgap_blocked: {AIRGAP_ERR_MSG}")
-}
-
-/// Read the current air-gap state. Awaits the lock briefly and returns the
-/// inner bool — callers should use this at the top of every gated command.
-async fn airgap_active(app: &AppHandle) -> bool {
-    *app.state::<AirGapState>().0.lock().await
-}
-
-// L2.1 PSDPM (PL/SQL Developer Parity Mode) — per-session active flag mirrored
-// from the saved connection. Workspace_open populates it from the connection
-// row; workspace_close clears it. The sidecar enforces the gate on incoming
-// non-user-initiated RPCs.
-pub struct PsdpmState(pub tokio::sync::Mutex<bool>);
-
-// Item #1D: HMAC-SHA256 audit chain state. Holds the last HMAC written to the
-// current session's JSONL. Resets to "genesis" on process start; each new app
-// session begins a fresh sub-chain (one sub-chain per restart within a day).
-pub struct AuditChainState(pub tokio::sync::Mutex<String>);
-
-// Item #1D: Rate-limit state for audit_verify_chain. At most 1 verify per 60s
-// to prevent runaway I/O on large JSONL files from a compromised renderer.
-pub struct VerifyChainRateLimit {
-    pub last_call: tokio::sync::Mutex<Option<std::time::Instant>>,
-}
-
-const VERIFY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChainBrokenAt {
-    pub index: usize,
-    pub ts: String,
-    pub reason: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChainVerifyResult {
-    pub ok: bool,
-    pub checked: usize,
-    pub skipped_legacy: usize,
-    pub sub_chains: usize,
-    pub broken_at: Option<ChainBrokenAt>,
-}
-
 /// Returns the canonicalized path if `path` (as supplied by the renderer) resolves to a
 /// location under one of the user-data scopes ($DOCUMENT, $DESKTOP, $DOWNLOAD, $HOME,
 /// app data dir, app config dir). Anything else is rejected to prevent a compromised
@@ -285,6 +256,21 @@ pub async fn connection_save(
 pub async fn connection_delete(app: AppHandle, id: String) -> Result<(), ConnectionError> {
     let svc = app.state::<ConnectionService>();
     svc.delete(&id)
+}
+
+/// Verify that an Oracle connection has resolvable credentials for the
+/// sandbox publish wizard, **without** returning the password to the
+/// renderer. Returns Ok(()) if the keychain entry exists and the connection
+/// is basic-auth (sandbox doesn't yet support wallet); otherwise returns
+/// the descriptive error message. The wizard pre-checks this in Step 1 so
+/// the user gets a clear failure surface before navigating to Step 2.
+#[tauri::command]
+pub async fn connection_sandbox_oracle_check(
+    app: AppHandle,
+    id: String,
+) -> Result<(), ConnectionError> {
+    let svc = app.state::<ConnectionService>();
+    svc.sandbox_oracle_config(&id).map(|_| ())
 }
 
 #[tauri::command]
@@ -410,19 +396,14 @@ pub async fn workspace_open(
     };
 
     // 4-layer hard-lock Layer 3 (Sprint C): when env=prod, force airgap_mode
-    // and psdpm_mode ON regardless of stored value. This catches the case
-    // where the SQLite row was hand-edited or migrated from before the
-    // hard-lock was wired.
+    // and psdpm_mode ON regardless of stored value. Catches hand-edited SQLite
+    // rows or migrations from before the hard-lock was wired.
     let env_is_prod = conn_env.as_deref() == Some("prod");
     let effective_airgap = env_is_prod || conn_airgap;
     let effective_psdpm = env_is_prod || conn_psdpm;
     *app.state::<ActiveConnection>().0.lock().await = Some(conn_name);
     *app.state::<ActiveSessionEnv>().0.lock().await = conn_env;
-    // L1.2 (Sprint C): activate air-gap immediately after the Oracle session
-    // opens. Outbound HTTPS commands now short-circuit until workspace_close.
     *app.state::<AirGapState>().0.lock().await = effective_airgap;
-    // L2.1: mirror the connection's PSDPM flag to the per-session state so
-    // status-bar / diagnostic queries can read it without re-loading the row.
     *app.state::<PsdpmState>().0.lock().await = effective_psdpm;
     tray::update_tray(&app, TrayState::Connected).await;
 
@@ -454,10 +435,7 @@ pub async fn workspace_close(app: AppHandle) -> Result<(), ConnectionTestErr> {
     call_sidecar(&app, "workspace.close", json!({})).await?;
     *app.state::<ActiveConnection>().0.lock().await = None;
     *app.state::<ActiveSessionEnv>().0.lock().await = None;
-    // L1.2 (Sprint C): clear air-gap when the workspace closes so the next
-    // connection picks up its own setting.
     *app.state::<AirGapState>().0.lock().await = false;
-    // L2.1: PSDPM flag is per-session — reset to off when the workspace closes.
     *app.state::<PsdpmState>().0.lock().await = false;
     tray::update_tray(&app, TrayState::Idle).await;
     Ok(())
@@ -640,7 +618,14 @@ pub async fn query_execute(
             "user"
         };
         let env_val = app.state::<ActiveSessionEnv>().0.lock().await.clone();
-        let entry = write_audit_entry(&app, &data_dir, &synthetic_input, source, env_val.as_deref()).await;
+        let entry = write_audit_entry(
+            &app,
+            &data_dir,
+            &synthetic_input,
+            source,
+            env_val.as_deref(),
+        )
+        .await;
         // L2.5 Activity Ledger: emit the just-written entry to the renderer for
         // real-time updates. Best-effort — emit failure does not affect the query.
         if let Some(ref e) = entry {
@@ -729,10 +714,17 @@ pub async fn history_list(
     svc.history_list(&connection_id, limit, offset, search.as_deref())
 }
 
-// L2.5 + Item #1D: returns the JSON entry written to the Activity Ledger JSONL.
-// Each entry is HMAC-SHA256 signed (chain: prevHash → body → hmac) and then
-// AES-256-GCM encrypted. Returns None if the audit dir or file cannot be
-// created/opened — emit is then skipped (best-effort; never blocks SQL execution).
+// L2.5: returns the JSON entry that was just written so callers can emit it
+// to the renderer (Activity Ledger). Returns None if the audit dir or file
+// could not be created/opened — emit is then skipped.
+//
+// L2.2: includes the `origin` and `originDetail` fields in the body that gets
+// HMAC'd, so the Sprint B HMAC chain still validates with the new fields
+// present (verifiers reproduce the same body shape).
+//
+// Async because callers run inside the Tokio runtime — using `blocking_lock()`
+// here panics ("Cannot block the current thread from within a runtime") and
+// kills the worker, leaving frontend promises hanging forever (F-02).
 async fn write_audit_entry(
     app: &AppHandle,
     app_data_dir: &std::path::Path,
@@ -748,17 +740,17 @@ async fn write_audit_entry(
     let date = now.format("%Y-%m-%d").to_string();
     let path = audit_dir.join(format!("{date}.jsonl"));
 
-    // Item #1D: lock the chain mutex before building the entry so prevHash and
-    // hmac are written atomically with the file append.
     let chain = app.state::<AuditChainState>();
     let mut prev_hash_guard = chain.0.lock().await;
+
+    let key = crate::audit::chain::get_or_create_key();
 
     let body_value = serde_json::json!({
         "ts":           now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         "connectionId": input.connection_id,
         "host":         input.host.as_deref().unwrap_or(""),
         "username":     input.username.as_deref().unwrap_or(""),
-        "sql":          input.sql,
+        "sql":          crate::audit::redact::redact_sql(&input.sql),
         "success":      input.success,
         "rowCount":     input.row_count,
         "elapsedMs":    input.elapsed_ms,
@@ -775,20 +767,26 @@ async fn write_audit_entry(
     });
     let body_str = body_value.to_string();
 
-    let key = crate::audit::chain::get_or_create_key();
     let hmac = crate::audit::chain::compute_hmac(&key, &prev_hash_guard, &body_str);
 
     let mut entry_obj = body_value.as_object().cloned().unwrap_or_default();
     entry_obj.insert(
         "prevHash".to_string(),
-        Value::String(prev_hash_guard.clone()),
+        serde_json::Value::String(prev_hash_guard.clone()),
     );
-    entry_obj.insert("hmac".to_string(), Value::String(hmac.clone()));
+    entry_obj.insert("hmac".to_string(), serde_json::Value::String(hmac.clone()));
 
-    let entry = Value::Object(entry_obj);
-    // L1.4 (Sprint C, Onda 1.B) — wrap the HMAC-signed body in AES-GCM.
-    // HMAC was computed over the plain body BEFORE encryption; a verifier with
-    // both keys decrypts → strips hmac/prevHash → recomputes HMAC → must match.
+    *prev_hash_guard = hmac;
+
+    let entry = serde_json::Value::Object(entry_obj);
+    // L1.4 (Sprint C, Onda 1.B) — wrap the HMAC-signed body in an AES-GCM
+    // envelope before writing to disk. The chain invariant is preserved:
+    // HMAC was computed over the plain body above, BEFORE this encryption
+    // layer; a verifier with both keys decrypts → strips hmac/prevHash →
+    // recomputes HMAC over the rest → matches. An attacker with read-only
+    // access to the JSONL but neither key learns nothing about the SQL.
+    // If the cipher key is unavailable we degrade to plaintext rather than
+    // dropping the audit record (legacy lines are still parseable).
     let body = entry.to_string();
     let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
     let line_payload = match crate::crypto::encrypt_audit_line(&cipher_key, &body) {
@@ -804,8 +802,6 @@ async fn write_audit_entry(
     } else {
         return None;
     }
-    // Advance in-memory chain only after the entry is durably on disk.
-    *prev_hash_guard = hmac;
     Some(entry)
 }
 
@@ -847,11 +843,11 @@ pub async fn audit_recent(app: AppHandle, limit: Option<i64>) -> Vec<Value> {
         Ok(t) => t,
         Err(_) => return Vec::new(),
     };
-    // L1.4 (Sprint C, Onda 1.B): lines may be plaintext JSON (legacy) or
-    // `02:<base64>` AES-GCM envelopes — decrypt envelopes using the audit
-    // cipher key, then JSON-parse the result. Single corrupted records are
-    // skipped silently so a single tampered byte doesn't black out the
-    // whole panel.
+    // L1.4 (Sprint C, Onda 1.B) — transparently decrypt `02:`-prefixed lines
+    // (current wire format) while still parsing legacy plaintext JSON lines
+    // for backward compat. A line that claims encryption but fails to
+    // decrypt (key mismatch, tampering, truncation) is silently skipped so
+    // a single bad record doesn't black out the entire panel.
     let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
     let mut entries: Vec<Value> = text
         .lines()
@@ -868,101 +864,6 @@ pub async fn audit_recent(app: AppHandle, limit: Option<i64>) -> Vec<Value> {
     entries.reverse();
     entries.truncate(limit);
     entries
-}
-
-// Item #1D: Pure, testable chain verification logic. Reads a JSONL file,
-// decrypts each line, and verifies the HMAC chain. "genesis" prevHash values
-// mark the start of a new sub-chain (one per app session/restart) — these are
-// not treated as breaks.
-pub fn verify_chain_file(path: &Path, key: &[u8]) -> ChainVerifyResult {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(_) => return ChainVerifyResult { ok: true, checked: 0, skipped_legacy: 0, sub_chains: 0, broken_at: None },
-    };
-    let text = match std::str::from_utf8(&bytes) {
-        Ok(t) => t,
-        Err(_) => return ChainVerifyResult { ok: false, checked: 0, skipped_legacy: 0, sub_chains: 0,
-            broken_at: Some(ChainBrokenAt { index: 0, ts: String::new(), reason: "file_not_utf8".to_string() }) },
-    };
-    let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
-    let mut checked: usize = 0;
-    let mut skipped_legacy: usize = 0;
-    let mut sub_chains: usize = 0;
-    let mut expected_prev = String::new();
-    let mut raw_index: usize = 0;
-
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let plain = match crate::crypto::decrypt_audit_line_if_envelope(&cipher_key, line) {
-            Ok(Some(p)) => p,
-            Ok(None) => line.to_string(),
-            Err(_) => { raw_index += 1; continue; }
-        };
-        let obj: serde_json::Map<String, Value> = match serde_json::from_str::<Value>(&plain) {
-            Ok(Value::Object(m)) => m,
-            _ => { raw_index += 1; continue; }
-        };
-        let ts = obj.get("ts").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let stored_hmac = match obj.get("hmac").and_then(|v| v.as_str()) {
-            Some(h) => h.to_string(),
-            None => { skipped_legacy += 1; raw_index += 1; continue; }
-        };
-        let stored_prev = match obj.get("prevHash").and_then(|v| v.as_str()) {
-            Some(p) => p.to_string(),
-            None => { skipped_legacy += 1; raw_index += 1; continue; }
-        };
-        // Sub-chain boundary: a new app session resets prevHash to "genesis".
-        if stored_prev == "genesis" {
-            sub_chains += 1;
-            expected_prev = "genesis".to_string();
-        }
-        // Verify chain linkage.
-        if stored_prev != expected_prev {
-            return ChainVerifyResult { ok: false, checked, skipped_legacy, sub_chains,
-                broken_at: Some(ChainBrokenAt { index: raw_index, ts, reason: "prev_hash_mismatch".to_string() }) };
-        }
-        // Reconstruct body_str: strip hmac and prevHash, re-serialize.
-        let mut stripped = obj.clone();
-        stripped.remove("hmac");
-        stripped.remove("prevHash");
-        let body_str = Value::Object(stripped).to_string();
-        let recomputed = crate::audit::chain::compute_hmac(key, &stored_prev, &body_str);
-        if recomputed != stored_hmac {
-            return ChainVerifyResult { ok: false, checked, skipped_legacy, sub_chains,
-                broken_at: Some(ChainBrokenAt { index: raw_index, ts, reason: "hmac_mismatch".to_string() }) };
-        }
-        expected_prev = stored_hmac;
-        checked += 1;
-        raw_index += 1;
-    }
-    ChainVerifyResult { ok: true, checked, skipped_legacy, sub_chains, broken_at: None }
-}
-
-#[tauri::command]
-pub async fn audit_verify_chain(
-    app: AppHandle,
-    rate_limit: tauri::State<'_, VerifyChainRateLimit>,
-) -> Result<ChainVerifyResult, String> {
-    let mut last = rate_limit.last_call.lock().await;
-    if let Some(t) = *last
-        && t.elapsed() < VERIFY_MIN_INTERVAL
-    {
-        return Err("RATE_LIMITED".into());
-    }
-    *last = Some(std::time::Instant::now());
-    drop(last);
-
-    let data_dir = app.path().app_data_dir().map_err(|_| "data_dir_unavailable")?;
-    let now = chrono::Utc::now();
-    let date = now.format("%Y-%m-%d").to_string();
-    let path = data_dir.join("audit").join(format!("{date}.jsonl"));
-    if !path.exists() {
-        return Ok(ChainVerifyResult { ok: true, checked: 0, skipped_legacy: 0, sub_chains: 0, broken_at: None });
-    }
-    let key = crate::audit::chain::get_or_create_key();
-    Ok(verify_chain_file(&path, &key))
 }
 
 #[tauri::command]
@@ -1321,7 +1222,14 @@ pub async fn tx_modal_audit(
         origin: Some(input.decision.clone()),
         origin_detail: Some(origin_detail),
     };
-    let entry = write_audit_entry(&app, &data_dir, &synthetic_input, "user", input.env.as_deref()).await;
+    let entry = write_audit_entry(
+        &app,
+        &data_dir,
+        &synthetic_input,
+        "user",
+        input.env.as_deref(),
+    )
+    .await;
     if let Some(ref e) = entry {
         let _ = app.emit("audit:append", e);
     }
@@ -1380,6 +1288,25 @@ pub async fn object_dataflow_get(
     serde_json::from_value(res).map_err(|e| ConnectionTestErr {
         code: -32099,
         message: format!("decode object.dataflow: {e}"),
+    })
+}
+
+#[tauri::command]
+pub async fn vision_graph(
+    app: AppHandle,
+    owner: String,
+    object_name: String,
+    object_type: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "vision.graph",
+        json!({ "owner": owner, "objectName": object_name, "objectType": object_type }),
+    )
+    .await?;
+    serde_json::from_value(res).map_err(|e| ConnectionTestErr {
+        code: -32099,
+        message: format!("decode vision.graph: {e}"),
     })
 }
 
@@ -1799,6 +1726,12 @@ pub async fn ords_clients_revoke(app: AppHandle, name: String) -> Result<(), Con
 }
 
 #[tauri::command]
+pub async fn perf_stats(app: AppHandle, sql: String) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "perf.stats", json!({ "sql": sql })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
 pub async fn dml_preview(app: AppHandle, sql: String) -> Result<Value, ConnectionTestErr> {
     call_sidecar(&app, "dml.preview", json!({ "sql": sql })).await
 }
@@ -1826,73 +1759,6 @@ pub async fn unsafe_dml_confirm(
     Ok(rx.await.unwrap_or(false))
 }
 
-// ─── DDL Confirmation Gate (Item #1E) ────────────────────────────────────────
-
-fn write_ddl_event(app: &AppHandle, event_obj: Value) {
-    let Ok(data_dir) = app.path().app_data_dir() else { return };
-    let audit_dir = data_dir.join("audit");
-    if std::fs::create_dir_all(&audit_dir).is_err() { return }
-    let now = chrono::Utc::now();
-    let date = now.format("%Y-%m-%d").to_string();
-    let path = audit_dir.join(format!("{date}.jsonl"));
-    let body = event_obj.to_string();
-    let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
-    let line = match crate::crypto::encrypt_audit_line(&cipher_key, &body) {
-        Ok(s) => format!("{s}\n"),
-        Err(_) => format!("{body}\n"),
-    };
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = file.write_all(line.as_bytes());
-    }
-    let _ = app.emit("audit:append", &event_obj);
-}
-
-#[tauri::command]
-pub async fn ddl_confirm(app: AppHandle, kind: String) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "ddl.confirm", json!({ "kind": kind })).await?;
-    let now = chrono::Utc::now();
-    write_ddl_event(&app, json!({
-        "event": "ddl_window_opened",
-        "kind": kind,
-        "user_action": "explicit_confirm",
-        "ts": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    }));
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn ddl_unlock(app: AppHandle) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "ddl.unlock", json!({})).await?;
-    let now = chrono::Utc::now();
-    write_ddl_event(&app, json!({
-        "event": "ddl_window_closed",
-        "reason": "explicit_unlock",
-        "ts": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    }));
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn audit_ddl_event(
-    app: AppHandle,
-    risk_level: String,
-    statement: String,
-    env: String,
-    window_age_ms: i64,
-) -> Result<(), ConnectionTestErr> {
-    let now = chrono::Utc::now();
-    write_ddl_event(&app, json!({
-        "event": "ddl_executed",
-        "sql_kind": "ddl",
-        "risk_level": risk_level,
-        "statement": statement.chars().take(500).collect::<String>(),
-        "env": env,
-        "window_age_ms": window_age_ms,
-        "ts": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    }));
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn confirm_rollback_tx(app: AppHandle) -> Result<bool, ConnectionTestErr> {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
@@ -1910,12 +1776,6 @@ pub async fn confirm_rollback_tx(app: AppHandle) -> Result<bool, ConnectionTestE
             let _ = tx.send(confirmed);
         });
     Ok(rx.await.unwrap_or(false))
-}
-
-#[tauri::command]
-pub async fn perf_stats(app: AppHandle, sql: String) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "perf.stats", json!({ "sql": sql })).await?;
-    Ok(res)
 }
 
 // ─── Object Version History ───────────────────────────────────────────────────
@@ -2135,7 +1995,7 @@ pub async fn cloud_api_get(
     let url = format!("{}{}", base, path);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(25))
         .build()
         .map_err(|e| e.to_string())?;
     let mut req = client.get(&url).bearer_auth(&token);
@@ -2147,6 +2007,9 @@ pub async fn cloud_api_get(
     let status = res.status().as_u16();
     let body: Value = res.json().await.map_err(|e| e.to_string())?;
 
+    if status == 401 {
+        return Err("not_authenticated".to_string());
+    }
     if status == 403 {
         return Err("forbidden".to_string());
     }
@@ -2168,7 +2031,7 @@ pub async fn cloud_api_post(app: AppHandle, path: String, body: Value) -> Result
     let url = format!("https://api.veesker.cloud{}", path);
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(25))
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -2180,10 +2043,574 @@ pub async fn cloud_api_post(app: AppHandle, path: String, body: Value) -> Result
         .await
         .map_err(|e| e.to_string())?;
     let status = res.status().as_u16();
+    if status == 401 {
+        return Err("not_authenticated".to_string());
+    }
     if status >= 400 {
         return Err(format!("server_error_{}", status));
     }
     Ok(())
+}
+
+/// Inject the Veesker Cloud auth envelope into a sandbox.* sidecar payload.
+/// Reads the JWT from the OS keychain and adds `apiToken` + `apiBaseUrl`
+/// to the payload before forwarding. The renderer never touches the JWT.
+///
+/// The sidecar derives `ownerAccount` and `ownerUserId` from the JWT inside
+/// `expandSandboxEnvelope` — the renderer cannot influence those identity
+/// fields anymore, closing the previous attack surface where a compromised
+/// renderer could call sandbox.open with `ownerAccount="other-user"` to
+/// load a sibling account's keypair from the OS keychain.
+///
+/// Same defense-in-depth pattern as inject_sandbox_oracle_config: scrub
+/// any pre-existing keys before re-inserting the Rust-resolved values.
+fn inject_cloud_envelope(payload: &mut Value) -> Result<(), ConnectionTestErr> {
+    let token = crate::persistence::secrets::get_auth_token()
+        .map_err(|e| ConnectionTestErr {
+            code: -32000,
+            message: format!("auth token unavailable: {}", e),
+        })?
+        .ok_or_else(|| ConnectionTestErr {
+            code: -32001,
+            message: "not_authenticated".to_string(),
+        })?;
+
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("apiToken");
+        obj.remove("apiBaseUrl");
+        // Also scrub renderer-supplied identity fields — the sidecar derives
+        // ownerAccount/ownerUserId from the JWT we're about to inject.
+        obj.remove("ownerAccount");
+        obj.remove("ownerUserId");
+        obj.insert("apiToken".to_string(), Value::String(token));
+        obj.insert(
+            "apiBaseUrl".to_string(),
+            Value::String("https://api.veesker.cloud".to_string()),
+        );
+        Ok(())
+    } else {
+        Err(ConnectionTestErr {
+            code: -32602,
+            message: "sandbox payload must be a JSON object".to_string(),
+        })
+    }
+}
+
+/// Resolve, ensure-exists, canonicalize, and inject the
+/// `app_data/sandbox-builds` path so the sidecar can validate any
+/// renderer-supplied `outPath` against a Rust-controlled anchor. Creating
+/// the directory here (idempotent) means dry-run callers don't need to
+/// pre-create it. Same scrub-then-insert defense-in-depth pattern as
+/// `inject_cloud_envelope`.
+fn inject_expected_builds_dir(
+    app: &AppHandle,
+    payload: &mut Value,
+) -> Result<(), ConnectionTestErr> {
+    let app_data = app.path().app_data_dir().map_err(|e| ConnectionTestErr {
+        code: -32603,
+        message: format!("could not resolve app data dir: {}", e),
+    })?;
+    let builds_dir = app_data.join("sandbox-builds");
+    // canonicalize() requires the directory to exist. Create it first
+    // so callers (sandbox_build_dry_run, future ones) don't have to
+    // remember to do it. Idempotent.
+    std::fs::create_dir_all(&builds_dir).map_err(|e| ConnectionTestErr {
+        code: -32603,
+        message: format!("could not create sandbox-builds dir: {}", e),
+    })?;
+    let canonical = builds_dir.canonicalize().map_err(|e| ConnectionTestErr {
+        code: -32603,
+        message: format!("could not canonicalize sandbox-builds dir: {}", e),
+    })?;
+    let canonical_str = canonical.to_string_lossy().into_owned();
+    // Strip the Windows `\\?\` UNC prefix when present so the sidecar's
+    // path.resolve produces matching strings.
+    let cleaned = canonical_str
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&canonical_str)
+        .to_string();
+
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("expectedBuildsDir");
+        obj.insert("expectedBuildsDir".to_string(), Value::String(cleaned));
+        Ok(())
+    } else {
+        Err(ConnectionTestErr {
+            code: -32602,
+            message: "sandbox payload must be a JSON object".to_string(),
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn sandbox_ensure_keypair(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.ensureKeypair", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_publish(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    inject_expected_builds_dir(&app, &mut payload)?;
+    call_sidecar(&app, "sandbox.publish", payload).await
+}
+
+/// Plan 7: read the persisted build config snapshot from
+/// `<expectedBuildsDir>/<sandboxId>.config.json` and inject its `connectionId`
+/// into the payload, so the next-up `inject_sandbox_oracle_config` can resolve
+/// Oracle credentials. Must run AFTER `inject_expected_builds_dir` (which sets
+/// `expectedBuildsDir`) and BEFORE `inject_sandbox_oracle_config`.
+fn inject_republish_connection_id(payload: &mut Value) -> Result<(), ConnectionTestErr> {
+    let sandbox_id = payload
+        .get("sandboxId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ConnectionTestErr {
+            code: -32602,
+            message: "sandbox.republish requires sandboxId".to_string(),
+        })?
+        .to_string();
+    let builds_dir = payload
+        .get("expectedBuildsDir")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ConnectionTestErr {
+            code: -32603,
+            message: "expectedBuildsDir not injected before connectionId resolution".to_string(),
+        })?
+        .to_string();
+
+    let config_path =
+        std::path::PathBuf::from(&builds_dir).join(format!("{}.config.json", sandbox_id));
+    let raw = std::fs::read_to_string(&config_path).map_err(|e| ConnectionTestErr {
+        code: -32004,
+        message: format!(
+            "republish: build config missing for sandbox {} — was the original publish from this machine? ({})",
+            sandbox_id, e
+        ),
+    })?;
+    let parsed: Value = serde_json::from_str(&raw).map_err(|e| ConnectionTestErr {
+        code: -32603,
+        message: format!("republish: build config JSON malformed: {}", e),
+    })?;
+    let connection_id = parsed
+        .get("connectionId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ConnectionTestErr {
+            code: -32603,
+            message: "republish: build config missing 'connectionId' field".to_string(),
+        })?
+        .to_string();
+
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("connectionId".to_string(), Value::String(connection_id));
+        Ok(())
+    } else {
+        Err(ConnectionTestErr {
+            code: -32602,
+            message: "sandbox payload must be a JSON object".to_string(),
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn sandbox_republish(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    // Frontend only sends { sandboxId }. We inject everything else here:
+    // 1. Cloud envelope (apiToken/apiBaseUrl from auth secrets)
+    // 2. expectedBuildsDir (path to canonical builds dir)
+    // 3. connectionId (read from <buildsDir>/<sandboxId>.config.json saved at publish time)
+    // 4. oracleConfig (resolved from connectionId via the connection store)
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    inject_expected_builds_dir(&app, &mut payload)?;
+    inject_republish_connection_id(&mut payload)?;
+    inject_sandbox_oracle_config(&app, &mut payload)?;
+    call_sidecar(&app, "sandbox.republish", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_pull(app: AppHandle, mut payload: Value) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.pull", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_list(app: AppHandle, mut payload: Value) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.list", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_grant(app: AppHandle, mut payload: Value) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.grant", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_revoke(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.revoke", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_delete(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.delete", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_open(app: AppHandle, mut payload: Value) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.open", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_query(app: AppHandle, mut payload: Value) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.query", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_close(app: AppHandle, mut payload: Value) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.close", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_list_cached(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.list-cached", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_leave(app: AppHandle, mut payload: Value) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.leave", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_mark_seen(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.markSeen", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_list_last_seen(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    call_sidecar(&app, "sandbox.listLastSeen", payload).await
+}
+
+/// Resolve sandbox Oracle credentials server-side and inject them into the
+/// payload before forwarding to the sidecar. The renderer passes only
+/// `connectionId` (and the build spec); the password is read from the OS
+/// keychain by `ConnectionService::sandbox_oracle_config` and never crosses
+/// the JS process. Look up either at the payload root (list-schema-tables /
+/// compute-fk-closure) or under `payload.spec` (sandbox.build), since the
+/// build spec is the only place that nests the connection identifier.
+///
+/// Defense-in-depth: explicitly REMOVE any pre-existing `oracleConfig` key
+/// before re-inserting the Rust-resolved value. `serde_json::Map::insert`
+/// already overwrites, but the explicit remove makes it visually obvious
+/// to future maintainers that no renderer-supplied oracleConfig survives.
+/// If a future commands.rs regression ever calls `call_sidecar` without
+/// going through this helper, the sidecar would naively trust a forged
+/// renderer payload — that is documented as a known gap; the long-term fix
+/// is an HMAC nonce shared with the sidecar at spawn time so the sidecar
+/// can refuse calls without a Rust-issued tag.
+fn inject_sandbox_oracle_config(
+    app: &AppHandle,
+    payload: &mut Value,
+) -> Result<(), ConnectionTestErr> {
+    let connection_id = payload
+        .get("connectionId")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            payload
+                .get("spec")
+                .and_then(|s| s.get("connectionId"))
+                .and_then(|v| v.as_str())
+        })
+        .ok_or_else(|| ConnectionTestErr {
+            code: -32602,
+            message: "missing connectionId in sandbox payload".to_string(),
+        })?
+        .to_string();
+
+    let svc = app.state::<ConnectionService>();
+    let oracle_config =
+        svc.sandbox_oracle_config(&connection_id)
+            .map_err(|e| ConnectionTestErr {
+                code: e.code,
+                message: e.message,
+            })?;
+
+    if let Some(obj) = payload.as_object_mut() {
+        // Belt-and-suspenders: scrub any renderer-supplied value first.
+        obj.remove("oracleConfig");
+        obj.insert("oracleConfig".to_string(), oracle_config);
+        Ok(())
+    } else {
+        Err(ConnectionTestErr {
+            code: -32602,
+            message: "sandbox payload must be a JSON object".to_string(),
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn sandbox_list_schema_tables(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    inject_sandbox_oracle_config(&app, &mut payload)?;
+    call_sidecar(&app, "sandbox.list-schema-tables", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_compute_fk_closure(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    inject_sandbox_oracle_config(&app, &mut payload)?;
+    call_sidecar(&app, "sandbox.compute-fk-closure", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_discover_plsql(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    inject_sandbox_oracle_config(&app, &mut payload)?;
+    call_sidecar(&app, "sandbox.discover_plsql", payload).await
+}
+
+#[tauri::command]
+pub async fn sandbox_build_dry_run(
+    app: AppHandle,
+    mut payload: Value,
+) -> Result<Value, ConnectionTestErr> {
+    // Identical RPC to sandbox.build; the frontend wrapper forces dryRun:true
+    // in the spec before this is invoked. Phase events still flow through the
+    // existing sidecar response envelope.
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    inject_expected_builds_dir(&app, &mut payload)?;
+    inject_sandbox_oracle_config(&app, &mut payload)?;
+    call_sidecar(&app, "sandbox.build", payload).await
+}
+
+/// Windows reserved device names (case-insensitive, with or without a trailing
+/// extension) — opening a file with one of these names refers to the legacy
+/// device, not a regular file. Surfaced as confusing failures even when the
+/// path is otherwise rooted under app_data.
+const WINDOWS_RESERVED_BASENAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Sanitize a renderer-suggested sandbox basename so the resolved outPath is
+/// always Rust-controlled. Strips path separators, parent-dir tokens, and any
+/// chars outside `[A-Za-z0-9._-]`; rejects Windows reserved device names by
+/// prefixing `_`; falls back to "sandbox" when the result would be empty.
+/// Bounded length prevents pathological filenames.
+fn sanitize_sandbox_basename(suggested: &str) -> String {
+    let cleaned: String = suggested
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .collect();
+    let trimmed = cleaned.trim_matches('.').trim_matches('-');
+    let mut base = if trimmed.is_empty() {
+        "sandbox".to_string()
+    } else {
+        trimmed.to_string()
+    };
+
+    // Check Windows reserved device names against the part before any '.'
+    // extension (CON.vsk would still reach the console device).
+    let stem = base.split('.').next().unwrap_or("").to_uppercase();
+    if WINDOWS_RESERVED_BASENAMES.iter().any(|r| *r == stem) {
+        base.insert(0, '_');
+    }
+
+    let max_len = 64;
+    if base.len() > max_len {
+        base[..max_len].to_string()
+    } else {
+        base
+    }
+}
+
+#[cfg(test)]
+mod sandbox_basename_tests {
+    use super::sanitize_sandbox_basename;
+
+    #[test]
+    fn keeps_alphanumeric_and_safe_punctuation() {
+        assert_eq!(
+            sanitize_sandbox_basename("ORDERS_2025-Q1.demo"),
+            "ORDERS_2025-Q1.demo"
+        );
+    }
+
+    #[test]
+    fn strips_path_separators() {
+        assert_eq!(sanitize_sandbox_basename("../../etc/hosts"), "etchosts");
+        assert_eq!(
+            sanitize_sandbox_basename("..\\..\\Windows\\System32"),
+            "WindowsSystem32"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_sandbox_on_empty_result() {
+        assert_eq!(sanitize_sandbox_basename(""), "sandbox");
+        assert_eq!(sanitize_sandbox_basename("...."), "sandbox");
+        assert_eq!(sanitize_sandbox_basename("////"), "sandbox");
+        assert_eq!(sanitize_sandbox_basename("São Paulo"), "SoPaulo");
+    }
+
+    #[test]
+    fn caps_length_at_64() {
+        let long = "A".repeat(200);
+        assert_eq!(sanitize_sandbox_basename(&long).len(), 64);
+    }
+
+    #[test]
+    fn prefixes_underscore_on_windows_reserved_names() {
+        assert_eq!(sanitize_sandbox_basename("CON"), "_CON");
+        assert_eq!(sanitize_sandbox_basename("aux"), "_aux");
+        assert_eq!(sanitize_sandbox_basename("NUL.vsk"), "_NUL.vsk");
+        assert_eq!(sanitize_sandbox_basename("COM1.demo"), "_COM1.demo");
+        assert_eq!(sanitize_sandbox_basename("LPT9"), "_LPT9");
+        // not reserved
+        assert_eq!(sanitize_sandbox_basename("CONNECTION"), "CONNECTION");
+        assert_eq!(sanitize_sandbox_basename("LPT0"), "LPT0");
+    }
+
+    #[test]
+    fn unicode_silently_stripped_to_ascii() {
+        // Documents the current behavior — non-ASCII chars are dropped. If
+        // localized names need to round-trip, normalize to NFC + Punycode in
+        // the renderer first, or surface a UI hint when the result differs.
+        assert_eq!(sanitize_sandbox_basename("ção_café"), "o_caf");
+    }
+}
+
+#[tauri::command]
+pub async fn sandbox_build(app: AppHandle, mut payload: Value) -> Result<Value, ConnectionTestErr> {
+    // Real (non-dryRun) sandbox build — runs the full extract/encrypt/pack
+    // pipeline and writes the .vsk under the app data dir. The renderer's
+    // suggested outPath is ignored to prevent path-traversal (../etc/hosts,
+    // UNC paths, arbitrary system locations); Rust always constructs an
+    // app-data-rooted path from a sanitized basename derived from sandbox
+    // name. v1 of the wizard treats the local .vsk as ephemeral (the next
+    // step uploads it).
+    if airgap_active(&app).await {
+        return Err(airgap_blocked_err());
+    }
+    inject_cloud_envelope(&mut payload)?;
+    inject_sandbox_oracle_config(&app, &mut payload)?;
+
+    let sandbox_name = payload
+        .get("spec")
+        .and_then(|s| s.get("sandboxName"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("sandbox");
+    let basename = sanitize_sandbox_basename(sandbox_name);
+
+    let app_data = app.path().app_data_dir().map_err(|_| ConnectionTestErr {
+        code: -32603,
+        message: "could not resolve app data dir for sandbox build".to_string(),
+    })?;
+    let builds_dir = app_data.join("sandbox-builds");
+    std::fs::create_dir_all(&builds_dir).map_err(|e| ConnectionTestErr {
+        code: -32603,
+        message: format!("could not create sandbox-builds dir: {}", e),
+    })?;
+    inject_expected_builds_dir(&app, &mut payload)?;
+    // Append a timestamp so two distinct user-typed names that sanitize to
+    // the same basename ("café" / "cafe" → both "cafe", or any reuse of the
+    // same name across builds) never overwrite each other on disk. Format is
+    // `<basename>-<unix-millis>.vsk` — monotonically increasing so the
+    // newest build is the lexicographically-last entry in the directory
+    // (helps diagnostics + future cleanup jobs).
+    let stamp = chrono::Utc::now().timestamp_millis();
+    let out_path = builds_dir.join(format!("{}-{}.vsk", basename, stamp));
+    let out_path_str = out_path.to_string_lossy().into_owned();
+
+    if let Some(spec) = payload.get_mut("spec").and_then(|s| s.as_object_mut()) {
+        spec.insert("outPath".to_string(), Value::String(out_path_str));
+    }
+
+    call_sidecar(&app, "sandbox.build", payload).await
 }
 
 // Sprint D Onda D.1 — Command Window history + script reader.
@@ -2274,587 +2701,4 @@ pub async fn command_script_read(app: AppHandle, path: String) -> Result<String,
     }
     std::fs::read_to_string(&canon)
         .map_err(|e| format!("SP2-0310: unable to read file \"{path}\": {e}"))
-}
-
-// ── Item #1A — MViews, Synonyms, DB Links — T1A ──────────────────────────────
-
-#[tauri::command]
-pub async fn mview_details(
-    app: AppHandle,
-    owner: String,
-    name: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(
-        &app,
-        "mview.details",
-        json!({ "owner": owner, "name": name }),
-    )
-    .await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn mview_refresh(
-    app: AppHandle,
-    owner: String,
-    name: String,
-    method: String,
-    env: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(
-        &app,
-        "mview.refresh",
-        json!({ "owner": owner, "name": name, "method": method, "env": env }),
-    )
-    .await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn synonym_details(
-    app: AppHandle,
-    owner: String,
-    name: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(
-        &app,
-        "synonym.details",
-        json!({ "owner": owner, "name": name }),
-    )
-    .await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn objects_list_dblinks(
-    app: AppHandle,
-    owner: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(
-        &app,
-        "objects.list.dblinks",
-        json!({ "owner": owner }),
-    )
-    .await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn object_ddl_dblink(
-    app: AppHandle,
-    name: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(
-        &app,
-        "object.ddl.dblink",
-        json!({ "name": name }),
-    )
-    .await?;
-    Ok(res)
-}
-
-// ── Item #1B — Directories, Queues — T1B.2 / T1B.3 ───────────────────────────
-
-#[tauri::command]
-pub async fn objects_list_directories(
-    app: AppHandle,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "objects.list.directories", json!({})).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn directory_details(
-    app: AppHandle,
-    name: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "directory.details", json!({ "name": name })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn objects_list_queues(
-    app: AppHandle,
-    owner: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "objects.list.queues", json!({ "owner": owner })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn queue_details(
-    app: AppHandle,
-    owner: String,
-    name: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "queue.details", json!({ "owner": owner, "name": name })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn queue_ddl(
-    app: AppHandle,
-    owner: String,
-    name: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "queue.ddl", json!({ "owner": owner, "name": name })).await?;
-    Ok(res)
-}
-
-// ── Item #1B T1B.1 — Scheduler Jobs ──────────────────────────────────────────
-
-#[tauri::command]
-pub async fn objects_list_scheduler_jobs(
-    app: AppHandle,
-    owner: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "objects.list.scheduler_jobs", json!({ "owner": owner })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn scheduler_job_details(
-    app: AppHandle,
-    owner: String,
-    name: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "scheduler.job.details", json!({ "owner": owner, "name": name })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn legacy_job_details(
-    app: AppHandle,
-    job_id: i64,
-    owner: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "scheduler.job.details.legacy", json!({ "jobId": job_id, "owner": owner })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn scheduler_job_ddl(
-    app: AppHandle,
-    owner: String,
-    name: String,
-    legacy: Option<bool>,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "scheduler.job.ddl", json!({ "owner": owner, "name": name, "legacy": legacy })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn scheduler_program_details(
-    app: AppHandle,
-    owner: String,
-    program_name: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "scheduler.program.details", json!({ "owner": owner, "programName": program_name })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn scheduler_schedule_details(
-    app: AppHandle,
-    owner: String,
-    schedule_name: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "scheduler.schedule.details", json!({ "owner": owner, "scheduleName": schedule_name })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn scheduler_job_priv_check(
-    app: AppHandle,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "scheduler.job.priv_check", json!({})).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn scheduler_job_run(
-    app: AppHandle,
-    owner: String,
-    name: String,
-    confirmed_prod_run: Option<bool>,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(
-        &app,
-        "scheduler.job.run",
-        json!({ "owner": owner, "name": name, "confirmedProdRun": confirmed_prod_run }),
-    ).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn scheduler_job_enable(
-    app: AppHandle,
-    owner: String,
-    name: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "scheduler.job.enable", json!({ "owner": owner, "name": name })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn scheduler_job_disable(
-    app: AppHandle,
-    owner: String,
-    name: String,
-    confirmed_prod_disable: Option<bool>,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(
-        &app,
-        "scheduler.job.disable",
-        json!({ "owner": owner, "name": name, "confirmedProdDisable": confirmed_prod_disable }),
-    ).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn dbms_job_run(
-    app: AppHandle,
-    job_id: i64,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "dbms_job.run", json!({ "jobId": job_id })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn dbms_job_broken(
-    app: AppHandle,
-    job_id: i64,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "dbms_job.broken", json!({ "jobId": job_id })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn dbms_job_unbroken(
-    app: AppHandle,
-    job_id: i64,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "dbms_job.unbroken", json!({ "jobId": job_id })).await?;
-    Ok(res)
-}
-
-// ── Item #1C T1C.1+T1C.2 — Users + Sessions ──────────────────────────────────
-
-#[tauri::command]
-pub async fn user_details(
-    app: AppHandle,
-    username: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "user.details", json!({ "username": username })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn user_profile_details(
-    app: AppHandle,
-    profile: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "user.profile.details", json!({ "profile": profile })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn user_quotas(
-    app: AppHandle,
-    username: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "user.quotas", json!({ "username": username })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn sessions_list_all(
-    app: AppHandle,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "sessions.list.all", json!({})).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn session_sql_preview(
-    app: AppHandle,
-    sql_id: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "session.sql.preview", json!({ "sqlId": sql_id })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn session_priv_check(
-    app: AppHandle,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "session.priv.check", json!({})).await?;
-    Ok(res)
-}
-
-// ── Item #1C T1C.3+T1C.4 — Session Kill + Privileges ─────────────────────────
-
-#[tauri::command]
-pub async fn session_kill(
-    app: AppHandle,
-    sid: i64,
-    serial: i64,
-    confirmed_prod_kill: Option<bool>,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(
-        &app,
-        "session.kill",
-        json!({ "sid": sid, "serial": serial, "confirmedProdKill": confirmed_prod_kill }),
-    )
-    .await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn privileges_list(
-    app: AppHandle,
-    schema: String,
-) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "privileges.list", json!({ "schema": schema })).await?;
-    Ok(res)
-}
-
-#[tauri::command]
-pub async fn sessions_blocking_chain(app: AppHandle) -> Result<Value, ConnectionTestErr> {
-    let res = call_sidecar(&app, "sessions.blocking.chain", json!({})).await?;
-    Ok(res)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    // Returns (entry_json_line, hmac) for use as the next prevHash.
-    fn make_entry(key: &[u8], prev_hash: &str, ts: &str, sql: &str) -> (String, String) {
-        let body = serde_json::json!({
-            "connectionId": "c1",
-            "elapsedMs": 5u64,
-            "env": "dev",
-            "errorCode": null,
-            "errorMessage": null,
-            "host": "localhost",
-            "origin": "user_typed",
-            "originDetail": null,
-            "rowCount": 1u64,
-            "source": "user",
-            "sql": sql,
-            "success": true,
-            "ts": ts,
-            "username": "test",
-        });
-        let body_str = body.to_string();
-        let hmac = crate::audit::chain::compute_hmac(key, prev_hash, &body_str);
-        let mut entry = body.as_object().unwrap().clone();
-        entry.insert("prevHash".to_string(), Value::String(prev_hash.to_string()));
-        entry.insert("hmac".to_string(), Value::String(hmac.clone()));
-        (Value::Object(entry).to_string(), hmac)
-    }
-
-    fn legacy_entry(ts: &str, sql: &str) -> String {
-        serde_json::json!({ "ts": ts, "sql": sql, "success": true }).to_string()
-    }
-
-    #[test]
-    fn verify_nonexistent_path_returns_empty_ok() {
-        let path = std::path::Path::new("/no/such/audit/file.jsonl");
-        let result = verify_chain_file(path, &[0u8; 32]);
-        assert!(result.ok);
-        assert_eq!(result.checked, 0);
-        assert_eq!(result.skipped_legacy, 0);
-        assert_eq!(result.sub_chains, 0);
-        assert!(result.broken_at.is_none());
-    }
-
-    #[test]
-    fn verify_empty_file_returns_ok() {
-        let mut f = NamedTempFile::new().unwrap();
-        writeln!(f).unwrap();
-        let result = verify_chain_file(f.path(), &[0u8; 32]);
-        assert!(result.ok);
-        assert_eq!(result.checked, 0);
-    }
-
-    #[test]
-    fn verify_single_valid_entry() {
-        let key = vec![1u8; 32];
-        let mut f = NamedTempFile::new().unwrap();
-        let (line, _) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL");
-        writeln!(f, "{line}").unwrap();
-        let result = verify_chain_file(f.path(), &key);
-        assert!(result.ok, "expected ok");
-        assert_eq!(result.checked, 1);
-        assert_eq!(result.skipped_legacy, 0);
-        assert_eq!(result.sub_chains, 1);
-        assert!(result.broken_at.is_none());
-    }
-
-    #[test]
-    fn verify_two_linked_entries() {
-        let key = vec![2u8; 32];
-        let mut f = NamedTempFile::new().unwrap();
-        let (line1, hmac1) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL");
-        let (line2, _) = make_entry(&key, &hmac1, "2026-05-11T10:00:01.000Z", "SELECT 2 FROM DUAL");
-        writeln!(f, "{line1}").unwrap();
-        writeln!(f, "{line2}").unwrap();
-        let result = verify_chain_file(f.path(), &key);
-        assert!(result.ok, "expected ok");
-        assert_eq!(result.checked, 2);
-        assert_eq!(result.sub_chains, 1);
-    }
-
-    #[test]
-    fn verify_legacy_entry_skipped() {
-        let key = vec![3u8; 32];
-        let mut f = NamedTempFile::new().unwrap();
-        writeln!(f, "{}", legacy_entry("2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL")).unwrap();
-        let result = verify_chain_file(f.path(), &key);
-        assert!(result.ok, "legacy-only file should be ok");
-        assert_eq!(result.skipped_legacy, 1);
-        assert_eq!(result.checked, 0);
-        assert_eq!(result.sub_chains, 0);
-    }
-
-    #[test]
-    fn verify_mixed_legacy_and_chained() {
-        let key = vec![4u8; 32];
-        let mut f = NamedTempFile::new().unwrap();
-        writeln!(f, "{}", legacy_entry("2026-05-11T09:59:00.000Z", "SELECT OLD FROM DUAL")).unwrap();
-        let (line, _) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT NEW FROM DUAL");
-        writeln!(f, "{line}").unwrap();
-        let result = verify_chain_file(f.path(), &key);
-        assert!(result.ok);
-        assert_eq!(result.skipped_legacy, 1);
-        assert_eq!(result.checked, 1);
-        assert_eq!(result.sub_chains, 1);
-    }
-
-    #[test]
-    fn verify_tampered_body_detected() {
-        let key = vec![5u8; 32];
-        let mut f = NamedTempFile::new().unwrap();
-        let (line, _) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL");
-        // Parse, change a field, re-serialize without updating HMAC.
-        let mut obj: serde_json::Map<String, Value> =
-            serde_json::from_str::<Value>(&line).unwrap().as_object().unwrap().clone();
-        obj.insert("sql".to_string(), Value::String("DROP TABLE employees".to_string()));
-        let tampered = Value::Object(obj).to_string();
-        writeln!(f, "{tampered}").unwrap();
-        let result = verify_chain_file(f.path(), &key);
-        assert!(!result.ok, "tampered body must fail");
-        assert_eq!(result.broken_at.as_ref().unwrap().reason, "hmac_mismatch");
-    }
-
-    #[test]
-    fn verify_prev_hash_mismatch_detected() {
-        let key = vec![6u8; 32];
-        let mut f = NamedTempFile::new().unwrap();
-        // Entry1 is valid — after processing, expected_prev = hmac1.
-        let (line1, _hmac1) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1");
-        // Entry2 uses "deadbeef" as prevHash — not "genesis" (so no sub-chain reset)
-        // and not hmac1 → prev_hash_mismatch fires before HMAC check.
-        let (line2, _) = make_entry(&key, "deadbeef", "2026-05-11T10:00:01.000Z", "SELECT 2");
-        writeln!(f, "{line1}").unwrap();
-        writeln!(f, "{line2}").unwrap();
-        let result = verify_chain_file(f.path(), &key);
-        assert!(!result.ok, "wrong prevHash must fail");
-        assert_eq!(result.broken_at.as_ref().unwrap().reason, "prev_hash_mismatch");
-        assert_eq!(result.broken_at.as_ref().unwrap().index, 1);
-    }
-
-    #[test]
-    fn verify_two_sub_chains_ok() {
-        let key = vec![7u8; 32];
-        let mut f = NamedTempFile::new().unwrap();
-        // Sub-chain 1: one entry.
-        let (line1, _) = make_entry(&key, "genesis", "2026-05-11T08:00:00.000Z", "SELECT 1");
-        // Sub-chain 2: starts fresh after an app restart (prevHash back to genesis).
-        let (line2, _) = make_entry(&key, "genesis", "2026-05-11T09:00:00.000Z", "SELECT 2");
-        writeln!(f, "{line1}").unwrap();
-        writeln!(f, "{line2}").unwrap();
-        let result = verify_chain_file(f.path(), &key);
-        assert!(result.ok, "two sub-chains must still be ok");
-        assert_eq!(result.sub_chains, 2);
-        assert_eq!(result.checked, 2);
-    }
-
-    #[test]
-    fn verify_long_chain_ok() {
-        let key = vec![8u8; 32];
-        let mut f = NamedTempFile::new().unwrap();
-        let mut prev = "genesis".to_string();
-        for i in 0..50 {
-            let ts = format!("2026-05-11T10:{:02}:00.000Z", i);
-            let sql = format!("SELECT {i} FROM DUAL");
-            let (line, hmac) = make_entry(&key, &prev, &ts, &sql);
-            writeln!(f, "{line}").unwrap();
-            prev = hmac;
-        }
-        let result = verify_chain_file(f.path(), &key);
-        assert!(result.ok);
-        assert_eq!(result.checked, 50);
-        assert_eq!(result.sub_chains, 1);
-    }
-
-    #[test]
-    fn verify_wrong_key_detects_hmac_mismatch() {
-        let write_key = vec![9u8; 32];
-        let verify_key = vec![10u8; 32];
-        let mut f = NamedTempFile::new().unwrap();
-        let (line, _) = make_entry(&write_key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1");
-        writeln!(f, "{line}").unwrap();
-        let result = verify_chain_file(f.path(), &verify_key);
-        assert!(!result.ok, "wrong verify key must fail");
-        assert_eq!(result.broken_at.as_ref().unwrap().reason, "hmac_mismatch");
-    }
-
-    #[tokio::test]
-    async fn rate_limit_blocks_second_immediate_call() {
-        let rl = VerifyChainRateLimit {
-            last_call: tokio::sync::Mutex::new(None),
-        };
-        // First call sets the timestamp.
-        {
-            let mut last = rl.last_call.lock().await;
-            assert!(last.is_none());
-            *last = Some(std::time::Instant::now());
-        }
-        // Immediate second check: elapsed < VERIFY_MIN_INTERVAL → rate-limited.
-        {
-            let last = rl.last_call.lock().await;
-            let elapsed = last.unwrap().elapsed();
-            assert!(
-                elapsed < VERIFY_MIN_INTERVAL,
-                "elapsed {elapsed:?} should be less than {VERIFY_MIN_INTERVAL:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn rate_limit_allows_after_expiry() {
-        let rl = VerifyChainRateLimit {
-            last_call: tokio::sync::Mutex::new(None),
-        };
-        // Simulate a call that happened 61 seconds ago.
-        {
-            let mut last = rl.last_call.lock().await;
-            *last = Some(
-                std::time::Instant::now()
-                    .checked_sub(std::time::Duration::from_secs(61))
-                    .unwrap(),
-            );
-        }
-        let last = rl.last_call.lock().await;
-        let elapsed = last.unwrap().elapsed();
-        assert!(
-            elapsed >= VERIFY_MIN_INTERVAL,
-            "elapsed {elapsed:?} should be >= {VERIFY_MIN_INTERVAL:?}"
-        );
-    }
 }

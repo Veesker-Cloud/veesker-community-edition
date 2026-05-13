@@ -17,7 +17,7 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio::sync::Mutex;
 
-use crate::commands::{ActiveSessionEnv, AirGapState, AuditChainState, PsdpmState, VerifyChainRateLimit};
+use crate::commands::{ActiveSessionEnv, AirGapState, AuditChainState, PsdpmState};
 use crate::persistence::connections::ConnectionService;
 use crate::sidecar::SidecarState;
 use crate::tray::{ActiveConnection, TrayHandle, TrayState};
@@ -79,16 +79,9 @@ pub fn run() {
         // L2.1 PSDPM (PL/SQL Developer Parity Mode) — initially off; flipped
         // to the active connection's psdpm_mode at workspace_open time.
         .manage(PsdpmState(tokio::sync::Mutex::new(false)))
-        // Single global mutex serializes audit chain writes.
-        // Acceptable while audit is sequential (1 statement at a time per
-        // active session). Multi-connection parallel execution may require
-        // per-connection chains — tracked for Item #5 (multi-conn).
         .manage(AuditChainState(tokio::sync::Mutex::new(
             "genesis".to_string(),
         )))
-        .manage(VerifyChainRateLimit {
-            last_call: tokio::sync::Mutex::new(None),
-        })
         .setup(|app| {
             let app_data = app.path().app_data_dir().expect("app data dir");
             let db_path = app_data.join("veesker.db");
@@ -236,6 +229,7 @@ pub fn run() {
             commands::connection_get,
             commands::connection_save,
             commands::connection_delete,
+            commands::connection_sandbox_oracle_check,
             commands::wallet_inspect,
             commands::workspace_open,
             commands::workspace_close,
@@ -255,10 +249,10 @@ pub fn run() {
             commands::command_history_clear_inaccessible,
             commands::command_script_read,
             commands::audit_recent,
-            commands::audit_verify_chain,
             commands::compile_errors_get,
             commands::object_ddl_get,
             commands::object_dataflow_get,
+            commands::vision_graph,
             commands::objects_list_plsql,
             commands::objects_search,
             commands::schema_kind_counts,
@@ -314,11 +308,6 @@ pub fn run() {
             commands::ords_clients_revoke,
             commands::dml_preview,
             commands::unsafe_dml_confirm,
-            commands::ddl_confirm,
-            commands::ddl_unlock,
-            commands::audit_ddl_event,
-            commands::session_self,
-            commands::confirm_rollback_tx,
             commands::perf_stats,
             commands::object_version_capture,
             commands::object_version_list,
@@ -333,40 +322,31 @@ pub fn run() {
             commands::auth_token_clear,
             commands::cloud_api_get,
             commands::cloud_api_post,
+            commands::sandbox_ensure_keypair,
+            commands::sandbox_publish,
+            commands::sandbox_republish,
+            commands::sandbox_pull,
+            commands::sandbox_list,
+            commands::sandbox_grant,
+            commands::sandbox_revoke,
+            commands::sandbox_delete,
+            commands::sandbox_open,
+            commands::sandbox_query,
+            commands::sandbox_close,
+            commands::sandbox_list_cached,
+            commands::sandbox_leave,
+            commands::sandbox_mark_seen,
+            commands::sandbox_list_last_seen,
+            commands::sandbox_list_schema_tables,
+            commands::sandbox_compute_fk_closure,
+            commands::sandbox_discover_plsql,
+            commands::sandbox_build_dry_run,
+            commands::sandbox_build,
+            commands::session_self,
             commands::ai_approval_resolve,
-            commands::mview_details,
-            commands::mview_refresh,
-            commands::synonym_details,
-            commands::objects_list_dblinks,
-            commands::object_ddl_dblink,
-            commands::objects_list_directories,
-            commands::directory_details,
-            commands::objects_list_queues,
-            commands::queue_details,
-            commands::queue_ddl,
-            commands::objects_list_scheduler_jobs,
-            commands::scheduler_job_details,
-            commands::legacy_job_details,
-            commands::scheduler_job_ddl,
-            commands::scheduler_program_details,
-            commands::scheduler_schedule_details,
-            commands::scheduler_job_priv_check,
-            commands::scheduler_job_run,
-            commands::scheduler_job_enable,
-            commands::scheduler_job_disable,
-            commands::dbms_job_run,
-            commands::dbms_job_broken,
-            commands::dbms_job_unbroken,
-            commands::user_details,
-            commands::user_profile_details,
-            commands::user_quotas,
-            commands::sessions_list_all,
-            commands::session_sql_preview,
-            commands::session_priv_check,
-            commands::session_kill,
-            commands::privileges_list,
-            commands::sessions_blocking_chain,
+            commands::confirm_rollback_tx,
             terminal::terminal_create,
+            terminal::terminal_confirm_session,
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close,

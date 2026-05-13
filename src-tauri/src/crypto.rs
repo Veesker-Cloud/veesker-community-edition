@@ -1,6 +1,6 @@
 // Copyright 2022-2026 Geraldo Ferreira Viana Júnior
 // Licensed under the Apache License, Version 2.0
-// https://github.com/veesker-cloud/veesker-community-edition
+// https://github.com/veesker-cloud/veesker-cloud-edition
 
 // Onda 1.B (Sprint C) — encryption-at-rest primitives.
 //
@@ -11,6 +11,12 @@
 // Each key is generated once on first start. Lost keychain = lost data: no
 // escrow exists by design. The threat model is laptop theft / compromised
 // disk, not the user themselves.
+//
+// Note: the audit-cipher-key is INDEPENDENT from the audit-hmac-key
+// introduced in Sprint B. The HMAC chain key signs entry bodies for tamper
+// detection; the cipher key encrypts the JSONL wire format. An attacker
+// with read-only access to the JSONL but neither key still cannot recover
+// SQL bodies; a compromise of one key does not weaken the other.
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
@@ -18,6 +24,7 @@ use aes_gcm::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use keyring::Entry;
+use rand::RngCore;
 
 const KEY_BYTES: usize = 32;
 const KEY_HEX_LEN: usize = KEY_BYTES * 2;
@@ -66,7 +73,8 @@ pub fn get_or_create_command_history_key() -> Option<Vec<u8>> {
     {
         return Some(bytes);
     }
-    let bytes: Vec<u8> = (0..KEY_BYTES).map(|_| rand::random::<u8>()).collect();
+    let mut bytes = vec![0u8; KEY_BYTES];
+    rand::thread_rng().fill_bytes(&mut bytes);
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     if entry.set_password(&hex).is_err() {
         eprintln!(
@@ -95,7 +103,8 @@ fn get_or_create_key(keychain_name: &str, log_label: &str) -> Vec<u8> {
     {
         return bytes;
     }
-    let bytes: Vec<u8> = (0..KEY_BYTES).map(|_| rand::random::<u8>()).collect();
+    let mut bytes = vec![0u8; KEY_BYTES];
+    rand::thread_rng().fill_bytes(&mut bytes);
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     if entry.set_password(&hex).is_err() {
         eprintln!("{log_label}: could not persist key to keychain");
@@ -206,18 +215,12 @@ mod tests {
     fn tampered_ciphertext_fails_authentication() {
         let key = fixed_key();
         let enc = encrypt_audit_line(&key, "do not modify").unwrap();
-        // Flip a bit inside the base64 payload (last char before padding).
         let mut bytes: Vec<u8> = enc.into_bytes();
-        // Find a base64 char to flip (ASCII alnum / +/ / =) past the prefix.
         let prefix_len = ENCRYPTED_LINE_PREFIX.len();
         let target = bytes.len() - 2;
         assert!(target > prefix_len);
         bytes[target] ^= 1;
         let tampered = String::from_utf8(bytes).unwrap();
-        // Either the base64 still decodes but the GCM tag fails, or the
-        // base64 itself is invalid — both are "Err" outcomes (never
-        // silently return Ok). The point: tampering never produces a
-        // valid plaintext.
         assert!(decrypt_audit_line_if_envelope(&key, &tampered).is_err());
     }
 
@@ -232,8 +235,6 @@ mod tests {
     fn pragma_arg_format_is_quoted_blob_literal() {
         let key = vec![0xab; 32];
         let arg = db_key_as_sqlcipher_pragma_arg(&key);
-        // PRAGMA key = "x'abab...abab"  (quotes around the blob literal so
-        // execute_batch can splice it without a bind).
         assert!(arg.starts_with("\"x'"));
         assert!(arg.ends_with("'\""));
         let inner = &arg[3..arg.len() - 2];
@@ -253,5 +254,33 @@ mod tests {
     fn rejects_short_key() {
         let short = vec![0u8; 16];
         assert!(encrypt_audit_line(&short, "hi").is_err());
+    }
+
+    // Sprint B HMAC chain invariant — the chain signs the plain body BEFORE
+    // encryption, so a verifier that knows the audit-hmac-key but NOT the
+    // audit-cipher-key cannot validate the chain (the wire format hides
+    // the body). Conversely, knowing both keys recovers the body and the
+    // chain verifies. This test fixes the layering so future refactors
+    // don't accidentally swap the order.
+    #[test]
+    fn cipher_layer_wraps_around_hmac_signed_body() {
+        let cipher_key = fixed_key();
+        // Imagine the body the Sprint B chain would have signed.
+        let body =
+            r#"{"ts":"2026-05-06T12:00:00.000Z","sql":"SELECT 1","prevHash":"00","hmac":"abcd"}"#;
+        let enc = encrypt_audit_line(&cipher_key, body).unwrap();
+        // The wire format must hide the body — no substring of the plain
+        // body should appear in the ciphertext payload.
+        assert!(
+            !enc.contains("SELECT 1"),
+            "encrypted line must not contain plaintext SQL"
+        );
+        assert!(
+            !enc.contains("\"hmac\":\"abcd\""),
+            "encrypted line must not leak HMAC marker"
+        );
+        // Decrypts back exactly.
+        let dec = decrypt_audit_line_if_envelope(&cipher_key, &enc).unwrap();
+        assert_eq!(dec.as_deref(), Some(body));
     }
 }

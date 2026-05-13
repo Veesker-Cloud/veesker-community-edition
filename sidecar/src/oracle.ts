@@ -378,9 +378,9 @@ export type ConnectionSafety = {
   /**
    * L2.1 PSDPM (PL/SQL Developer Parity Mode). When true, only user-initiated
    * RPCs (origin: user_typed / user_clicked) are allowed to execute SQL on the
-   * connection. AI tool runs (CL only), embed batches (CL only), and any
-   * background pre-fetches are blocked. Propagated from `workspace.open`
-   * params; enforced by `enforcePsdpmForOrigin`.
+   * connection. AI tool runs, embed batches, and any background pre-fetches
+   * are blocked. Propagated from `workspace.open` params; enforced by
+   * `enforcePsdpmForOrigin` and the AI / embed gates in this sidecar.
    */
   psdpm?: boolean;
 };
@@ -506,16 +506,8 @@ import {
   SESSION_SELF_PRIV_MISSING,
   SESSION_SELF_TRANSIENT,
   SESSION_SELF_NOT_FOUND,
-  MVIEW_REFRESH_PROD_REQUIRES_CONFIRMATION,
-  JOB_RUN_PROD_REQUIRES_CONFIRMATION,
-  JOB_DISABLE_PROD_REQUIRES_CONFIRMATION,
-  INVALID_IDENTIFIER,
-  SESSION_KILL_PROD_REQUIRES_CONFIRMATION,
-  INVALID_SESSION_ID,
-  DDL_BLOCKED,
-  DDL_UNLOCK_REQUIRED,
 } from "./errors";
-import { classifySql, classifyDdl, type DdlRiskLevel, isReadOnlySafe, isUnsafeBulkDml, isMergeSql, isTruncateSql, extractTableFromSql } from "./sql-kind";
+import { classifySql, isReadOnlySafe, isUnsafeBulkDml, isMergeSql, isTruncateSql, extractTableFromSql } from "./sql-kind";
 
 /** Injectable clock — swap in tests to simulate time passing. */
 interface Clock { now(): number; }
@@ -524,17 +516,10 @@ let _clock: Clock = wallClock;
 /** Test-only — never call this in production code. */
 export function _testInjectClock(c: Clock): void { _clock = c; }
 export function _testResetClock(): void { _clock = wallClock; }
-export function _testResetDdlWindow(): void { _ddlWindow = null; }
 
 type UnsafeDmlWindow = { table: string; expiresAt: number };
 let _unsafeDmlWindow: UnsafeDmlWindow | null = null;
 const UNSAFE_DML_WINDOW_TTL_MS = 15 * 60 * 1000;
-
-// Item #1E: DDL confirmation window. Scoped to the active connection — cleared
-// in openSession() so a new connection never inherits a prior window.
-type DdlWindow = { kind: "ddl" | "destructive_ddl"; openedAt: number; expiresAt: number };
-let _ddlWindow: DdlWindow | null = null;
-const DDL_WINDOW_TTL_MS = 5 * 60 * 1000;
 
 /**
  * Belt-and-suspenders runtime assertion that mirrors the global
@@ -620,7 +605,6 @@ export async function openSession(p: OpenSessionParams): Promise<OpenSessionResu
       clearSession();
     }
     _unsafeDmlWindow = null;
-    _ddlWindow = null;
 
     const conn = await buildConnection(p);
     try {
@@ -686,8 +670,6 @@ export async function closeSession(): Promise<{ closed: true }> {
       }
       clearSession();
     }
-    _unsafeDmlWindow = null;
-    _ddlWindow = null;
     return { closed: true };
   });
 }
@@ -720,9 +702,7 @@ import { splitSql } from "./sql-splitter";
 
 export type SchemaRow = { name: string; isCurrent: boolean };
 export type ObjectRef = { name: string };
-export type ObjectKind =
-  | "TABLE" | "VIEW" | "SEQUENCE"
-  | "MATERIALIZED_VIEW" | "SYNONYM" | "DB_LINK";
+export type ObjectKind = "TABLE" | "VIEW" | "SEQUENCE";
 
 export type ColumnDef = {
   name: string;
@@ -785,607 +765,15 @@ export async function objectsList(p: {
   type: ObjectKind;
 }): Promise<{ objects: ObjectRef[] }> {
   return withActiveSession(async (conn) => {
-    // MATERIALIZED_VIEW in ALL_OBJECTS uses a space, not underscore
-    const typeMap: Partial<Record<ObjectKind, string>> = {
-      MATERIALIZED_VIEW: "MATERIALIZED VIEW",
-    };
-    const oracleType = typeMap[p.type] ?? p.type;
     const res = await conn.execute<{ NAME: string }>(
       `SELECT object_name AS NAME
          FROM all_objects
         WHERE owner = :owner AND object_type = :type
         ORDER BY object_name`,
-      { owner: p.owner, type: oracleType },
+      { owner: p.owner, type: p.type },
       { outFormat: oracledb.OUT_FORMAT_OBJECT }
     );
     return { objects: (res.rows ?? []).map((r) => ({ name: r.NAME })) };
-  });
-}
-
-export type MViewDetails = {
-  name: string;
-  owner: string;
-  refreshMethod: string;
-  refreshMode: string;
-  lastRefreshDate: string | null;
-  staleness: string;
-  query: string | null;
-};
-
-export async function mviewDetails(p: {
-  owner: string;
-  name: string;
-}): Promise<{ detail: MViewDetails | null }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<{
-        MVIEW_NAME: string;
-        OWNER: string;
-        REFRESH_METHOD: string;
-        REFRESH_MODE: string;
-        LAST_REFRESH_DATE: Date | null;
-        STALENESS: string;
-        QUERY: string | null;
-      }>(
-        `SELECT mview_name, owner, refresh_method, refresh_mode,
-                last_refresh_date, staleness, query
-           FROM all_mviews
-          WHERE owner = :owner AND mview_name = :name`,
-        { owner: p.owner, name: p.name },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
-      const r = res.rows?.[0] ?? null;
-      if (!r) return { detail: null };
-      return {
-        detail: {
-          name: r.MVIEW_NAME,
-          owner: r.OWNER,
-          refreshMethod: r.REFRESH_METHOD,
-          refreshMode: r.REFRESH_MODE,
-          lastRefreshDate: r.LAST_REFRESH_DATE ? r.LAST_REFRESH_DATE.toISOString() : null,
-          staleness: r.STALENESS,
-          query: r.QUERY,
-        },
-      };
-    } catch (e: any) {
-      if (e.errorNum === 942) {
-        // ALL_MVIEWS not accessible — fall back to USER_MVIEWS
-        const res = await conn.execute<{
-          MVIEW_NAME: string;
-          REFRESH_METHOD: string;
-          REFRESH_MODE: string;
-          LAST_REFRESH_DATE: Date | null;
-          STALENESS: string;
-          QUERY: string | null;
-        }>(
-          `SELECT mview_name, refresh_method, refresh_mode,
-                  last_refresh_date, staleness, query
-             FROM user_mviews
-            WHERE mview_name = :name`,
-          { name: p.name },
-          { outFormat: oracledb.OUT_FORMAT_OBJECT }
-        );
-        const r = res.rows?.[0] ?? null;
-        if (!r) return { detail: null };
-        return {
-          detail: {
-            name: r.MVIEW_NAME,
-            owner: p.owner,
-            refreshMethod: r.REFRESH_METHOD,
-            refreshMode: r.REFRESH_MODE,
-            lastRefreshDate: r.LAST_REFRESH_DATE ? r.LAST_REFRESH_DATE.toISOString() : null,
-            staleness: r.STALENESS,
-            query: r.QUERY,
-          },
-        };
-      }
-      throw e;
-    }
-  });
-}
-
-export async function mviewRefresh(p: {
-  owner: string;
-  name: string;
-  method: "FAST" | "COMPLETE" | "FORCE";
-  confirmedProdRefresh?: boolean;
-}): Promise<{ ok: true; durationMs: number; envReal: string }> {
-  return withActiveSession(async (conn) => {
-    const safety = getSessionSafety();
-    const envReal = (safety.env as string | undefined) ?? "unknown";
-
-    if (envReal === "prod" && !p.confirmedProdRefresh) {
-      throw new RpcCodedError(
-        MVIEW_REFRESH_PROD_REQUIRES_CONFIRMATION,
-        `mview.refresh on prod requires confirmedProdRefresh=true. ` +
-        `The UI must display the PROD confirmation dialog before calling this RPC.`
-      );
-    }
-
-    const ownerDotName = `${p.owner}.${p.name}`;
-    const start = Date.now();
-    await conn.execute(
-      `BEGIN DBMS_MVIEW.REFRESH(:mv_name, :method); END;`,
-      { mv_name: ownerDotName, method: p.method }
-    );
-    const durationMs = Date.now() - start;
-    log.info(
-      `[mview] refresh owner=${p.owner} name=${p.name} method=${p.method} ` +
-      `env_real=${envReal} confirmed_prod=${p.confirmedProdRefresh ?? false} durationMs=${durationMs}`
-    );
-    return { ok: true, durationMs, envReal };
-  });
-}
-
-export type SynonymDetails = {
-  name: string;
-  owner: string;
-  targetSchema: string;
-  targetObject: string;
-  targetDbLink: string | null;
-  ddl: string;
-};
-
-export async function synonymDetails(p: {
-  owner: string;
-  name: string;
-}): Promise<{ detail: SynonymDetails | null }> {
-  return withActiveSession(async (conn) => {
-    const res = await conn.execute<{
-      SYNONYM_NAME: string;
-      OWNER: string;
-      TABLE_OWNER: string;
-      TABLE_NAME: string;
-      DB_LINK: string | null;
-      DDL: string;
-    }>(
-      `SELECT syn.synonym_name,
-              syn.owner,
-              syn.table_owner,
-              syn.table_name,
-              syn.db_link,
-              'CREATE '
-                  || CASE WHEN syn.owner = 'PUBLIC' THEN 'PUBLIC ' ELSE '' END
-                  || 'SYNONYM '
-                  || CASE
-                       WHEN syn.owner = 'PUBLIC'
-                            THEN ''
-                       WHEN syn.owner = SYS_CONTEXT('USERENV', 'CURRENT_USER')
-                            THEN ''
-                       ELSE syn.owner || '.'
-                     END
-                  || syn.synonym_name
-                  || ' FOR '
-                  || syn.table_owner || '.' || syn.table_name
-                  || CASE WHEN syn.db_link IS NOT NULL THEN '@' || syn.db_link ELSE '' END
-                  || ';' AS ddl
-         FROM all_synonyms syn
-        WHERE syn.synonym_name = :name
-          AND syn.owner = :owner`,
-      { name: p.name, owner: p.owner },
-      { outFormat: oracledb.OUT_FORMAT_OBJECT }
-    );
-    const r = res.rows?.[0] ?? null;
-    if (!r) return { detail: null };
-    return {
-      detail: {
-        name: r.SYNONYM_NAME,
-        owner: r.OWNER,
-        targetSchema: r.TABLE_OWNER,
-        targetObject: r.TABLE_NAME,
-        targetDbLink: r.DB_LINK,
-        ddl: r.DDL,
-      },
-    };
-  });
-}
-
-export type DbLinkRow = {
-  name: string;
-  owner: string;
-  username: string | null;
-  host: string | null;
-  created: string | null;
-};
-
-export async function dbLinksList(p: {
-  owner: string;
-}): Promise<{ objects: DbLinkRow[] }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<{
-        DB_LINK: string;
-        OWNER: string;
-        USERNAME: string | null;
-        HOST: string | null;
-        CREATED: Date | null;
-      }>(
-        `SELECT db_link, owner, username, host, created
-           FROM dba_db_links
-          WHERE owner = :owner
-          ORDER BY db_link`,
-        { owner: p.owner },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
-      log.info("[schema] db_links source=DBA_DB_LINKS");
-      return {
-        objects: (res.rows ?? []).map((r) => ({
-          name: r.DB_LINK,
-          owner: r.OWNER,
-          username: r.USERNAME,
-          host: r.HOST,
-          created: r.CREATED ? r.CREATED.toISOString() : null,
-        })),
-      };
-    } catch (e: any) {
-      if (e.errorNum === 942) {
-        log.info("[schema] DBA_DB_LINKS not accessible (ORA-00942), fallback to USER_DB_LINKS");
-        const res = await conn.execute<{
-          DB_LINK: string;
-          USERNAME: string | null;
-          HOST: string | null;
-          CREATED: Date | null;
-        }>(
-          `SELECT db_link, username, host, created
-             FROM user_db_links
-            ORDER BY db_link`,
-          {},
-          { outFormat: oracledb.OUT_FORMAT_OBJECT }
-        );
-        return {
-          objects: (res.rows ?? []).map((r) => ({
-            name: r.DB_LINK,
-            owner: p.owner,
-            username: r.USERNAME,
-            host: r.HOST,
-            created: r.CREATED ? r.CREATED.toISOString() : null,
-          })),
-        };
-      }
-      throw e;
-    }
-  });
-}
-
-export async function dbLinkDdl(p: {
-  name: string;
-}): Promise<{ ddl: string }> {
-  return withActiveSession(async (conn) => {
-    const res = await conn.execute<{
-      DB_LINK: string;
-      USERNAME: string | null;
-      HOST: string | null;
-    }>(
-      `SELECT db_link, username, host FROM user_db_links WHERE db_link = :name`,
-      { name: p.name },
-      { outFormat: oracledb.OUT_FORMAT_OBJECT }
-    );
-    const r = res.rows?.[0];
-    if (!r) return { ddl: `-- DB Link ${p.name} not found in USER_DB_LINKS` };
-    const lines = [
-      `CREATE DATABASE LINK ${r.DB_LINK}`,
-      `  CONNECT TO ${r.USERNAME ?? "<<USERNAME>>"}`,
-      `  IDENTIFIED BY "<<REPLACE_WITH_ACTUAL_PASSWORD>>" -- TODO`,
-      `  USING '${r.HOST ?? "<<HOST>>"}';`,
-      `-- WARNING: Oracle does not expose DB Link passwords.`,
-      `-- This DDL is not executable without manual edit.`,
-    ];
-    return { ddl: lines.join("\n") };
-  });
-}
-
-// ── Directories ───────────────────────────────────────────────────────────────
-
-export type DirectoryRow = {
-  name: string;
-  owner: string;
-  path: string;
-};
-
-export async function directoriesList(): Promise<{ directories: DirectoryRow[] }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<{
-        DIRECTORY_NAME: string;
-        OWNER: string;
-        DIRECTORY_PATH: string;
-      }>(
-        `SELECT directory_name, owner, directory_path
-           FROM dba_directories
-          ORDER BY directory_name`,
-        {},
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
-      log.info("[schema] directories source=DBA_DIRECTORIES");
-      return {
-        directories: (res.rows ?? []).map((r) => ({
-          name: r.DIRECTORY_NAME,
-          owner: r.OWNER,
-          path: r.DIRECTORY_PATH,
-        })),
-      };
-    } catch (e: any) {
-      if (e.errorNum === 942) {
-        log.info("[schema] DBA_DIRECTORIES not accessible (ORA-00942), fallback to ALL_DIRECTORIES");
-        const res = await conn.execute<{
-          DIRECTORY_NAME: string;
-          OWNER: string;
-          DIRECTORY_PATH: string;
-        }>(
-          `SELECT directory_name, owner, directory_path
-             FROM all_directories
-            ORDER BY directory_name`,
-          {},
-          { outFormat: oracledb.OUT_FORMAT_OBJECT }
-        );
-        return {
-          directories: (res.rows ?? []).map((r) => ({
-            name: r.DIRECTORY_NAME,
-            owner: r.OWNER,
-            path: r.DIRECTORY_PATH,
-          })),
-        };
-      }
-      throw e;
-    }
-  });
-}
-
-export type DirectoryGrant = {
-  grantee: string;
-  privilege: string;
-};
-
-export async function directoryDetails(p: {
-  name: string;
-}): Promise<{ detail: { name: string; owner: string; path: string; grants: DirectoryGrant[] } | null }> {
-  return withActiveSession(async (conn) => {
-    let base: { name: string; owner: string; path: string } | null = null;
-    try {
-      const res = await conn.execute<{
-        DIRECTORY_NAME: string;
-        OWNER: string;
-        DIRECTORY_PATH: string;
-      }>(
-        `SELECT directory_name, owner, directory_path
-           FROM dba_directories
-          WHERE directory_name = :name`,
-        { name: p.name.toUpperCase() },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
-      const r = res.rows?.[0];
-      if (!r) return { detail: null };
-      base = { name: r.DIRECTORY_NAME, owner: r.OWNER, path: r.DIRECTORY_PATH };
-    } catch (e: any) {
-      if (e.errorNum !== 942) throw e;
-      log.info("[schema] DBA_DIRECTORIES not accessible (ORA-00942), fallback to ALL_DIRECTORIES for detail");
-      const res = await conn.execute<{
-        DIRECTORY_NAME: string;
-        OWNER: string;
-        DIRECTORY_PATH: string;
-      }>(
-        `SELECT directory_name, owner, directory_path
-           FROM all_directories
-          WHERE directory_name = :name`,
-        { name: p.name.toUpperCase() },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
-      const r = res.rows?.[0];
-      if (!r) return { detail: null };
-      base = { name: r.DIRECTORY_NAME, owner: r.OWNER, path: r.DIRECTORY_PATH };
-    }
-
-    let grants: DirectoryGrant[] = [];
-    try {
-      const gRes = await conn.execute<{
-        GRANTEE: string;
-        PRIVILEGE: string;
-      }>(
-        `SELECT grantee, privilege
-           FROM dba_tab_privs
-          WHERE table_schema = 'SYS'
-            AND table_name = :name
-          ORDER BY grantee, privilege`,
-        { name: p.name.toUpperCase() },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
-      grants = (gRes.rows ?? []).map((r) => ({
-        grantee: r.GRANTEE,
-        privilege: r.PRIVILEGE,
-      }));
-    } catch (e: any) {
-      if (e.errorNum !== 942) throw e;
-    }
-
-    return { detail: { ...base, grants } };
-  });
-}
-
-// ── Queues (AQ) ───────────────────────────────────────────────────────────────
-
-export type QueueRow = {
-  name: string;
-  owner: string;
-  queueTable: string;
-  queueType: string;
-  maxRetries: number | null;
-  retryDelay: number | null;
-  retention: number | null;
-  userComment: string | null;
-  // from ALL_QUEUE_TABLES join
-  payloadType: string | null;
-};
-
-export async function queuesList(p: {
-  owner: string;
-}): Promise<{ queues: QueueRow[] }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<{
-        OWNER: string;
-        NAME: string;
-        QUEUE_TABLE: string;
-        QUEUE_TYPE: string;
-        MAX_RETRIES: number | null;
-        RETRY_DELAY: number | null;
-        RETENTION: number | null;
-        USER_COMMENT: string | null;
-        PAYLOAD_TYPE: string | null;
-      }>(
-        `SELECT q.owner, q.name, q.queue_table, q.queue_type,
-                q.max_retries, q.retry_delay, q.retention, q.user_comment,
-                qt.type AS payload_type
-           FROM all_queues q
-           LEFT JOIN all_queue_tables qt
-             ON qt.owner = q.owner AND qt.queue_table = q.queue_table
-          WHERE q.owner = :owner
-            AND q.queue_type != 'EXCEPTION_QUEUE'
-          ORDER BY q.name`,
-        { owner: p.owner },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
-      log.info("[schema] queues source=ALL_QUEUES");
-      return {
-        queues: (res.rows ?? []).map((r) => ({
-          name: r.NAME,
-          owner: r.OWNER,
-          queueTable: r.QUEUE_TABLE,
-          queueType: r.QUEUE_TYPE,
-          maxRetries: r.MAX_RETRIES,
-          retryDelay: r.RETRY_DELAY,
-          retention: r.RETENTION,
-          userComment: r.USER_COMMENT,
-          payloadType: r.PAYLOAD_TYPE,
-        })),
-      };
-    } catch (e: any) {
-      if (e.errorNum === 942) {
-        log.info("[schema] ALL_QUEUES not accessible (ORA-00942)");
-        return { queues: [] };
-      }
-      throw e;
-    }
-  });
-}
-
-export async function queueDetails(p: {
-  owner: string;
-  name: string;
-}): Promise<{ queue: QueueRow | null }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<{
-        OWNER: string;
-        NAME: string;
-        QUEUE_TABLE: string;
-        QUEUE_TYPE: string;
-        MAX_RETRIES: number | null;
-        RETRY_DELAY: number | null;
-        RETENTION: number | null;
-        USER_COMMENT: string | null;
-        PAYLOAD_TYPE: string | null;
-      }>(
-        `SELECT q.owner, q.name, q.queue_table, q.queue_type,
-                q.max_retries, q.retry_delay, q.retention, q.user_comment,
-                qt.type AS payload_type
-           FROM all_queues q
-           LEFT JOIN all_queue_tables qt
-             ON qt.owner = q.owner AND qt.queue_table = q.queue_table
-          WHERE q.owner = UPPER(:owner) AND q.name = UPPER(:name)`,
-        { owner: p.owner, name: p.name },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
-      const r = res.rows?.[0];
-      if (!r) return { queue: null };
-      return {
-        queue: {
-          name: r.NAME,
-          owner: r.OWNER,
-          queueTable: r.QUEUE_TABLE,
-          queueType: r.QUEUE_TYPE,
-          maxRetries: r.MAX_RETRIES,
-          retryDelay: r.RETRY_DELAY,
-          retention: r.RETENTION,
-          userComment: r.USER_COMMENT,
-          payloadType: r.PAYLOAD_TYPE,
-        },
-      };
-    } catch (e: any) {
-      if (e.errorNum === 942) return { queue: null };
-      throw e;
-    }
-  });
-}
-
-export async function queueDdl(p: {
-  owner: string;
-  name: string;
-}): Promise<{ ddl: string }> {
-  return withActiveSession(async (conn) => {
-    // Attempt DBMS_METADATA first — may fail with ORA-39200 for system queues.
-    try {
-      const res = await conn.execute<{ DDL: string }>(
-        `SELECT DBMS_METADATA.GET_DDL('AQ_QUEUE', UPPER(:name), UPPER(:owner)) AS ddl FROM dual`,
-        { name: p.name, owner: p.owner },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
-      const ddl = res.rows?.[0]?.DDL;
-      if (ddl) return { ddl: String(ddl) };
-    } catch (e: any) {
-      // ORA-39200 (not supported), ORA-31603 (object not found) — fall through to reconstruction
-      if (e.errorNum !== 39200 && e.errorNum !== 31603 && e.errorNum !== 942) throw e;
-    }
-
-    // Reconstruct DDL from ALL_QUEUES metadata
-    let meta: {
-      QUEUE_TABLE: string; QUEUE_TYPE: string;
-      MAX_RETRIES: number | null; RETRY_DELAY: number | null;
-      RETENTION: number | null; PAYLOAD_TYPE: string | null;
-    } | null = null;
-    try {
-      const mRes = await conn.execute<{
-        QUEUE_TABLE: string;
-        QUEUE_TYPE: string;
-        MAX_RETRIES: number | null;
-        RETRY_DELAY: number | null;
-        RETENTION: number | null;
-        PAYLOAD_TYPE: string | null;
-      }>(
-        `SELECT q.queue_table, q.queue_type, q.max_retries, q.retry_delay,
-                q.retention, qt.type AS payload_type
-           FROM all_queues q
-           LEFT JOIN all_queue_tables qt
-             ON qt.owner = q.owner AND qt.queue_table = q.queue_table
-          WHERE q.owner = UPPER(:owner) AND q.name = UPPER(:name)`,
-        { owner: p.owner, name: p.name },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT }
-      );
-      meta = mRes.rows?.[0] ?? null;
-    } catch (e: any) {
-      if (e.errorNum !== 942) throw e;
-    }
-
-    if (!meta) {
-      return {
-        ddl: `-- Queue ${p.owner}.${p.name}: DDL not available (DBMS_METADATA failed and ALL_QUEUES not accessible).`,
-      };
-    }
-
-    const lines: string[] = [
-      `-- Note: DBMS_METADATA.GET_DDL not available. Reconstructed from ALL_QUEUES metadata.`,
-      `BEGIN`,
-      `  DBMS_AQADM.CREATE_QUEUE(`,
-      `    queue_name         => '${p.owner}.${p.name}',`,
-      `    queue_table        => '${p.owner}.${meta.QUEUE_TABLE}',`,
-    ];
-    if (meta.MAX_RETRIES !== null) lines.push(`    max_retries        => ${meta.MAX_RETRIES},`);
-    if (meta.RETRY_DELAY !== null) lines.push(`    retry_delay        => ${meta.RETRY_DELAY},`);
-    if (meta.RETENTION !== null) lines.push(`    retention_time     => ${meta.RETENTION},`);
-    lines.push(`    queue_type         => DBMS_AQADM.${meta.QUEUE_TYPE}`);
-    lines.push(`  );`);
-    lines.push(`END;`);
-    if (meta.PAYLOAD_TYPE) lines.push(`-- Payload type: ${meta.PAYLOAD_TYPE}`);
-    return { ddl: lines.join("\n") };
   });
 }
 
@@ -1692,9 +1080,9 @@ async function executeSingleStatement(
   const started = Date.now();
   let r: any;
   const isPlsql = PLSQL_EXEC_RE.test(sql);
-  // oracledb Thin mode strips the trailing `;` from anonymous PL/SQL blocks when
-  // any options object is passed (including `{}`), causing ORA-06550.
-  // Thick mode (OCI) requires the trailing `;` per OCI contract — only strip in Thin.
+  // Thin mode: strip the trailing `;` from anonymous PL/SQL blocks before passing
+  // options to execute() — the Thin driver incorrectly re-strips it otherwise,
+  // producing ORA-06550. Thick mode (OCI) requires the trailing `;` after END.
   const sqlToSend = (PLSQL_ANON_RE.test(sql) && _driverMode === "thin")
     ? sql.replace(/;\s*$/, "")
     : sql;
@@ -1808,8 +1196,8 @@ async function executeSingleStatement(
 export function enforcePsdpmForOrigin(origin: string | undefined): void {
   const safety = getSessionSafety();
   // 4-layer hard-lock Layer 4 (Sprint C): when env=prod, PSDPM is structurally
-  // forced ON regardless of the persisted psdpm_mode flag. Even if a tampered
-  // SQLite row or stale state leaked through, sidecar refuses non-user origins.
+  // forced ON regardless of the persisted psdpm_mode flag. Last-resort defense
+  // even if a tampered SQLite row or stale state leaked through.
   const envForcesPsdpm = safety?.env === "prod";
   if (safety?.psdpm !== true && !envForcesPsdpm) return;
   const allowed = ["user_typed", "user_clicked"];
@@ -1833,16 +1221,10 @@ export function enforcePsdpmForOrigin(origin: string | undefined): void {
  *             acknowledgeTable matching the target table name (-32038).
  *   dev/local — original warnUnsafeDml flag: single confirm via acknowledgeUnsafe (-32031).
  */
-/**
- * @param opts.dryRun - When true, returns the DDL risk level instead of throwing.
- *   MUST be used only for pre-scan (batch collect). Does NOT open any window.
- *   Callers MUST call ddlConfirm() and re-invoke after user approval.
- *   Non-DDL statements always return undefined in dryRun mode.
- */
-export function enforceSafetyForStatement(
+function enforceSafetyForStatement(
   sql: string,
-  opts: { acknowledgeUnsafe?: boolean; acknowledgeTable?: string; dryRun?: boolean } = {}
-): DdlRiskLevel | undefined {
+  opts: { acknowledgeUnsafe?: boolean; acknowledgeTable?: string } = {}
+): void {
   const safety = getSessionSafety();
   const kind = classifySql(sql);
   const env = safety.env as string | undefined;
@@ -1902,80 +1284,6 @@ export function enforceSafetyForStatement(
       );
     }
   }
-
-  // ── DDL gate (Item #1E) ──────────────────────────────────────────────────
-  if (kind === "ddl") {
-    const ddlLevel = classifyDdl(sql);
-    if (ddlLevel === "comment") return undefined;
-
-    // TRUNCATE is already gated by the isUnsafeBulkDml path (DML flow) above.
-    // Skip DDL gate to avoid double-gating TRUNCATE on staging.
-    if (isTruncateSql(sql)) return undefined;
-
-    // DEV and local: DDL passes freely.
-    // Note: security item #1 guarantees env is always set at workspace.open,
-    // so undefined env is unreachable here. Explicit allowlist (no !env clause)
-    // ensures missing env fails-closed rather than open.
-    if (env === "dev" || env === "local") {
-      return opts.dryRun ? ddlLevel : undefined;
-    }
-
-    // dryRun: return classification to caller without opening/checking window.
-    if (opts.dryRun) return ddlLevel;
-
-    const now = _clock.now();
-    const w = _ddlWindow;
-
-    if (ddlLevel === "destructive_ddl") {
-      if (w !== null && w.kind === "destructive_ddl" && now < w.expiresAt) {
-        // Window is valid — DDL_EXECUTED event is written by the frontend after success.
-        log.info(`[security] DDL_GATE_PASS kind=destructive_ddl env=${env} windowAgeMs=${now - w.openedAt}`);
-        return undefined;
-      }
-      if (w !== null && now >= w.expiresAt) {
-        log.info("[security] DDL_WINDOW_EXPIRED reason=expired");
-        _ddlWindow = null;
-      }
-      throw new RpcCodedError(
-        DDL_UNLOCK_REQUIRED,
-        `Destructive DDL requires explicit confirmation on ${env}. Open the DDL confirmation dialog first.`,
-      );
-    } else {
-      // Normal DDL: any open window (ddl OR destructive_ddl) satisfies.
-      if (w !== null && now < w.expiresAt) {
-        log.info(`[security] DDL_GATE_PASS kind=ddl env=${env} windowAgeMs=${now - w.openedAt}`);
-        return undefined;
-      }
-      if (w !== null && now >= w.expiresAt) {
-        log.info("[security] DDL_WINDOW_EXPIRED reason=expired");
-        _ddlWindow = null;
-      }
-      throw new RpcCodedError(
-        DDL_BLOCKED,
-        `DDL statement requires confirmation on ${env}. Open the DDL confirmation dialog first.`,
-      );
-    }
-  }
-
-  return undefined;
-}
-
-/** Open a DDL confirmation window for the active connection. */
-export function ddlConfirm(p: { kind: "ddl" | "destructive_ddl" }): { ok: true; expiresAt: number; openedAt: number } {
-  const now = _clock.now();
-  const expiresAt = now + DDL_WINDOW_TTL_MS;
-  _ddlWindow = { kind: p.kind, openedAt: now, expiresAt };
-  log.info(`[security] DDL_WINDOW_OPENED kind=${p.kind} expiresAt=${new Date(expiresAt).toISOString()}`);
-  return { ok: true, expiresAt, openedAt: now };
-}
-
-/** Close the DDL confirmation window explicitly (explicit_unlock). */
-export function ddlUnlock(): { ok: true } {
-  if (_ddlWindow !== null) {
-    log.info("[security] DDL_WINDOW_CLOSED reason=explicit_unlock");
-    _ddlWindow = null;
-  }
-  return { ok: true };
 }
 
 /** Open a one-shot 15-minute unlock window for a specific table on prod. */
@@ -2257,6 +1565,29 @@ export type DataFlowResult = {
   fkParents: DataFlowNode[];
   fkChildren: DataFlowNode[];
   triggers: DataFlowTriggerInfo[];
+};
+
+export type VisionNode = {
+  id: string;
+  name: string;
+  owner: string;
+  type: string;
+  status: string;
+  degree: number;
+  isOrigin: boolean;
+};
+
+export type VisionEdge = {
+  source: string;
+  target: string;
+  kind: "fk" | "dep";
+};
+
+export type VisionGraphResult = {
+  nodes: VisionNode[];
+  edges: VisionEdge[];
+  truncated: boolean;
+  truncatedAt: number | null;
 };
 
 export async function objectDataflow(p: {
@@ -2681,7 +2012,7 @@ export async function schemaKindCounts(p: {
       `SELECT object_type, COUNT(*) AS cnt
          FROM all_objects
         WHERE owner = :owner
-          AND object_type IN ('TABLE','VIEW','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','TYPE','MATERIALIZED VIEW')
+          AND object_type IN ('TABLE','VIEW','SEQUENCE','PROCEDURE','FUNCTION','PACKAGE','TRIGGER','TYPE')
         GROUP BY object_type`,
       { owner: p.owner },
       { outFormat: oracledb.OUT_FORMAT_ARRAY }
@@ -3173,7 +2504,7 @@ export type ProcExecuteResult = {
   dbmsOutput: string[];
 };
 
-export function oracleTypeFor(dataType: string): number {
+export function oracleTypeFor(dataType: string): oracledb.DbType {
   const t = dataType.toUpperCase();
   if (t.includes("NUMBER") || t.includes("INTEGER") || t.includes("FLOAT")) return oracledb.NUMBER;
   if (t.includes("DATE") || t.includes("TIMESTAMP")) return oracledb.DATE;
@@ -3268,7 +2599,7 @@ export async function procExecute(p: {
   return withActiveSession(async (conn) => {
     const paramMeta = await _procDescribeConn(conn, p.owner, p.name);
 
-    const binds: Record<string, oracledb.BindDefinition> = {};
+    const binds: Record<string, oracledb.BindParameter> = {};
     const callArgs: string[] = [];
 
     // Defense in depth: pm.name comes from ALL_ARGUMENTS but a malicious DBA could in theory
@@ -3361,6 +2692,158 @@ export async function procExecute(p: {
 
     const dbmsOutput = (await drainDbmsOutput(conn)) ?? [];
     return { outParams, refCursors, dbmsOutput };
+  });
+}
+
+const MAX_VISION_NODES = 150;
+const MAX_VISION_DEPTH = 2;
+
+// Oracle internal schemas — shown as leaf nodes if directly connected but never expanded.
+const SYSTEM_SCHEMAS = new Set([
+  "SYS", "SYSTEM", "SYSMXMF", "MDSYS", "CTXSYS", "WMSYS", "XDB", "ORDDATA",
+  "ORDSYS", "OLAPSYS", "FLOWS_FILES", "DBMSMADMIN", "DVSYS", "LBACSYS",
+  "APPQOSSYS", "AUDSYS", "DBSFWUSER", "REMOTE_SCHEDULER_AGENT", "SYS$UMF",
+  "OUTLN", "GSMADMIN_INTERNAL", "GSMCATUSER", "GSMUSER", "OJVMSYS",
+  "PDBADMIN", "VECSYS", "BAASSYS", "ORDS_METADATA", "ORDS_PUBLIC_USER",
+]);
+
+export async function visionGraph(p: {
+  owner: string;
+  objectName: string;
+  objectType: string;
+}): Promise<VisionGraphResult> {
+  return withActiveSession(async (conn) => {
+    const opts = { outFormat: oracledb.OUT_FORMAT_ARRAY, maxRows: 5000 };
+
+    const nodes = new Map<string, VisionNode>();
+    const edges: VisionEdge[] = [];
+    const edgeSet = new Set<string>();
+    const queue: Array<{ owner: string; name: string; type: string; depth: number }> = [];
+
+    const originId = `${p.owner.toUpperCase()}.${p.objectName.toUpperCase()}`;
+    queue.push({ owner: p.owner.toUpperCase(), name: p.objectName.toUpperCase(), type: p.objectType.toUpperCase(), depth: 0 });
+    nodes.set(originId, { id: originId, name: p.objectName.toUpperCase(), owner: p.owner.toUpperCase(), type: p.objectType.toUpperCase(), status: "VALID", degree: 0, isOrigin: true });
+
+    let truncated = false;
+
+    while (queue.length > 0) {
+      if (nodes.size >= MAX_VISION_NODES) { truncated = true; break; }
+      const current = queue.shift()!;
+      const currentId = `${current.owner}.${current.name}`;
+
+      // At max depth: node is already in graph, just don't expand it further.
+      if (current.depth >= MAX_VISION_DEPTH) continue;
+
+      const upRes = await conn.execute<[string, string, string]>(
+        `SELECT DISTINCT d.referenced_owner, d.referenced_name, d.referenced_type
+         FROM all_dependencies d
+         WHERE d.owner = :owner AND d.name = :name
+           AND d.referenced_type NOT IN ('NON-EXISTENT', 'UNDEFINED', 'SYNONYM', 'JAVA CLASS')`,
+        { owner: current.owner, name: current.name },
+        opts
+      );
+      for (const row of upRes.rows ?? []) {
+        const [refOwner, refName, refType] = row;
+        if (SYSTEM_SCHEMAS.has(refOwner)) continue;
+        const refId = `${refOwner}.${refName}`;
+        if (refId === currentId) continue;
+        if (!nodes.has(refId)) {
+          if (nodes.size >= MAX_VISION_NODES) { truncated = true; break; }
+          nodes.set(refId, { id: refId, name: refName, owner: refOwner, type: refType, status: "VALID", degree: 0, isOrigin: false });
+          queue.push({ owner: refOwner, name: refName, type: refType, depth: current.depth + 1 });
+        }
+        const ek = `${currentId}->${refId}:dep`;
+        if (!edgeSet.has(ek)) { edgeSet.add(ek); edges.push({ source: currentId, target: refId, kind: "dep" }); }
+      }
+
+      const dnRes = await conn.execute<[string, string, string]>(
+        `SELECT DISTINCT d.owner, d.name, d.type
+         FROM all_dependencies d
+         WHERE d.referenced_owner = :owner AND d.referenced_name = :name
+           AND d.type NOT IN ('NON-EXISTENT', 'UNDEFINED', 'SYNONYM', 'JAVA CLASS')`,
+        { owner: current.owner, name: current.name },
+        opts
+      );
+      for (const row of dnRes.rows ?? []) {
+        const [depOwner, depName, depType] = row;
+        if (SYSTEM_SCHEMAS.has(depOwner)) continue;
+        const depId = `${depOwner}.${depName}`;
+        if (depId === currentId) continue;
+        if (!nodes.has(depId)) {
+          if (nodes.size >= MAX_VISION_NODES) { truncated = true; break; }
+          nodes.set(depId, { id: depId, name: depName, owner: depOwner, type: depType, status: "VALID", degree: 0, isOrigin: false });
+          queue.push({ owner: depOwner, name: depName, type: depType, depth: current.depth + 1 });
+        }
+        const ek = `${depId}->${currentId}:dep`;
+        if (!edgeSet.has(ek)) { edgeSet.add(ek); edges.push({ source: depId, target: currentId, kind: "dep" }); }
+      }
+
+      if (current.type === "TABLE") {
+        const fkRes = await conn.execute<[string, string, string, string]>(
+          `SELECT DISTINCT c.owner, c.table_name, rc.owner, rc.table_name
+           FROM all_constraints c
+           JOIN all_constraints rc ON rc.constraint_name = c.r_constraint_name AND rc.owner = c.r_owner
+           WHERE c.constraint_type = 'R'
+             AND (
+               (c.owner = :owner AND c.table_name = :name)
+               OR (rc.owner = :owner AND rc.table_name = :name)
+             )`,
+          { owner: current.owner, name: current.name },
+          opts
+        );
+        for (const row of fkRes.rows ?? []) {
+          const [srcOwner, srcName, tgtOwner, tgtName] = row;
+          if (SYSTEM_SCHEMAS.has(srcOwner) || SYSTEM_SCHEMAS.has(tgtOwner)) continue;
+          for (const [o, n] of [[srcOwner, srcName], [tgtOwner, tgtName]] as [string, string][]) {
+            const nid = `${o}.${n}`;
+            if (!nodes.has(nid)) {
+              if (nodes.size >= MAX_VISION_NODES) { truncated = true; break; }
+              nodes.set(nid, { id: nid, name: n, owner: o, type: "TABLE", status: "VALID", degree: 0, isOrigin: false });
+              queue.push({ owner: o, name: n, type: "TABLE", depth: current.depth + 1 });
+            }
+          }
+          const srcId = `${srcOwner}.${srcName}`;
+          const tgtId = `${tgtOwner}.${tgtName}`;
+          const ek = `${srcId}->${tgtId}:fk`;
+          if (!edgeSet.has(ek)) { edgeSet.add(ek); edges.push({ source: srcId, target: tgtId, kind: "fk" }); }
+        }
+      }
+    }
+
+    const degreeMap = new Map<string, number>();
+    for (const e of edges) {
+      degreeMap.set(e.source, (degreeMap.get(e.source) ?? 0) + 1);
+      degreeMap.set(e.target, (degreeMap.get(e.target) ?? 0) + 1);
+    }
+
+    const nodeNames = [...nodes.keys()].map(id => id.split(".")[1]);
+    if (nodeNames.length > 0) {
+      const placeholders = nodeNames.map((_, i) => `:n${i}`).join(",");
+      const binds: Record<string, string> = { owner: p.owner.toUpperCase() };
+      nodeNames.forEach((n, i) => { binds[`n${i}`] = n; });
+      const metaRes = await conn.execute<[string, string, string]>(
+        `SELECT object_name, object_type, status FROM all_objects
+         WHERE owner = :owner AND object_name IN (${placeholders})`,
+        binds,
+        opts
+      );
+      for (const row of metaRes.rows ?? []) {
+        const id = `${p.owner.toUpperCase()}.${row[0]}`;
+        const node = nodes.get(id);
+        if (node) node.status = row[2];
+      }
+    }
+
+    for (const [id, node] of nodes) {
+      node.degree = degreeMap.get(id) ?? 0;
+    }
+
+    return {
+      nodes: [...nodes.values()],
+      edges,
+      truncated,
+      truncatedAt: truncated ? MAX_VISION_NODES : null,
+    };
   });
 }
 
@@ -3476,1136 +2959,4 @@ export async function querySessionSelf(): Promise<SessionSelfRow> {
   }
 
   return out;
-}
-
-// ── Item #1B T1B.1 — Scheduler Jobs ──────────────────────────────────────────
-
-export type SchedulerJobRow = {
-  owner: string;
-  name: string;
-  jobType: string | null;
-  state: string;
-  enabled: boolean;
-  runCount: number;
-  failureCount: number;
-  nextRunDate: string | null;
-  scheduleName: string | null;
-  programName: string | null;
-  comments: string | null;
-};
-
-export type LegacyJobRow = {
-  jobId: number;
-  owner: string;
-  jobAction: string | null;
-  nextDate: string | null;
-  broken: boolean;
-  failures: number;
-  interval: string | null;
-};
-
-export type SchedulerJobDetails = {
-  owner: string;
-  name: string;
-  jobType: string | null;
-  jobAction: string | null;
-  state: string;
-  enabled: boolean;
-  runCount: number;
-  failureCount: number;
-  maxFailures: number | null;
-  retryCount: number | null;
-  maxRuns: number | null;
-  lastRunDuration: string | null;
-  nextRunDate: string | null;
-  startDate: string | null;
-  endDate: string | null;
-  scheduleName: string | null;
-  scheduleType: string | null;
-  repeatInterval: string | null;
-  programName: string | null;
-  programType: string | null;
-  jobClass: string | null;
-  restartable: boolean;
-  loggingLevel: string | null;
-  comments: string | null;
-};
-
-export type LegacyJobDetails = {
-  jobId: number;
-  owner: string;
-  jobAction: string | null;
-  nextDate: string | null;
-  nextSec: string | null;
-  broken: boolean;
-  failures: number;
-  interval: string | null;
-  lastDate: string | null;
-  lastSec: string | null;
-};
-
-export type SchedulerProgramDetails = {
-  owner: string;
-  programName: string;
-  programType: string;
-  programAction: string;
-  numberOfArguments: number;
-  enabled: boolean;
-  comments: string | null;
-};
-
-export type SchedulerScheduleDetails = {
-  owner: string;
-  scheduleName: string;
-  scheduleType: string;
-  startDate: string | null;
-  repeatInterval: string | null;
-  endDate: string | null;
-  comments: string | null;
-};
-
-export type SchedulerJobPrivs = {
-  hasCreateAnyJob: boolean;
-  hasManageScheduler: boolean;
-};
-
-export async function schedulerJobsList(p: {
-  owner: string;
-}): Promise<{ jobs: SchedulerJobRow[]; legacyJobs: LegacyJobRow[] }> {
-  return withActiveSession(async (conn) => {
-    const [schedulerResult, legacyResult] = await Promise.allSettled([
-      (async (): Promise<SchedulerJobRow[]> => {
-        let res: { rows: Record<string, unknown>[] };
-        try {
-          res = await conn.execute<Record<string, unknown>>(
-            `SELECT j.OWNER, j.JOB_NAME, j.JOB_TYPE, j.STATE,
-                    j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
-                    j.NEXT_RUN_DATE, j.SCHEDULE_NAME, j.PROGRAM_NAME,
-                    j.COMMENTS
-             FROM DBA_SCHEDULER_JOBS j
-             WHERE j.OWNER = :owner
-             ORDER BY j.JOB_NAME
-             FETCH FIRST 500 ROWS ONLY`,
-            { owner: p.owner },
-          );
-        } catch (err: unknown) {
-          const oraNum = (err as { errorNum?: number }).errorNum;
-          if (oraNum === 942) {
-            log.info("[schema] DBA_SCHEDULER_JOBS not accessible (ORA-00942), trying ALL_SCHEDULER_JOBS + USER_SCHEDULER_JOBS");
-            const [allRes, userRes] = await Promise.allSettled([
-              conn.execute<Record<string, unknown>>(
-                `SELECT j.OWNER, j.JOB_NAME, j.JOB_TYPE, j.STATE,
-                        j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
-                        j.NEXT_RUN_DATE, j.SCHEDULE_NAME, j.PROGRAM_NAME,
-                        j.COMMENTS
-                 FROM ALL_SCHEDULER_JOBS j
-                 WHERE j.OWNER = :owner
-                 ORDER BY j.JOB_NAME
-                 FETCH FIRST 500 ROWS ONLY`,
-                { owner: p.owner },
-              ),
-              conn.execute<Record<string, unknown>>(
-                `SELECT :owner AS OWNER, j.JOB_NAME, j.JOB_TYPE, j.STATE,
-                        j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
-                        j.NEXT_RUN_DATE, j.SCHEDULE_NAME, j.PROGRAM_NAME,
-                        j.COMMENTS
-                 FROM USER_SCHEDULER_JOBS j
-                 ORDER BY j.JOB_NAME
-                 FETCH FIRST 500 ROWS ONLY`,
-                { owner: p.owner },
-              ),
-            ]);
-            const allRows = allRes.status === "fulfilled" ? (allRes.value.rows ?? []) : [];
-            const userRows = userRes.status === "fulfilled" ? (userRes.value.rows ?? []) : [];
-            const seen = new Set(allRows.map((r) => String(r.JOB_NAME)));
-            res = { rows: [...allRows, ...userRows.filter((r) => !seen.has(String(r.JOB_NAME)))] };
-          } else {
-            throw err;
-          }
-        }
-        return (res.rows ?? []).map((r) => ({
-          owner: String(r.OWNER),
-          name: String(r.JOB_NAME),
-          jobType: r.JOB_TYPE != null ? String(r.JOB_TYPE) : null,
-          state: String(r.STATE),
-          enabled: r.ENABLED === "TRUE" || r.ENABLED === true,
-          runCount: Number(r.RUN_COUNT ?? 0),
-          failureCount: Number(r.FAILURE_COUNT ?? 0),
-          nextRunDate: r.NEXT_RUN_DATE != null ? String(r.NEXT_RUN_DATE) : null,
-          scheduleName: r.SCHEDULE_NAME != null ? String(r.SCHEDULE_NAME) : null,
-          programName: r.PROGRAM_NAME != null ? String(r.PROGRAM_NAME) : null,
-          comments: r.COMMENTS != null ? String(r.COMMENTS) : null,
-        }));
-      })(),
-      (async (): Promise<LegacyJobRow[]> => {
-        let res: { rows: Record<string, unknown>[] };
-        try {
-          res = await conn.execute<Record<string, unknown>>(
-            `SELECT JOB, SCHEMA_USER AS OWNER, WHAT AS JOB_ACTION,
-                    NEXT_DATE, BROKEN, FAILURES, INTERVAL
-             FROM DBA_JOBS
-             WHERE SCHEMA_USER = :owner
-             ORDER BY JOB
-             FETCH FIRST 500 ROWS ONLY`,
-            { owner: p.owner },
-          );
-        } catch (err: unknown) {
-          const oraNum = (err as { errorNum?: number }).errorNum;
-          if (oraNum === 942) {
-            log.info("[schema] DBA_JOBS not accessible (ORA-00942), trying USER_JOBS");
-            try {
-              res = await conn.execute<Record<string, unknown>>(
-                `SELECT JOB, :owner AS OWNER, WHAT AS JOB_ACTION,
-                        NEXT_DATE, BROKEN, FAILURES, INTERVAL
-                 FROM USER_JOBS
-                 ORDER BY JOB
-                 FETCH FIRST 500 ROWS ONLY`,
-                { owner: p.owner },
-              );
-            } catch {
-              log.info("[schema] USER_JOBS also not accessible, legacy jobs silently empty");
-              return [];
-            }
-          } else {
-            throw err;
-          }
-        }
-        return (res.rows ?? []).map((r) => ({
-          jobId: Number(r.JOB),
-          owner: String(r.OWNER),
-          jobAction: r.JOB_ACTION != null ? String(r.JOB_ACTION) : null,
-          nextDate: r.NEXT_DATE != null ? String(r.NEXT_DATE) : null,
-          broken: r.BROKEN === "Y" || r.BROKEN === true,
-          failures: Number(r.FAILURES ?? 0),
-          interval: r.INTERVAL != null ? String(r.INTERVAL) : null,
-        }));
-      })(),
-    ]);
-
-    const jobs = schedulerResult.status === "fulfilled" ? schedulerResult.value : [];
-    const legacyJobs = legacyResult.status === "fulfilled" ? legacyResult.value : [];
-
-    if (schedulerResult.status === "rejected") {
-      log.warn(`[schema] schedulerJobsList scheduler query failed: ${schedulerResult.reason}`);
-    }
-    if (legacyResult.status === "rejected") {
-      log.warn(`[schema] schedulerJobsList legacy query failed: ${legacyResult.reason}`);
-    }
-
-    return { jobs, legacyJobs };
-  });
-}
-
-export async function schedulerJobDetails(p: {
-  owner: string;
-  name: string;
-}): Promise<{ job: SchedulerJobDetails | null }> {
-  return withActiveSession(async (conn) => {
-    let res: { rows: Record<string, unknown>[] };
-    try {
-      res = await conn.execute<Record<string, unknown>>(
-        `SELECT j.OWNER, j.JOB_NAME, j.JOB_TYPE, j.JOB_ACTION,
-                j.STATE, j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
-                j.MAX_FAILURES, j.RETRY_COUNT, j.MAX_RUNS,
-                j.LAST_RUN_DURATION, j.NEXT_RUN_DATE,
-                j.START_DATE, j.END_DATE,
-                j.SCHEDULE_NAME, j.SCHEDULE_TYPE, j.REPEAT_INTERVAL,
-                j.PROGRAM_NAME, j.PROGRAM_TYPE,
-                j.JOB_CLASS, j.RESTARTABLE, j.LOGGING_LEVEL, j.COMMENTS
-         FROM DBA_SCHEDULER_JOBS j
-         WHERE j.OWNER = :owner AND j.JOB_NAME = :name`,
-        { owner: p.owner, name: p.name },
-      );
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942) {
-        res = await conn.execute<Record<string, unknown>>(
-          `SELECT j.OWNER, j.JOB_NAME, j.JOB_TYPE, j.JOB_ACTION,
-                  j.STATE, j.ENABLED, j.RUN_COUNT, j.FAILURE_COUNT,
-                  j.MAX_FAILURES, j.RETRY_COUNT, j.MAX_RUNS,
-                  j.LAST_RUN_DURATION, j.NEXT_RUN_DATE,
-                  j.START_DATE, j.END_DATE,
-                  j.SCHEDULE_NAME, j.SCHEDULE_TYPE, j.REPEAT_INTERVAL,
-                  j.PROGRAM_NAME, j.PROGRAM_TYPE,
-                  j.JOB_CLASS, j.RESTARTABLE, j.LOGGING_LEVEL, j.COMMENTS
-           FROM ALL_SCHEDULER_JOBS j
-           WHERE j.OWNER = :owner AND j.JOB_NAME = :name`,
-          { owner: p.owner, name: p.name },
-        );
-      } else {
-        throw new RpcCodedError(ORACLE_ERR, (err as Error)?.message ?? "Oracle error querying scheduler job details");
-      }
-    }
-
-    const r = res.rows?.[0];
-    if (!r) return { job: null };
-
-    return {
-      job: {
-        owner: String(r.OWNER),
-        name: String(r.JOB_NAME),
-        jobType: r.JOB_TYPE != null ? String(r.JOB_TYPE) : null,
-        jobAction: r.JOB_ACTION != null ? String(r.JOB_ACTION) : null,
-        state: String(r.STATE),
-        enabled: r.ENABLED === "TRUE" || r.ENABLED === true,
-        runCount: Number(r.RUN_COUNT ?? 0),
-        failureCount: Number(r.FAILURE_COUNT ?? 0),
-        maxFailures: r.MAX_FAILURES != null ? Number(r.MAX_FAILURES) : null,
-        retryCount: r.RETRY_COUNT != null ? Number(r.RETRY_COUNT) : null,
-        maxRuns: r.MAX_RUNS != null ? Number(r.MAX_RUNS) : null,
-        lastRunDuration: r.LAST_RUN_DURATION != null ? String(r.LAST_RUN_DURATION) : null,
-        nextRunDate: r.NEXT_RUN_DATE != null ? String(r.NEXT_RUN_DATE) : null,
-        startDate: r.START_DATE != null ? String(r.START_DATE) : null,
-        endDate: r.END_DATE != null ? String(r.END_DATE) : null,
-        scheduleName: r.SCHEDULE_NAME != null ? String(r.SCHEDULE_NAME) : null,
-        scheduleType: r.SCHEDULE_TYPE != null ? String(r.SCHEDULE_TYPE) : null,
-        repeatInterval: r.REPEAT_INTERVAL != null ? String(r.REPEAT_INTERVAL) : null,
-        programName: r.PROGRAM_NAME != null ? String(r.PROGRAM_NAME) : null,
-        programType: r.PROGRAM_TYPE != null ? String(r.PROGRAM_TYPE) : null,
-        jobClass: r.JOB_CLASS != null ? String(r.JOB_CLASS) : null,
-        restartable: r.RESTARTABLE === "TRUE" || r.RESTARTABLE === true,
-        loggingLevel: r.LOGGING_LEVEL != null ? String(r.LOGGING_LEVEL) : null,
-        comments: r.COMMENTS != null ? String(r.COMMENTS) : null,
-      },
-    };
-  });
-}
-
-export async function legacyJobDetails(p: {
-  jobId: number;
-  owner: string;
-}): Promise<{ job: LegacyJobDetails | null }> {
-  return withActiveSession(async (conn) => {
-    let res: { rows: Record<string, unknown>[] };
-    try {
-      res = await conn.execute<Record<string, unknown>>(
-        `SELECT JOB, SCHEMA_USER AS OWNER, WHAT AS JOB_ACTION,
-                NEXT_DATE, NEXT_SEC, BROKEN, FAILURES,
-                INTERVAL, LAST_DATE, LAST_SEC
-         FROM DBA_JOBS
-         WHERE JOB = :job_id`,
-        { job_id: p.jobId },
-      );
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942) {
-        res = await conn.execute<Record<string, unknown>>(
-          `SELECT JOB, :owner AS OWNER, WHAT AS JOB_ACTION,
-                  NEXT_DATE, NEXT_SEC, BROKEN, FAILURES,
-                  INTERVAL, LAST_DATE, LAST_SEC
-           FROM USER_JOBS
-           WHERE JOB = :job_id`,
-          { owner: p.owner, job_id: p.jobId },
-        );
-      } else {
-        throw new RpcCodedError(ORACLE_ERR, (err as Error)?.message ?? "Oracle error querying legacy job details");
-      }
-    }
-
-    const r = res.rows?.[0];
-    if (!r) return { job: null };
-
-    return {
-      job: {
-        jobId: Number(r.JOB),
-        owner: String(r.OWNER),
-        jobAction: r.JOB_ACTION != null ? String(r.JOB_ACTION) : null,
-        nextDate: r.NEXT_DATE != null ? String(r.NEXT_DATE) : null,
-        nextSec: r.NEXT_SEC != null ? String(r.NEXT_SEC) : null,
-        broken: r.BROKEN === "Y" || r.BROKEN === true,
-        failures: Number(r.FAILURES ?? 0),
-        interval: r.INTERVAL != null ? String(r.INTERVAL) : null,
-        lastDate: r.LAST_DATE != null ? String(r.LAST_DATE) : null,
-        lastSec: r.LAST_SEC != null ? String(r.LAST_SEC) : null,
-      },
-    };
-  });
-}
-
-export async function schedulerJobDdl(p: {
-  owner: string;
-  name: string;
-  legacy?: boolean;
-}): Promise<{ ddl: string }> {
-  if (p.legacy) {
-    return {
-      ddl: `-- Legacy DBMS_JOB — DDL not available.\n-- DBMS_JOB jobs are not supported by DBMS_METADATA.\n-- Job ID: ${p.name.replace(/^LEGACY_/, "")}`,
-    };
-  }
-
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<{ DDL: string }>(
-        `SELECT DBMS_METADATA.GET_DDL('PROCOBJ', UPPER(:name), UPPER(:owner)) AS ddl FROM dual`,
-        { name: p.name, owner: p.owner },
-      );
-      const ddl = res.rows?.[0]?.DDL;
-      if (!ddl) {
-        return { ddl: `-- ${p.owner}.${p.name}: DDL not available (DBMS_METADATA returned empty).` };
-      }
-      return { ddl };
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 31603 || oraNum === 39200 || oraNum === 31604) {
-        return {
-          ddl: `-- ${p.owner}.${p.name}: DDL not available via DBMS_METADATA (ORA-${oraNum}).\n-- The job may not be supported by DBMS_METADATA on this Oracle version.`,
-        };
-      }
-      throw new RpcCodedError(ORACLE_ERR, (err as Error)?.message ?? "Oracle error fetching job DDL");
-    }
-  });
-}
-
-export async function schedulerProgramDetails(p: {
-  owner: string;
-  programName: string;
-}): Promise<{ program: SchedulerProgramDetails | null }> {
-  return withActiveSession(async (conn) => {
-    let res: { rows: Record<string, unknown>[] };
-    try {
-      res = await conn.execute<Record<string, unknown>>(
-        `SELECT OWNER, PROGRAM_NAME, PROGRAM_TYPE, PROGRAM_ACTION,
-                NUMBER_OF_ARGUMENTS, ENABLED, COMMENTS
-         FROM DBA_SCHEDULER_PROGRAMS
-         WHERE OWNER = :owner AND PROGRAM_NAME = :program_name`,
-        { owner: p.owner, program_name: p.programName },
-      );
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942) {
-        try {
-          res = await conn.execute<Record<string, unknown>>(
-            `SELECT OWNER, PROGRAM_NAME, PROGRAM_TYPE, PROGRAM_ACTION,
-                    NUMBER_OF_ARGUMENTS, ENABLED, COMMENTS
-             FROM ALL_SCHEDULER_PROGRAMS
-             WHERE OWNER = :owner AND PROGRAM_NAME = :program_name`,
-            { owner: p.owner, program_name: p.programName },
-          );
-        } catch {
-          return { program: null };
-        }
-      } else {
-        throw new RpcCodedError(ORACLE_ERR, (err as Error)?.message ?? "Oracle error querying scheduler program");
-      }
-    }
-
-    const r = res.rows?.[0];
-    if (!r) return { program: null };
-
-    return {
-      program: {
-        owner: String(r.OWNER),
-        programName: String(r.PROGRAM_NAME),
-        programType: String(r.PROGRAM_TYPE),
-        programAction: String(r.PROGRAM_ACTION),
-        numberOfArguments: Number(r.NUMBER_OF_ARGUMENTS ?? 0),
-        enabled: r.ENABLED === "TRUE" || r.ENABLED === true,
-        comments: r.COMMENTS != null ? String(r.COMMENTS) : null,
-      },
-    };
-  });
-}
-
-export async function schedulerScheduleDetails(p: {
-  owner: string;
-  scheduleName: string;
-}): Promise<{ schedule: SchedulerScheduleDetails | null }> {
-  return withActiveSession(async (conn) => {
-    let res: { rows: Record<string, unknown>[] };
-    try {
-      res = await conn.execute<Record<string, unknown>>(
-        `SELECT OWNER, SCHEDULE_NAME, SCHEDULE_TYPE,
-                START_DATE, REPEAT_INTERVAL, END_DATE, COMMENTS
-         FROM DBA_SCHEDULER_SCHEDULES
-         WHERE OWNER = :owner AND SCHEDULE_NAME = :schedule_name`,
-        { owner: p.owner, schedule_name: p.scheduleName },
-      );
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942) {
-        try {
-          res = await conn.execute<Record<string, unknown>>(
-            `SELECT OWNER, SCHEDULE_NAME, SCHEDULE_TYPE,
-                    START_DATE, REPEAT_INTERVAL, END_DATE, COMMENTS
-             FROM ALL_SCHEDULER_SCHEDULES
-             WHERE OWNER = :owner AND SCHEDULE_NAME = :schedule_name`,
-            { owner: p.owner, schedule_name: p.scheduleName },
-          );
-        } catch {
-          return { schedule: null };
-        }
-      } else {
-        throw new RpcCodedError(ORACLE_ERR, (err as Error)?.message ?? "Oracle error querying scheduler schedule");
-      }
-    }
-
-    const r = res.rows?.[0];
-    if (!r) return { schedule: null };
-
-    return {
-      schedule: {
-        owner: String(r.OWNER),
-        scheduleName: String(r.SCHEDULE_NAME),
-        scheduleType: String(r.SCHEDULE_TYPE),
-        startDate: r.START_DATE != null ? String(r.START_DATE) : null,
-        repeatInterval: r.REPEAT_INTERVAL != null ? String(r.REPEAT_INTERVAL) : null,
-        endDate: r.END_DATE != null ? String(r.END_DATE) : null,
-        comments: r.COMMENTS != null ? String(r.COMMENTS) : null,
-      },
-    };
-  });
-}
-
-export async function schedulerJobPrivCheck(): Promise<SchedulerJobPrivs> {
-  return withActiveSession(async (conn) => {
-    const res = await conn.execute<{ HAS_CREATE_ANY_JOB: number; HAS_MANAGE_SCHEDULER: number }>(
-      `SELECT
-         MAX(CASE WHEN PRIVILEGE = 'CREATE ANY JOB'   THEN 1 ELSE 0 END) AS has_create_any_job,
-         MAX(CASE WHEN PRIVILEGE = 'MANAGE SCHEDULER' THEN 1 ELSE 0 END) AS has_manage_scheduler
-       FROM SESSION_PRIVS
-       WHERE PRIVILEGE IN ('CREATE ANY JOB', 'MANAGE SCHEDULER')`,
-    );
-    const r = res.rows?.[0];
-    return {
-      hasCreateAnyJob: Number(r?.HAS_CREATE_ANY_JOB ?? 0) === 1,
-      hasManageScheduler: Number(r?.HAS_MANAGE_SCHEDULER ?? 0) === 1,
-    };
-  });
-}
-
-function validateOracleIdentifier(value: string, label: string): void {
-  if (!/^[A-Z][A-Z0-9_$#]{0,127}$/.test(value)) {
-    throw new RpcCodedError(INVALID_IDENTIFIER, `Invalid ${label}: ${JSON.stringify(value)}`);
-  }
-}
-
-export async function schedulerJobRun(p: {
-  owner: string;
-  name: string;
-  confirmedProdRun?: boolean;
-}): Promise<{ ok: true; durationMs: number }> {
-  validateOracleIdentifier(p.owner, "owner");
-  validateOracleIdentifier(p.name, "job name");
-
-  return withActiveSession(async (conn) => {
-    const safety = getSessionSafety();
-    const envReal = (safety.env as string | undefined) ?? "unknown";
-
-    if (envReal === "prod" && !p.confirmedProdRun) {
-      throw new RpcCodedError(
-        JOB_RUN_PROD_REQUIRES_CONFIRMATION,
-        `scheduler.job.run on prod requires confirmedProdRun=true. ` +
-        `The UI must display the PROD confirmation dialog before calling this RPC.`,
-      );
-    }
-
-    const start = Date.now();
-    await conn.execute(
-      `BEGIN DBMS_SCHEDULER.RUN_JOB(:owner || '.' || :name, use_current_session => FALSE); END;`,
-      { owner: p.owner, name: p.name },
-    );
-    const durationMs = Date.now() - start;
-    log.info(`[scheduler] run_job owner=${p.owner} name=${p.name} env=${envReal} durationMs=${durationMs}`);
-    return { ok: true, durationMs };
-  });
-}
-
-export async function schedulerJobEnable(p: {
-  owner: string;
-  name: string;
-}): Promise<{ ok: true }> {
-  validateOracleIdentifier(p.owner, "owner");
-  validateOracleIdentifier(p.name, "job name");
-
-  return withActiveSession(async (conn) => {
-    await conn.execute(
-      `BEGIN DBMS_SCHEDULER.ENABLE(:owner || '.' || :name); END;`,
-      { owner: p.owner, name: p.name },
-    );
-    log.info(`[scheduler] enable owner=${p.owner} name=${p.name}`);
-    return { ok: true };
-  });
-}
-
-export async function schedulerJobDisable(p: {
-  owner: string;
-  name: string;
-  confirmedProdDisable?: boolean;
-}): Promise<{ ok: true }> {
-  validateOracleIdentifier(p.owner, "owner");
-  validateOracleIdentifier(p.name, "job name");
-
-  return withActiveSession(async (conn) => {
-    const safety = getSessionSafety();
-    const envReal = (safety.env as string | undefined) ?? "unknown";
-
-    if (envReal === "prod" && !p.confirmedProdDisable) {
-      throw new RpcCodedError(
-        JOB_DISABLE_PROD_REQUIRES_CONFIRMATION,
-        `scheduler.job.disable on prod requires confirmedProdDisable=true. ` +
-        `The UI must display the PROD confirmation dialog before calling this RPC.`,
-      );
-    }
-
-    await conn.execute(
-      `BEGIN DBMS_SCHEDULER.DISABLE(:owner || '.' || :name); END;`,
-      { owner: p.owner, name: p.name },
-    );
-    log.info(`[scheduler] disable owner=${p.owner} name=${p.name} env=${envReal}`);
-    return { ok: true };
-  });
-}
-
-export async function dbmsJobRun(p: { jobId: number }): Promise<{ ok: true }> {
-  return withActiveSession(async (conn) => {
-    await conn.execute(`BEGIN DBMS_JOB.RUN(:job_id); END;`, { job_id: p.jobId });
-    log.info(`[scheduler] dbms_job.run jobId=${p.jobId}`);
-    return { ok: true };
-  });
-}
-
-export async function dbmsJobBroken(p: { jobId: number }): Promise<{ ok: true }> {
-  return withActiveSession(async (conn) => {
-    await conn.execute(`BEGIN DBMS_JOB.BROKEN(:job_id, TRUE); END;`, { job_id: p.jobId });
-    log.info(`[scheduler] dbms_job.broken jobId=${p.jobId}`);
-    return { ok: true };
-  });
-}
-
-export async function dbmsJobUnbroken(p: { jobId: number }): Promise<{ ok: true }> {
-  return withActiveSession(async (conn) => {
-    await conn.execute(`BEGIN DBMS_JOB.BROKEN(:job_id, FALSE, SYSDATE); END;`, { job_id: p.jobId });
-    log.info(`[scheduler] dbms_job.unbroken jobId=${p.jobId}`);
-    return { ok: true };
-  });
-}
-
-// ── Item #1C T1C.1: Users ─────────────────────────────────────────────────────
-
-export type UserDetails = {
-  username: string;
-  accountStatus: string;
-  lockDate: string | null;
-  expiryDate: string | null;
-  created: string;
-  profile: string | null;
-  authenticationType: string | null;
-  defaultTablespace: string | null;
-  temporaryTablespace: string | null;
-  fallbackMode: boolean;
-};
-
-export type ProfileRow = {
-  resourceName: string;
-  resourceType: string;
-  limit: string;
-};
-
-export type QuotaRow = {
-  tablespaceName: string;
-  bytes: number | null;
-  maxBytes: number | null;
-  blocks: number | null;
-  maxBlocks: number | null;
-};
-
-// ── Item #1C T1C.2: Sessions ──────────────────────────────────────────────────
-
-export type SessionRow = {
-  sid: number;
-  serial: number;
-  status: string;
-  username: string | null;
-  osuser: string | null;
-  machine: string | null;
-  program: string | null;
-  module: string | null;
-  logonTime: string | null;
-  lastCallEt: number | null;
-  blockingSession: number | null;
-  blockingSessionStatus: string | null;
-  waitClass: string | null;
-  event: string | null;
-  secondsInWait: number | null;
-  sqlId: string | null;
-};
-
-// ── Item #1C T1C.4: Privileges (types declared here, functions in T1C.4) ──────
-
-export type RolePrivRow = {
-  grantedRole: string;
-  adminOption: string;
-  defaultRole: string;
-};
-
-export type SysPrivRow = {
-  privilege: string;
-  adminOption: string;
-};
-
-export type TabPrivRow = {
-  owner: string;
-  tableName: string;
-  grantor: string | null;
-  privilege: string;
-  grantable: string;
-  hierarchy: string | null;
-};
-
-export type GrantedToRow = {
-  grantee: string;
-  tableName: string;
-  privilege: string;
-  grantable: string;
-};
-
-export type PrivilegesList = {
-  rolePrivs: RolePrivRow[];
-  sysPrivs: SysPrivRow[];
-  tabPrivs: TabPrivRow[];
-  grantedTo: GrantedToRow[];
-  tabPrivsAccessDenied: boolean;
-  grantedToAccessDenied: boolean;
-  fallbackMode: boolean;
-};
-
-// ── Item #1C T1C.5: Blocking chain ───────────────────────────────────────────
-
-export type BlockingPair = {
-  blockedSid: number;
-  blockedSerial: number;
-  blockedUser: string | null;
-  waitClass: string | null;
-  event: string | null;
-  secondsInWait: number | null;
-  blockerSid: number;
-  blockerSerial: number;
-  blockerUser: string | null;
-  blockerStatus: string | null;
-};
-
-export async function userDetails(p: { username: string }): Promise<UserDetails | null> {
-  return withActiveSession(async (conn) => {
-    let r: Record<string, unknown> | undefined;
-    let fallbackMode = false;
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT USERNAME, ACCOUNT_STATUS, LOCK_DATE, EXPIRY_DATE,
-                CREATED, PROFILE, AUTHENTICATION_TYPE,
-                DEFAULT_TABLESPACE, TEMPORARY_TABLESPACE
-         FROM DBA_USERS
-         WHERE USERNAME = :username
-         FETCH FIRST 1 ROWS ONLY`,
-        { username: p.username },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      r = res.rows?.[0];
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) {
-        fallbackMode = true;
-        const res = await conn.execute<Record<string, unknown>>(
-          `SELECT USERNAME, CREATED FROM ALL_USERS WHERE USERNAME = :username FETCH FIRST 1 ROWS ONLY`,
-          { username: p.username },
-          { outFormat: oracledb.OUT_FORMAT_OBJECT },
-        );
-        r = res.rows?.[0];
-      } else {
-        throw err;
-      }
-    }
-    if (!r) return null;
-    return {
-      username: String(r.USERNAME ?? ""),
-      accountStatus: r.ACCOUNT_STATUS != null ? String(r.ACCOUNT_STATUS) : "",
-      lockDate: r.LOCK_DATE != null ? String(r.LOCK_DATE) : null,
-      expiryDate: r.EXPIRY_DATE != null ? String(r.EXPIRY_DATE) : null,
-      created: r.CREATED != null ? String(r.CREATED) : "",
-      profile: r.PROFILE != null ? String(r.PROFILE) : null,
-      authenticationType: r.AUTHENTICATION_TYPE != null ? String(r.AUTHENTICATION_TYPE) : null,
-      defaultTablespace: r.DEFAULT_TABLESPACE != null ? String(r.DEFAULT_TABLESPACE) : null,
-      temporaryTablespace: r.TEMPORARY_TABLESPACE != null ? String(r.TEMPORARY_TABLESPACE) : null,
-      fallbackMode,
-    };
-  });
-}
-
-export async function userProfileDetails(p: { profile: string }): Promise<{ rows: ProfileRow[]; accessDenied: boolean }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT RESOURCE_NAME, RESOURCE_TYPE, LIMIT
-         FROM DBA_PROFILES
-         WHERE PROFILE = :profile
-         ORDER BY RESOURCE_TYPE, RESOURCE_NAME`,
-        { profile: p.profile },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      return {
-        rows: (res.rows ?? []).map((r) => ({
-          resourceName: String(r.RESOURCE_NAME ?? ""),
-          resourceType: String(r.RESOURCE_TYPE ?? ""),
-          limit: String(r.LIMIT ?? ""),
-        })),
-        accessDenied: false,
-      };
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) return { rows: [], accessDenied: true };
-      throw err;
-    }
-  });
-}
-
-export async function userQuotas(p: { username: string }): Promise<{ quotas: QuotaRow[]; accessDenied: boolean }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT TABLESPACE_NAME, BYTES, MAX_BYTES, BLOCKS, MAX_BLOCKS
-         FROM DBA_TS_QUOTAS
-         WHERE USERNAME = :username
-         ORDER BY TABLESPACE_NAME`,
-        { username: p.username },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      return {
-        quotas: (res.rows ?? []).map((r) => ({
-          tablespaceName: String(r.TABLESPACE_NAME ?? ""),
-          bytes: r.BYTES != null ? Number(r.BYTES) : null,
-          maxBytes: r.MAX_BYTES != null ? Number(r.MAX_BYTES) : null,
-          blocks: r.BLOCKS != null ? Number(r.BLOCKS) : null,
-          maxBlocks: r.MAX_BLOCKS != null ? Number(r.MAX_BLOCKS) : null,
-        })),
-        accessDenied: false,
-      };
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) return { quotas: [], accessDenied: true };
-      throw err;
-    }
-  });
-}
-
-export async function sessionsListAll(): Promise<{ sessions: SessionRow[]; accessDenied: boolean }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT
-           s.SID, s.SERIAL# AS SERIAL_NUM, s.STATUS, s.USERNAME, s.OSUSER,
-           s.MACHINE, s.PROGRAM, s.MODULE,
-           TO_CHAR(s.LOGON_TIME, 'YYYY-MM-DD"T"HH24:MI:SS') AS LOGON_TIME,
-           s.LAST_CALL_ET,
-           s.BLOCKING_SESSION, s.BLOCKING_SESSION_STATUS,
-           s.WAIT_CLASS, s.EVENT, s.SECONDS_IN_WAIT,
-           s.SQL_ID
-         FROM V$SESSION s
-         WHERE s.USERNAME IS NOT NULL
-           AND s.TYPE = 'USER'
-         ORDER BY s.STATUS DESC, s.LAST_CALL_ET DESC
-         FETCH FIRST 200 ROWS ONLY`,
-        {},
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      return {
-        sessions: (res.rows ?? []).map((r) => ({
-          sid: Number(r.SID),
-          serial: Number(r.SERIAL_NUM),
-          status: String(r.STATUS ?? ""),
-          username: r.USERNAME != null ? String(r.USERNAME) : null,
-          osuser: r.OSUSER != null ? String(r.OSUSER) : null,
-          machine: r.MACHINE != null ? String(r.MACHINE) : null,
-          program: r.PROGRAM != null ? String(r.PROGRAM) : null,
-          module: r.MODULE != null ? String(r.MODULE) : null,
-          logonTime: r.LOGON_TIME != null ? String(r.LOGON_TIME) : null,
-          lastCallEt: r.LAST_CALL_ET != null ? Number(r.LAST_CALL_ET) : null,
-          blockingSession: r.BLOCKING_SESSION != null ? Number(r.BLOCKING_SESSION) : null,
-          blockingSessionStatus: r.BLOCKING_SESSION_STATUS != null ? String(r.BLOCKING_SESSION_STATUS) : null,
-          waitClass: r.WAIT_CLASS != null ? String(r.WAIT_CLASS) : null,
-          event: r.EVENT != null ? String(r.EVENT) : null,
-          secondsInWait: r.SECONDS_IN_WAIT != null ? Number(r.SECONDS_IN_WAIT) : null,
-          sqlId: r.SQL_ID != null ? String(r.SQL_ID) : null,
-        })),
-        accessDenied: false,
-      };
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) return { sessions: [], accessDenied: true };
-      throw err;
-    }
-  });
-}
-
-export async function sessionSqlPreview(p: { sqlId: string }): Promise<{ sql: string | null }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT SUBSTR(SQL_FULLTEXT, 1, 500) AS SQL_PREVIEW
-         FROM V$SQL
-         WHERE SQL_ID = :sql_id
-         AND ROWNUM = 1`,
-        { sql_id: p.sqlId },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      const r = res.rows?.[0];
-      return { sql: r?.SQL_PREVIEW != null ? String(r.SQL_PREVIEW) : null };
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) return { sql: null };
-      throw err;
-    }
-  });
-}
-
-export async function sessionPrivCheck(): Promise<{ hasAlterSystem: boolean }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT COUNT(*) AS HAS_ALTER_SYSTEM
-         FROM SESSION_PRIVS
-         WHERE PRIVILEGE = 'ALTER SYSTEM'`,
-        {},
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      const r = res.rows?.[0];
-      return { hasAlterSystem: Number(r?.HAS_ALTER_SYSTEM ?? 0) === 1 };
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) return { hasAlterSystem: false };
-      throw err;
-    }
-  });
-}
-
-export async function sessionKill(p: {
-  sid: number;
-  serial: number;
-  confirmedProdKill?: boolean;
-}): Promise<{ ok: true }> {
-  // Ajuste 1: positive integer validation
-  const sid = Math.trunc(p.sid);
-  const serial = Math.trunc(p.serial);
-  if (!Number.isInteger(sid) || !Number.isInteger(serial) || sid <= 0 || serial <= 0) {
-    throw new RpcCodedError(INVALID_SESSION_ID, "SID and SERIAL# must be positive integers");
-  }
-  // Ajuste 1: upper bound — Oracle NUMBER(11) practical max
-  const MAX_SESSION_ID = 2147483647;
-  if (sid > MAX_SESSION_ID || serial > MAX_SESSION_ID) {
-    throw new RpcCodedError(INVALID_SESSION_ID, "SID/SERIAL# exceeds valid range");
-  }
-
-  return withActiveSession(async (conn) => {
-    // T1A.8 env guard (3rd replication — after mview.refresh and job.run)
-    const env = (getSessionSafety().env as string | undefined) ?? "unknown";
-    if (env === "prod" && !p.confirmedProdKill) {
-      throw new RpcCodedError(
-        SESSION_KILL_PROD_REQUIRES_CONFIRMATION,
-        "Killing sessions in prod requires explicit confirmation",
-      );
-    }
-
-    // Ajuste 2: refuse to kill SYS/SYSTEM — killing either can destabilize the instance.
-    // ORA-942/1031 on the lookup means we can't verify the target is safe → refuse.
-    let username: string | null = null;
-    try {
-      const targetRes = await conn.execute<Record<string, unknown>>(
-        `SELECT USERNAME FROM V$SESSION WHERE SID = :sid AND SERIAL# = :serial`,
-        { sid, serial },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      const rawUser = targetRes.rows?.[0]?.USERNAME;
-      username = rawUser != null ? String(rawUser).toUpperCase() : null;
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) {
-        throw new RpcCodedError(
-          INVALID_SESSION_ID,
-          "Cannot verify session target: insufficient privilege on V$SESSION",
-        );
-      }
-      throw err;
-    }
-    if (username === "SYS" || username === "SYSTEM") {
-      throw new RpcCodedError(
-        INVALID_SESSION_ID,
-        `Refusing to kill ${username} session — protected system user`,
-      );
-    }
-
-    // Oracle KILL SESSION requires numeric literals in the quoted string; bind variables are not
-    // supported for the session address. SID and SERIAL# are validated as positive integers above.
-    await conn.execute(`ALTER SYSTEM KILL SESSION '${sid},${serial}' IMMEDIATE`);
-    log.info(`[session] kill sid=${sid} serial=${serial} env=${env}`);
-    return { ok: true };
-  });
-}
-
-export async function privilegesList(p: { schema: string }): Promise<PrivilegesList> {
-  return withActiveSession(async (conn) => {
-    let fallbackMode = false;
-
-    // Role Privs: DBA_ROLE_PRIVS → SESSION_ROLES fallback on ORA-942/1031
-    let rolePrivs: RolePrivRow[] = [];
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT GRANTED_ROLE, ADMIN_OPTION, DEFAULT_ROLE
-         FROM DBA_ROLE_PRIVS
-         WHERE GRANTEE = :schema
-         ORDER BY GRANTED_ROLE`,
-        { schema: p.schema },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      rolePrivs = (res.rows ?? []).map((r) => ({
-        grantedRole: String(r.GRANTED_ROLE ?? ""),
-        adminOption: String(r.ADMIN_OPTION ?? "NO"),
-        defaultRole: String(r.DEFAULT_ROLE ?? "NO"),
-      }));
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) {
-        fallbackMode = true;
-        try {
-          const res = await conn.execute<Record<string, unknown>>(
-            `SELECT ROLE AS GRANTED_ROLE, 'NO' AS ADMIN_OPTION, 'YES' AS DEFAULT_ROLE
-             FROM SESSION_ROLES ORDER BY ROLE`,
-            {},
-            { outFormat: oracledb.OUT_FORMAT_OBJECT },
-          );
-          rolePrivs = (res.rows ?? []).map((r) => ({
-            grantedRole: String(r.GRANTED_ROLE ?? ""),
-            adminOption: String(r.ADMIN_OPTION ?? "NO"),
-            defaultRole: String(r.DEFAULT_ROLE ?? "YES"),
-          }));
-        } catch { rolePrivs = []; }
-      } else {
-        throw err;
-      }
-    }
-
-    // Sys Privs: DBA_SYS_PRIVS → SESSION_PRIVS fallback on ORA-942/1031
-    let sysPrivs: SysPrivRow[] = [];
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT PRIVILEGE, ADMIN_OPTION
-         FROM DBA_SYS_PRIVS
-         WHERE GRANTEE = :schema
-         ORDER BY PRIVILEGE`,
-        { schema: p.schema },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      sysPrivs = (res.rows ?? []).map((r) => ({
-        privilege: String(r.PRIVILEGE ?? ""),
-        adminOption: String(r.ADMIN_OPTION ?? "NO"),
-      }));
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) {
-        fallbackMode = true;
-        try {
-          const res = await conn.execute<Record<string, unknown>>(
-            `SELECT PRIVILEGE, 'NO' AS ADMIN_OPTION FROM SESSION_PRIVS ORDER BY PRIVILEGE`,
-            {},
-            { outFormat: oracledb.OUT_FORMAT_OBJECT },
-          );
-          sysPrivs = (res.rows ?? []).map((r) => ({
-            privilege: String(r.PRIVILEGE ?? ""),
-            adminOption: String(r.ADMIN_OPTION ?? "NO"),
-          }));
-        } catch { sysPrivs = []; }
-      } else {
-        throw err;
-      }
-    }
-
-    // Tab Privs received: DBA_TAB_PRIVS WHERE GRANTEE = schema
-    let tabPrivs: TabPrivRow[] = [];
-    let tabPrivsAccessDenied = false;
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT OWNER, TABLE_NAME, GRANTOR, PRIVILEGE, GRANTABLE, HIERARCHY
-         FROM DBA_TAB_PRIVS
-         WHERE GRANTEE = :schema
-         ORDER BY OWNER, TABLE_NAME, PRIVILEGE
-         FETCH FIRST 200 ROWS ONLY`,
-        { schema: p.schema },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      tabPrivs = (res.rows ?? []).map((r) => ({
-        owner: String(r.OWNER ?? ""),
-        tableName: String(r.TABLE_NAME ?? ""),
-        grantor: r.GRANTOR != null ? String(r.GRANTOR) : null,
-        privilege: String(r.PRIVILEGE ?? ""),
-        grantable: String(r.GRANTABLE ?? "NO"),
-        hierarchy: r.HIERARCHY != null ? String(r.HIERARCHY) : null,
-      }));
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) { tabPrivsAccessDenied = true; }
-      else throw err;
-    }
-
-    // Granted To others: DBA_TAB_PRIVS WHERE OWNER = schema
-    let grantedTo: GrantedToRow[] = [];
-    let grantedToAccessDenied = false;
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT GRANTEE, TABLE_NAME, PRIVILEGE, GRANTABLE
-         FROM DBA_TAB_PRIVS
-         WHERE OWNER = :schema
-         ORDER BY GRANTEE, TABLE_NAME, PRIVILEGE
-         FETCH FIRST 200 ROWS ONLY`,
-        { schema: p.schema },
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      grantedTo = (res.rows ?? []).map((r) => ({
-        grantee: String(r.GRANTEE ?? ""),
-        tableName: String(r.TABLE_NAME ?? ""),
-        privilege: String(r.PRIVILEGE ?? ""),
-        grantable: String(r.GRANTABLE ?? "NO"),
-      }));
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) { grantedToAccessDenied = true; }
-      else throw err;
-    }
-
-    return { rolePrivs, sysPrivs, tabPrivs, grantedTo, tabPrivsAccessDenied, grantedToAccessDenied, fallbackMode };
-  });
-}
-
-export async function blockingChain(): Promise<{ pairs: BlockingPair[]; accessDenied: boolean }> {
-  return withActiveSession(async (conn) => {
-    try {
-      const res = await conn.execute<Record<string, unknown>>(
-        `SELECT s1.SID AS BLOCKED_SID, s1.SERIAL# AS BLOCKED_SERIAL,
-                s1.USERNAME AS BLOCKED_USER, s1.WAIT_CLASS AS WAIT_CLASS,
-                s1.EVENT AS EVENT, s1.SECONDS_IN_WAIT AS SECONDS_IN_WAIT,
-                s2.SID AS BLOCKER_SID, s2.SERIAL# AS BLOCKER_SERIAL,
-                s2.USERNAME AS BLOCKER_USER, s2.STATUS AS BLOCKER_STATUS
-         FROM V$SESSION s1
-         JOIN V$SESSION s2 ON s1.BLOCKING_SESSION = s2.SID
-         WHERE s1.BLOCKING_SESSION IS NOT NULL
-         ORDER BY s2.SID, s1.SID
-         FETCH FIRST 50 ROWS ONLY`,
-        {},
-        { outFormat: oracledb.OUT_FORMAT_OBJECT },
-      );
-      const pairs: BlockingPair[] = (res.rows ?? []).map((r) => ({
-        blockedSid: Number(r.BLOCKED_SID),
-        blockedSerial: Number(r.BLOCKED_SERIAL),
-        blockedUser: r.BLOCKED_USER != null ? String(r.BLOCKED_USER) : null,
-        waitClass: r.WAIT_CLASS != null ? String(r.WAIT_CLASS) : null,
-        event: r.EVENT != null ? String(r.EVENT) : null,
-        secondsInWait: r.SECONDS_IN_WAIT != null ? Number(r.SECONDS_IN_WAIT) : null,
-        blockerSid: Number(r.BLOCKER_SID),
-        blockerSerial: Number(r.BLOCKER_SERIAL),
-        blockerUser: r.BLOCKER_USER != null ? String(r.BLOCKER_USER) : null,
-        blockerStatus: r.BLOCKER_STATUS != null ? String(r.BLOCKER_STATUS) : null,
-      }));
-      return { pairs, accessDenied: false };
-    } catch (err: unknown) {
-      const oraNum = (err as { errorNum?: number }).errorNum;
-      if (oraNum === 942 || oraNum === 1031) return { pairs: [], accessDenied: true };
-      throw err;
-    }
-  });
 }

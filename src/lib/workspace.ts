@@ -15,13 +15,7 @@ export type Schema = { name: string; isCurrent: boolean };
 export type ObjectKind =
   | "TABLE" | "VIEW" | "SEQUENCE"
   | "PROCEDURE" | "FUNCTION" | "PACKAGE" | "TRIGGER" | "TYPE"
-  | "REST_MODULE"
-  | "MATERIALIZED_VIEW" | "SYNONYM" | "DB_LINK"
-  | "DIRECTORY"
-  | "QUEUE"
-  | "SCHEDULER_JOB"
-  | "DB_USER"
-  | "PRIVILEGE";
+  | "REST_MODULE";
 export type ObjectRef = { name: string };
 export type ObjectRefWithStatus = { name: string; status: string };
 export type Column = {
@@ -466,10 +460,14 @@ export async function aiChat(
   apiKey: string,
   messages: AiMessage[],
   context: AiContext,
+  // PROD-001 (audit 2026-04-30): when the active connection is tagged env='prod',
+  // the sidecar refuses unless this flag is true. The UI gates earlier with a
+  // per-session unlock modal; the flag is derived from that unlock state.
+  acknowledgeProdAi: boolean = false,
 ): Promise<Result<AiChatResult>> {
   try {
     const res = await invoke<AiChatResult>("ai_chat", {
-      payload: { apiKey, messages, context },
+      payload: { apiKey, messages, context, acknowledgeProdAi },
     });
     return { ok: true, data: res };
   } catch (err) {
@@ -779,6 +777,29 @@ export const flowTraceSql = (payload: {
   withRuntimeStats?: boolean;
 }) => call<FlowTraceResult>("flow_trace_sql", { payload });
 
+export type VisionNode = {
+  id: string;
+  name: string;
+  owner: string;
+  type: string;
+  status: string;
+  degree: number;
+  isOrigin: boolean;
+};
+
+export type VisionEdge = {
+  source: string;
+  target: string;
+  kind: "fk" | "dep";
+};
+
+export type VisionGraphResult = {
+  nodes: VisionNode[];
+  edges: VisionEdge[];
+  truncated: boolean;
+  truncatedAt: number | null;
+};
+
 // ── DML dry-run preview ───────────────────────────────────────────────────────
 
 export type DmlPreviewResult = {
@@ -790,372 +811,3 @@ export type DmlPreviewResult = {
 
 export const dmlPreviewRpc = (sql: string) =>
   call<DmlPreviewResult>("dml_preview", { sql });
-
-// ── Item #1A — MViews, Synonyms, DB Links ─────────────────────────────────────
-
-export type MViewDetails = {
-  name: string;
-  owner: string;
-  refreshMethod: string;
-  refreshMode: string;
-  lastRefreshDate: string | null;
-  staleness: string;
-  query: string | null;
-};
-
-export const mviewDetailsGet = (owner: string, name: string) =>
-  call<{ detail: MViewDetails | null }>("mview_details", { owner, name });
-
-export const mviewRefreshRpc = (
-  owner: string,
-  name: string,
-  method: "FAST" | "COMPLETE" | "FORCE",
-  confirmedProdRefresh?: boolean,
-) => call<{ ok: true; durationMs: number; envReal: string }>("mview_refresh", { owner, name, method, confirmedProdRefresh });
-
-export type SynonymDetails = {
-  name: string;
-  owner: string;
-  targetSchema: string;
-  targetObject: string;
-  targetDbLink: string | null;
-  ddl: string;
-};
-
-export const synonymDetailsGet = (owner: string, name: string) =>
-  call<{ detail: SynonymDetails | null }>("synonym_details", { owner, name });
-
-export type DbLinkRow = {
-  name: string;
-  owner: string;
-  username: string | null;
-  host: string | null;
-  created: string | null;
-};
-
-export const dbLinksListGet = (owner: string) =>
-  call<{ objects: DbLinkRow[] }>("objects_list_dblinks", { owner });
-
-export const dbLinkDdlGet = (name: string) =>
-  call<{ ddl: string }>("object_ddl_dblink", { name });
-
-// schemaKindCounts returns 'MATERIALIZED VIEW' (with space) for the key —
-// map it to the ObjectKind 'MATERIALIZED_VIEW' on the frontend side.
-// DB_LINK counts are not in ALL_OBJECTS; the count badge is omitted for now
-// and will appear only after the section is expanded.
-
-// ── Item #1B — Directories ────────────────────────────────────────────────────
-
-export type DirectoryRow = {
-  name: string;
-  owner: string;
-  path: string;
-};
-
-export type DirectoryGrant = {
-  grantee: string;
-  privilege: string;
-};
-
-export type DirectoryDetail = {
-  name: string;
-  owner: string;
-  path: string;
-  grants: DirectoryGrant[];
-};
-
-export const directoriesListGet = () =>
-  call<{ directories: DirectoryRow[] }>("objects_list_directories", {});
-
-export const directoryDetailsGet = (name: string) =>
-  call<{ detail: DirectoryDetail | null }>("directory_details", { name });
-
-// ── Item #1B — Queues (AQ) ────────────────────────────────────────────────────
-
-export type QueueRow = {
-  name: string;
-  owner: string;
-  queueTable: string;
-  queueType: string;
-  maxRetries: number | null;
-  retryDelay: number | null;
-  retention: number | null;
-  userComment: string | null;
-  payloadType: string | null;
-};
-
-export const queuesListGet = (owner: string) =>
-  call<{ queues: QueueRow[] }>("objects_list_queues", { owner });
-
-export const queueDetailsGet = (owner: string, name: string) =>
-  call<{ queue: QueueRow | null }>("queue_details", { owner, name });
-
-export const queueDdlGet = (owner: string, name: string) =>
-  call<{ ddl: string }>("queue_ddl", { owner, name });
-
-// ── Item #1B T1B.1 — Scheduler Jobs ──────────────────────────────────────────
-
-export type SchedulerJobRow = {
-  owner: string;
-  name: string;
-  jobType: string | null;
-  state: string;
-  enabled: boolean;
-  runCount: number;
-  failureCount: number;
-  nextRunDate: string | null;
-  scheduleName: string | null;
-  programName: string | null;
-  comments: string | null;
-};
-
-export type LegacyJobRow = {
-  jobId: number;
-  owner: string;
-  jobAction: string | null;
-  nextDate: string | null;
-  broken: boolean;
-  failures: number;
-  interval: string | null;
-};
-
-export type SchedulerJobDetails = {
-  owner: string;
-  name: string;
-  jobType: string | null;
-  jobAction: string | null;
-  state: string;
-  enabled: boolean;
-  runCount: number;
-  failureCount: number;
-  maxFailures: number | null;
-  retryCount: number | null;
-  maxRuns: number | null;
-  lastRunDuration: string | null;
-  nextRunDate: string | null;
-  startDate: string | null;
-  endDate: string | null;
-  scheduleName: string | null;
-  scheduleType: string | null;
-  repeatInterval: string | null;
-  programName: string | null;
-  programType: string | null;
-  jobClass: string | null;
-  restartable: boolean;
-  loggingLevel: string | null;
-  comments: string | null;
-};
-
-export type LegacyJobDetails = {
-  jobId: number;
-  owner: string;
-  jobAction: string | null;
-  nextDate: string | null;
-  nextSec: string | null;
-  broken: boolean;
-  failures: number;
-  interval: string | null;
-  lastDate: string | null;
-  lastSec: string | null;
-};
-
-export type SchedulerProgramDetails = {
-  owner: string;
-  programName: string;
-  programType: string;
-  programAction: string;
-  numberOfArguments: number;
-  enabled: boolean;
-  comments: string | null;
-};
-
-export type SchedulerScheduleDetails = {
-  owner: string;
-  scheduleName: string;
-  scheduleType: string;
-  startDate: string | null;
-  repeatInterval: string | null;
-  endDate: string | null;
-  comments: string | null;
-};
-
-export type SchedulerJobPrivs = {
-  hasCreateAnyJob: boolean;
-  hasManageScheduler: boolean;
-};
-
-export const schedulerJobsListGet = (owner: string) =>
-  call<{ jobs: SchedulerJobRow[]; legacyJobs: LegacyJobRow[] }>("objects_list_scheduler_jobs", { owner });
-
-export const schedulerJobDetailsGet = (owner: string, name: string) =>
-  call<{ job: SchedulerJobDetails | null }>("scheduler_job_details", { owner, name });
-
-export const legacyJobDetailsGet = (jobId: number, owner: string) =>
-  call<{ job: LegacyJobDetails | null }>("legacy_job_details", { jobId, owner });
-
-export const schedulerJobDdlGet = (owner: string, name: string, legacy?: boolean) =>
-  call<{ ddl: string }>("scheduler_job_ddl", { owner, name, legacy });
-
-export const schedulerProgramDetailsGet = (owner: string, programName: string) =>
-  call<{ program: SchedulerProgramDetails | null }>("scheduler_program_details", { owner, programName });
-
-export const schedulerScheduleDetailsGet = (owner: string, scheduleName: string) =>
-  call<{ schedule: SchedulerScheduleDetails | null }>("scheduler_schedule_details", { owner, scheduleName });
-
-export const schedulerJobPrivCheckGet = () =>
-  call<SchedulerJobPrivs>("scheduler_job_priv_check", {});
-
-export const schedulerJobRunRpc = (owner: string, name: string, confirmedProdRun?: boolean) =>
-  call<{ ok: true; durationMs: number }>("scheduler_job_run", { owner, name, confirmedProdRun });
-
-export const schedulerJobEnableRpc = (owner: string, name: string) =>
-  call<{ ok: true }>("scheduler_job_enable", { owner, name });
-
-export const schedulerJobDisableRpc = (owner: string, name: string, confirmedProdDisable?: boolean) =>
-  call<{ ok: true }>("scheduler_job_disable", { owner, name, confirmedProdDisable });
-
-export const dbmsJobRunRpc = (jobId: number) =>
-  call<{ ok: true }>("dbms_job_run", { jobId });
-
-export const dbmsJobBrokenRpc = (jobId: number) =>
-  call<{ ok: true }>("dbms_job_broken", { jobId });
-
-export const dbmsJobUnbrokenRpc = (jobId: number) =>
-  call<{ ok: true }>("dbms_job_unbroken", { jobId });
-
-// ── Item #1C T1C.1+T1C.2: Users + Sessions ───────────────────────────────────
-
-export type UserDetails = {
-  username: string;
-  accountStatus: string;
-  lockDate: string | null;
-  expiryDate: string | null;
-  created: string;
-  profile: string | null;
-  authenticationType: string | null;
-  defaultTablespace: string | null;
-  temporaryTablespace: string | null;
-  fallbackMode: boolean;
-};
-
-export type ProfileRow = {
-  resourceName: string;
-  resourceType: string;
-  limit: string;
-};
-
-export type QuotaRow = {
-  tablespaceName: string;
-  bytes: number | null;
-  maxBytes: number | null;
-  blocks: number | null;
-  maxBlocks: number | null;
-};
-
-export type SessionRow = {
-  sid: number;
-  serial: number;
-  status: string;
-  username: string | null;
-  osuser: string | null;
-  machine: string | null;
-  program: string | null;
-  module: string | null;
-  logonTime: string | null;
-  lastCallEt: number | null;
-  blockingSession: number | null;
-  blockingSessionStatus: string | null;
-  waitClass: string | null;
-  event: string | null;
-  secondsInWait: number | null;
-  sqlId: string | null;
-};
-
-export const userDetailsGet = (username: string) =>
-  call<UserDetails | null>("user_details", { username });
-
-export const userProfileDetailsGet = (profile: string) =>
-  call<{ rows: ProfileRow[]; accessDenied: boolean }>("user_profile_details", { profile });
-
-export const userQuotasGet = (username: string) =>
-  call<{ quotas: QuotaRow[]; accessDenied: boolean }>("user_quotas", { username });
-
-export const sessionsListAllGet = () =>
-  call<{ sessions: SessionRow[]; accessDenied: boolean }>("sessions_list_all", {});
-
-export const sessionSqlPreviewGet = (sqlId: string) =>
-  call<{ sql: string | null }>("session_sql_preview", { sqlId });
-
-export const sessionPrivCheckGet = () =>
-  call<{ hasAlterSystem: boolean }>("session_priv_check", {});
-
-export const sessionKillRpc = (sid: number, serial: number, confirmedProdKill?: boolean) =>
-  call<{ ok: true }>("session_kill", { sid, serial, confirmedProdKill });
-
-// ── Item #1C T1C.4: Privileges & Grants ───────────────────────────────────────
-
-export type RolePrivRow = { grantedRole: string; adminOption: string; defaultRole: string };
-export type SysPrivRow  = { privilege: string; adminOption: string };
-export type TabPrivRow  = { owner: string; tableName: string; grantor: string | null; privilege: string; grantable: string; hierarchy: string | null };
-export type GrantedToRow= { grantee: string; tableName: string; privilege: string; grantable: string };
-
-export type PrivilegesList = {
-  rolePrivs: RolePrivRow[];
-  sysPrivs: SysPrivRow[];
-  tabPrivs: TabPrivRow[];
-  grantedTo: GrantedToRow[];
-  tabPrivsAccessDenied: boolean;
-  grantedToAccessDenied: boolean;
-  fallbackMode: boolean;
-};
-
-export const privilegesListGet = (schema: string) =>
-  call<PrivilegesList>("privileges_list", { schema });
-
-// ── Item #1C T1C.5: Blocking chain ───────────────────────────────────────────
-
-export type BlockingPair = {
-  blockedSid: number;
-  blockedSerial: number;
-  blockedUser: string | null;
-  waitClass: string | null;
-  event: string | null;
-  secondsInWait: number | null;
-  blockerSid: number;
-  blockerSerial: number;
-  blockerUser: string | null;
-  blockerStatus: string | null;
-};
-
-export const blockingChainGet = () =>
-  call<{ pairs: BlockingPair[]; accessDenied: boolean }>("sessions_blocking_chain", {});
-
-// Item #1E — DDL confirmation gate
-export const ddlConfirm = (kind: "ddl" | "destructive_ddl") =>
-  call<{ ok: true; expiresAt: number; openedAt: number }>("ddl_confirm", { kind });
-
-export const ddlUnlock = () =>
-  call<{ ok: true }>("ddl_unlock", {});
-
-export const auditDdlEvent = (p: {
-  riskLevel: string;
-  statement: string;
-  env: string;
-  windowAgeMs: number;
-}) => call<void>("audit_ddl_event", {
-  riskLevel: p.riskLevel,
-  statement: p.statement,
-  env: p.env,
-  windowAgeMs: p.windowAgeMs,
-});
-
-// Item #1D — HMAC chain integrity verification
-export type ChainVerifyResult = {
-  ok: boolean;
-  checked: number;
-  skippedLegacy: number;
-  subChains: number;
-  brokenAt: { index: number; ts: string; reason: string } | null;
-};
-
-export const auditVerifyChain = () => call<ChainVerifyResult>("audit_verify_chain", {});

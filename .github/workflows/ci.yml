@@ -19,7 +19,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -48,37 +48,34 @@ jobs:
             file \
             libssl-dev \
             libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            gnome-keyring \
-            libsecret-1-0 \
-            libsecret-1-dev \
-            dbus-x11
-
-      - name: Setup keyring (Ubuntu)
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          eval "$(dbus-launch --sh-syntax)"
-          eval "$(printf '\n' | gnome-keyring-daemon --unlock --components=secrets)"
-          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
-          echo "GNOME_KEYRING_CONTROL=$GNOME_KEYRING_CONTROL" >> "$GITHUB_ENV"
-          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
-
-      - name: Setup keychain (macOS)
-        if: matrix.platform == 'macos-latest'
-        run: |
-          security create-keychain -p "" build.keychain
-          security default-keychain -s build.keychain
-          security unlock-keychain -p "" build.keychain
-          security set-keychain-settings -t 3600 build.keychain
+            libayatana-appindicator3-dev
 
       - name: Install JS deps (root)
         run: bun install --frozen-lockfile
+
+      - name: Checkout @veesker/engine sibling (CE repo)
+        uses: actions/checkout@v6
+        with:
+          repository: Veesker-Cloud/veesker-community-edition
+          path: veesker-community-edition
+
+      - name: Register @veesker/engine via bun link
+        shell: bash
+        run: |
+          cd veesker-community-edition/engine
+          bun install --frozen-lockfile
+          bun link
+          cd "$GITHUB_WORKSPACE/sidecar"
+          bun link @veesker/engine
 
       - name: Install JS deps (sidecar)
         run: cd sidecar && bun install --frozen-lockfile
 
       - name: Type check
         run: bun run check
+
+      - name: Check no pt-BR strings
+        run: bun run check:no-ptbr
 
       - name: Frontend tests (Vitest)
         run: bun run test

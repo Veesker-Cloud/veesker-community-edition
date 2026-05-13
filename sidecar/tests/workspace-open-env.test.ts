@@ -10,10 +10,14 @@ import { describe, expect, test } from "bun:test";
 import { dispatch, type HandlerMap } from "../src/handlers";
 import { ENV_REQUIRED, RpcCodedError } from "../src/errors";
 
+// Mock openSession — never calls Oracle. Returns a minimal success payload
+// to confirm the env gate passed and openSession was reached.
 async function mockOpenSession(_params: unknown): Promise<{ ok: boolean; sessionId: string }> {
   return { ok: true, sessionId: "mock-session" };
 }
 
+// Mirror of the production workspace.open guard in src/index.ts.
+// Keep the logic here in sync with the production handler.
 const handlers: HandlerMap = {
   "workspace.open": async (params) => {
     const envValue = (params as any)?.env;
@@ -129,7 +133,7 @@ describe("workspace.open — env required gate (security item #1)", () => {
     expect((res as any).result).toEqual({ ok: true, sessionId: "mock-session" });
   });
 
-  test("error message mentions valid options", async () => {
+  test("error message is descriptive and mentions valid options", async () => {
     const res = await dispatch(handlers, {
       jsonrpc: "2.0",
       id: 10,
@@ -144,6 +148,8 @@ describe("workspace.open — env required gate (security item #1)", () => {
 });
 
 describe("store.rs — env_check_needs_local_update logic (pure TS mirror)", () => {
+  // The Rust function checks if the sqlite_master sql string contains 'local'.
+  // We mirror the logic here to verify the detection criterion is correct.
   function needsLocalUpdate(sql: string): boolean {
     return !sql.includes("'local'");
   }

@@ -467,7 +467,7 @@ export class DebugSession {
       }
     }
     this._targetExecution = this.targetConn
-      .execute(script, execBinds)
+      .execute(script, execBinds as oracledb.BindParameters)
       .catch((err) => {
         debugLog(`target execute error: ${String(err)}`);
         return null;
@@ -969,7 +969,7 @@ export async function debugRun(p: {
       }
     }
 
-    const execResult = await conn.execute(p.script, execBinds);
+    const execResult = await conn.execute(p.script, execBinds as oracledb.BindParameters);
     const rawOut = (execResult.outBinds ?? {}) as Record<string, unknown>;
 
     const outBinds: Record<string, string | null> = {};

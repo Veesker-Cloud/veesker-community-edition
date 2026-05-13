@@ -15,7 +15,6 @@
   import SqlEditor from "./SqlEditor.svelte";
   import DmlConfirmModal from "./DmlConfirmModal.svelte";
   import UnsafeDmlModal from "./UnsafeDmlModal.svelte";
-  import DdlConfirmModal from "./DdlConfirmModal.svelte";
   import ResultGrid from "./ResultGrid.svelte";
   import ExecutionLog from "./ExecutionLog.svelte";
   import QueryHistory from "./QueryHistory.svelte";
@@ -28,6 +27,7 @@
   import PlsqlOutline from "./PlsqlOutline.svelte";
   import TerminalPanel from "./TerminalPanel.svelte";
   import CommandWindow from "./CommandWindow.svelte";
+  import { toasts } from "$lib/stores/toasts.svelte";
   import { resultPanel } from "$lib/stores/result-panel.svelte";
   import PlanTab from "./PlanTab.svelte";
   import OutputTab from "./OutputTab.svelte";
@@ -67,6 +67,9 @@
   let flyoutOpen = $state(false);
   let idleAlertVisible = $state(false);
   let idleTxTimer: ReturnType<typeof setTimeout> | null = null;
+  let flyoutAnchorTop = $state(0);
+  let flyoutAnchorRight = $state(0);
+  let badgeAnchorEl = $state<HTMLDivElement | null>(null);
 
   $effect(() => {
     const isPending = sqlEditor.pendingTx;
@@ -79,9 +82,6 @@
     }
     return () => { if (idleTxTimer) clearTimeout(idleTxTimer); };
   });
-  let flyoutAnchorTop = $state(0);
-  let flyoutAnchorRight = $state(0);
-  let badgeAnchorEl = $state<HTMLDivElement | null>(null);
 
   // ── macOS-style dock (magnify on hover) ──────────────────────────────────────
   let dockMouseX = $state<number | null>(null);
@@ -775,13 +775,15 @@
                   </button>
                   <div class="dock-sep"></div>
                 {/if}
-                <button bind:this={btnCommitEl} class="dock-btn dock-commit" data-label="Commit" aria-label="Commit" style="transform: scale({btnScale(btnCommitEl)})" disabled={!sqlEditor.pendingTx} onclick={() => void sqlEditor.commit().catch(e => { window.alert("Commit failed: " + String(e)); })}>
+                <button bind:this={btnCommitEl} class="dock-btn dock-commit" data-label="Commit" aria-label="Commit" style="transform: scale({btnScale(btnCommitEl)})" disabled={!sqlEditor.pendingTx} onclick={() => void sqlEditor.commit().catch(e => { toasts.error("Commit failed: " + String(e)); })}>
+
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.3"/>
                     <polyline points="5,8 7.5,10.5 11.5,5.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
                   </svg>
                 </button>
-                <button bind:this={btnRollbackEl} class="dock-btn dock-rollback" data-label="Rollback" aria-label="Rollback" style="transform: scale({btnScale(btnRollbackEl)})" disabled={!sqlEditor.pendingTx} onclick={() => void sqlEditor.rollback().catch(e => { window.alert("Rollback failed: " + String(e)); })}>
+                <button bind:this={btnRollbackEl} class="dock-btn dock-rollback" data-label="Rollback" aria-label="Rollback" style="transform: scale({btnScale(btnRollbackEl)})" disabled={!sqlEditor.pendingTx} onclick={() => void sqlEditor.rollback().catch(e => { toasts.error("Rollback failed: " + String(e)); })}>
+
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <path d="M5.5 4C8 1.5 14 2.5 14 8s-6 6.5-8.5 4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
                     <polyline points="2,8.5 5.5,4 9,7.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
@@ -971,15 +973,6 @@
       onCancel={() => sqlEditor.resolveUnsafeDml(false)}
     />
   {/if}
-  {#if sqlEditor.pendingDdl}
-    <DdlConfirmModal
-      riskLevel={sqlEditor.pendingDdl.riskLevel}
-      statements={sqlEditor.pendingDdl.statements}
-      env={env ?? "dev"}
-      onConfirm={() => sqlEditor.resolveDdl(true)}
-      onCancel={() => sqlEditor.resolveDdl(false)}
-    />
-  {/if}
 {/if}
 
 <style>
@@ -1130,10 +1123,10 @@
     align-items: stretch;
   }
   .plus-caret {
-    padding: 0 0.4rem;
+    padding: 0 0.5rem;
     font-size: 11px;
-    border-left: 1px solid rgba(255,255,255,0.10);
-    opacity: 0.55;
+    border-left: 1px solid rgba(255,255,255,0.08);
+    color: rgba(255,255,255,0.55);
   }
   .new-tab-menu {
     position: absolute;
@@ -1220,7 +1213,7 @@
   }
   .idle-tx-alert-prod {
     background: rgba(179,62,31,0.1); border-bottom-color: rgba(179,62,31,0.3);
-    color: #b33e1f;
+    color: var(--env-accent, #b33e1f);
   }
   .idle-tx-alert button {
     margin-left: auto; background: none; border: none;
@@ -1237,7 +1230,7 @@
     border-bottom: 1px solid rgba(26, 22, 18, 0.1);
     overflow: hidden;
   }
-  .editor-prod { border-top: 3px solid #b33e1f; }
+  .editor-prod { border-top: 3px solid var(--env-accent, #b33e1f); }
 
   /* ── macOS-style dock ───────────────────────────────────────────────────── */
   .dock {

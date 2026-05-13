@@ -13,7 +13,7 @@
  */
 
 import oracledb from "oracledb";
-import { embedText } from "../embedding.ts";
+import { embedText } from "../embedding";
 
 const DB_USER     = process.env.DB_USER     ?? "SYSTEM";
 const DB_PASSWORD = process.env.DB_PASSWORD ?? "oracle";

@@ -3,8 +3,8 @@
   import ActivityTab from "./ActivityTab.svelte";
   import SessionTab from "./SessionTab.svelte";
 
-  type Props = { onClose?: () => void; connectionEnv?: string };
-  let { onClose, connectionEnv = "" }: Props = $props();
+  type Props = { onClose?: () => void };
+  let { onClose }: Props = $props();
 </script>
 
 <aside
@@ -38,7 +38,7 @@
     {#if operationsPanel.activeTab === "activity"}
       <ActivityTab />
     {:else}
-      <SessionTab {connectionEnv} />
+      <SessionTab />
     {/if}
   </div>
 </aside>
