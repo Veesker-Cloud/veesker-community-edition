@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Architecture
+
+- **Repository unification (2026-05-13):** All code from the private `veesker-cloud-edition` (CL) repository migrates to this public repository. The CL repo is being archived. This is a structural change — no features are removed. Source code for all features, including premium ones, is now Apache 2.0 in this repo. Premium features remain runtime-gated via a feature flag served by `api.veesker.cloud`.
+- **Open-core model clarification:** The "Community Edition vs Cloud Edition" framing (two separate binaries) is retired. There is one binary, one repository. Free tier = all core features. Subscription tier = premium features unlocked at runtime. The source for every feature is public.
+- Internal planning documents (`docs/superpowers/`, `CLAUDE.md` internal dev notes) removed from the public tree and archived privately as part of the cleanup.
+
 ### Fixed
 
 - Schema tree freeze and `each_key_duplicate` exception when re-expanding pre-loaded schemas. Pragmatic workaround: `{#each}` blocks in `SchemaTree.svelte` converted to non-keyed iteration. Root cause (Svelte 5 proxy chain behavior with immutable spread patterns) remains under investigation as tech debt — see `DEBT.md`.
