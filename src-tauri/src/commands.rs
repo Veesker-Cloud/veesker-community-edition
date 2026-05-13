@@ -24,6 +24,32 @@ pub struct PsdpmState(pub tokio::sync::Mutex<bool>);
 
 pub struct AuditChainState(pub tokio::sync::Mutex<String>);
 
+// Item #1D: Rate-limit state for audit_verify_chain. At most 1 verify per 60s
+// to prevent runaway I/O on large JSONL files from a compromised renderer.
+pub struct VerifyChainRateLimit {
+    pub last_call: tokio::sync::Mutex<Option<std::time::Instant>>,
+}
+
+const VERIFY_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainBrokenAt {
+    pub index: usize,
+    pub ts: String,
+    pub reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainVerifyResult {
+    pub ok: bool,
+    pub checked: usize,
+    pub skipped_legacy: usize,
+    pub sub_chains: usize,
+    pub broken_at: Option<ChainBrokenAt>,
+}
+
 /// L1.2 (Sprint C — Air-gap mode). When `true`, every Tauri command that makes
 /// outbound HTTPS calls (cloud_api_*, auth_token_*, ai_*, embed_*,
 /// object_version_push, object_version_get_remote, sandbox_*) short-circuits
@@ -776,8 +802,6 @@ async fn write_audit_entry(
     );
     entry_obj.insert("hmac".to_string(), serde_json::Value::String(hmac.clone()));
 
-    *prev_hash_guard = hmac;
-
     let entry = serde_json::Value::Object(entry_obj);
     // L1.4 (Sprint C, Onda 1.B) — wrap the HMAC-signed body in an AES-GCM
     // envelope before writing to disk. The chain invariant is preserved:
@@ -802,6 +826,8 @@ async fn write_audit_entry(
     } else {
         return None;
     }
+    // Advance in-memory chain only after the entry is durably on disk.
+    *prev_hash_guard = hmac;
     Some(entry)
 }
 
@@ -864,6 +890,101 @@ pub async fn audit_recent(app: AppHandle, limit: Option<i64>) -> Vec<Value> {
     entries.reverse();
     entries.truncate(limit);
     entries
+}
+
+// Item #1D: Pure, testable chain verification logic. Reads a JSONL file,
+// decrypts each line, and verifies the HMAC chain. "genesis" prevHash values
+// mark the start of a new sub-chain (one per app session/restart) — these are
+// not treated as breaks.
+pub fn verify_chain_file(path: &Path, key: &[u8]) -> ChainVerifyResult {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => return ChainVerifyResult { ok: true, checked: 0, skipped_legacy: 0, sub_chains: 0, broken_at: None },
+    };
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(t) => t,
+        Err(_) => return ChainVerifyResult { ok: false, checked: 0, skipped_legacy: 0, sub_chains: 0,
+            broken_at: Some(ChainBrokenAt { index: 0, ts: String::new(), reason: "file_not_utf8".to_string() }) },
+    };
+    let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
+    let mut checked: usize = 0;
+    let mut skipped_legacy: usize = 0;
+    let mut sub_chains: usize = 0;
+    let mut expected_prev = String::new();
+    let mut raw_index: usize = 0;
+
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let plain = match crate::crypto::decrypt_audit_line_if_envelope(&cipher_key, line) {
+            Ok(Some(p)) => p,
+            Ok(None) => line.to_string(),
+            Err(_) => { raw_index += 1; continue; }
+        };
+        let obj: serde_json::Map<String, Value> = match serde_json::from_str::<Value>(&plain) {
+            Ok(Value::Object(m)) => m,
+            _ => { raw_index += 1; continue; }
+        };
+        let ts = obj.get("ts").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let stored_hmac = match obj.get("hmac").and_then(|v| v.as_str()) {
+            Some(h) => h.to_string(),
+            None => { skipped_legacy += 1; raw_index += 1; continue; }
+        };
+        let stored_prev = match obj.get("prevHash").and_then(|v| v.as_str()) {
+            Some(p) => p.to_string(),
+            None => { skipped_legacy += 1; raw_index += 1; continue; }
+        };
+        // Sub-chain boundary: a new app session resets prevHash to "genesis".
+        if stored_prev == "genesis" {
+            sub_chains += 1;
+            expected_prev = "genesis".to_string();
+        }
+        // Verify chain linkage.
+        if stored_prev != expected_prev {
+            return ChainVerifyResult { ok: false, checked, skipped_legacy, sub_chains,
+                broken_at: Some(ChainBrokenAt { index: raw_index, ts, reason: "prev_hash_mismatch".to_string() }) };
+        }
+        // Reconstruct body_str: strip hmac and prevHash, re-serialize.
+        let mut stripped = obj.clone();
+        stripped.remove("hmac");
+        stripped.remove("prevHash");
+        let body_str = Value::Object(stripped).to_string();
+        let recomputed = crate::audit::chain::compute_hmac(key, &stored_prev, &body_str);
+        if recomputed != stored_hmac {
+            return ChainVerifyResult { ok: false, checked, skipped_legacy, sub_chains,
+                broken_at: Some(ChainBrokenAt { index: raw_index, ts, reason: "hmac_mismatch".to_string() }) };
+        }
+        expected_prev = stored_hmac;
+        checked += 1;
+        raw_index += 1;
+    }
+    ChainVerifyResult { ok: true, checked, skipped_legacy, sub_chains, broken_at: None }
+}
+
+#[tauri::command]
+pub async fn audit_verify_chain(
+    app: AppHandle,
+    rate_limit: tauri::State<'_, VerifyChainRateLimit>,
+) -> Result<ChainVerifyResult, String> {
+    let mut last = rate_limit.last_call.lock().await;
+    if let Some(t) = *last
+        && t.elapsed() < VERIFY_MIN_INTERVAL
+    {
+        return Err("RATE_LIMITED".into());
+    }
+    *last = Some(std::time::Instant::now());
+    drop(last);
+
+    let data_dir = app.path().app_data_dir().map_err(|_| "data_dir_unavailable")?;
+    let now = chrono::Utc::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    let path = data_dir.join("audit").join(format!("{date}.jsonl"));
+    if !path.exists() {
+        return Ok(ChainVerifyResult { ok: true, checked: 0, skipped_legacy: 0, sub_chains: 0, broken_at: None });
+    }
+    let key = crate::audit::chain::get_or_create_key();
+    Ok(verify_chain_file(&path, &key))
 }
 
 #[tauri::command]
@@ -1757,6 +1878,73 @@ pub async fn unsafe_dml_confirm(
             let _ = tx.send(confirmed);
         });
     Ok(rx.await.unwrap_or(false))
+}
+
+// ─── DDL Confirmation Gate (Item #1E) ────────────────────────────────────────
+
+fn write_ddl_event(app: &AppHandle, event_obj: Value) {
+    let Ok(data_dir) = app.path().app_data_dir() else { return };
+    let audit_dir = data_dir.join("audit");
+    if std::fs::create_dir_all(&audit_dir).is_err() { return }
+    let now = chrono::Utc::now();
+    let date = now.format("%Y-%m-%d").to_string();
+    let path = audit_dir.join(format!("{date}.jsonl"));
+    let body = event_obj.to_string();
+    let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
+    let line = match crate::crypto::encrypt_audit_line(&cipher_key, &body) {
+        Ok(s) => format!("{s}\n"),
+        Err(_) => format!("{body}\n"),
+    };
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+    let _ = app.emit("audit:append", &event_obj);
+}
+
+#[tauri::command]
+pub async fn ddl_confirm(app: AppHandle, kind: String) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "ddl.confirm", json!({ "kind": kind })).await?;
+    let now = chrono::Utc::now();
+    write_ddl_event(&app, json!({
+        "event": "ddl_window_opened",
+        "kind": kind,
+        "user_action": "explicit_confirm",
+        "ts": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    }));
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn ddl_unlock(app: AppHandle) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "ddl.unlock", json!({})).await?;
+    let now = chrono::Utc::now();
+    write_ddl_event(&app, json!({
+        "event": "ddl_window_closed",
+        "reason": "explicit_unlock",
+        "ts": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    }));
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn audit_ddl_event(
+    app: AppHandle,
+    risk_level: String,
+    statement: String,
+    env: String,
+    window_age_ms: i64,
+) -> Result<(), ConnectionTestErr> {
+    let now = chrono::Utc::now();
+    write_ddl_event(&app, json!({
+        "event": "ddl_executed",
+        "sql_kind": "ddl",
+        "risk_level": risk_level,
+        "statement": statement.chars().take(500).collect::<String>(),
+        "env": env,
+        "window_age_ms": window_age_ms,
+        "ts": now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    }));
+    Ok(())
 }
 
 #[tauri::command]
@@ -2701,4 +2889,578 @@ pub async fn command_script_read(app: AppHandle, path: String) -> Result<String,
     }
     std::fs::read_to_string(&canon)
         .map_err(|e| format!("SP2-0310: unable to read file \"{path}\": {e}"))
+}
+
+// ── Item #1A — MViews, Synonyms, DB Links — T1A ──────────────────────────────
+
+#[tauri::command]
+pub async fn mview_details(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "mview.details",
+        json!({ "owner": owner, "name": name }),
+    )
+    .await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn mview_refresh(
+    app: AppHandle,
+    owner: String,
+    name: String,
+    method: String,
+    env: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "mview.refresh",
+        json!({ "owner": owner, "name": name, "method": method, "env": env }),
+    )
+    .await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn synonym_details(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "synonym.details",
+        json!({ "owner": owner, "name": name }),
+    )
+    .await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn objects_list_dblinks(
+    app: AppHandle,
+    owner: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "objects.list.dblinks",
+        json!({ "owner": owner }),
+    )
+    .await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn object_ddl_dblink(
+    app: AppHandle,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "object.ddl.dblink",
+        json!({ "name": name }),
+    )
+    .await?;
+    Ok(res)
+}
+
+// ── Item #1B — Directories, Queues — T1B.2 / T1B.3 ───────────────────────────
+
+#[tauri::command]
+pub async fn objects_list_directories(
+    app: AppHandle,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "objects.list.directories", json!({})).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn directory_details(
+    app: AppHandle,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "directory.details", json!({ "name": name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn objects_list_queues(
+    app: AppHandle,
+    owner: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "objects.list.queues", json!({ "owner": owner })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn queue_details(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "queue.details", json!({ "owner": owner, "name": name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn queue_ddl(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "queue.ddl", json!({ "owner": owner, "name": name })).await?;
+    Ok(res)
+}
+
+// ── Item #1B T1B.1 — Scheduler Jobs ──────────────────────────────────────────
+
+#[tauri::command]
+pub async fn objects_list_scheduler_jobs(
+    app: AppHandle,
+    owner: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "objects.list.scheduler_jobs", json!({ "owner": owner })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_details(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.job.details", json!({ "owner": owner, "name": name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn legacy_job_details(
+    app: AppHandle,
+    job_id: i64,
+    owner: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.job.details.legacy", json!({ "jobId": job_id, "owner": owner })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_ddl(
+    app: AppHandle,
+    owner: String,
+    name: String,
+    legacy: Option<bool>,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.job.ddl", json!({ "owner": owner, "name": name, "legacy": legacy })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_program_details(
+    app: AppHandle,
+    owner: String,
+    program_name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.program.details", json!({ "owner": owner, "programName": program_name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_schedule_details(
+    app: AppHandle,
+    owner: String,
+    schedule_name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.schedule.details", json!({ "owner": owner, "scheduleName": schedule_name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_priv_check(
+    app: AppHandle,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.job.priv_check", json!({})).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_run(
+    app: AppHandle,
+    owner: String,
+    name: String,
+    confirmed_prod_run: Option<bool>,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "scheduler.job.run",
+        json!({ "owner": owner, "name": name, "confirmedProdRun": confirmed_prod_run }),
+    ).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_enable(
+    app: AppHandle,
+    owner: String,
+    name: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "scheduler.job.enable", json!({ "owner": owner, "name": name })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn scheduler_job_disable(
+    app: AppHandle,
+    owner: String,
+    name: String,
+    confirmed_prod_disable: Option<bool>,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "scheduler.job.disable",
+        json!({ "owner": owner, "name": name, "confirmedProdDisable": confirmed_prod_disable }),
+    ).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn dbms_job_run(
+    app: AppHandle,
+    job_id: i64,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "dbms_job.run", json!({ "jobId": job_id })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn dbms_job_broken(
+    app: AppHandle,
+    job_id: i64,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "dbms_job.broken", json!({ "jobId": job_id })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn dbms_job_unbroken(
+    app: AppHandle,
+    job_id: i64,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "dbms_job.unbroken", json!({ "jobId": job_id })).await?;
+    Ok(res)
+}
+
+// ── Item #1C T1C.1+T1C.2 — Users + Sessions ──────────────────────────────────
+
+#[tauri::command]
+pub async fn user_details(
+    app: AppHandle,
+    username: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "user.details", json!({ "username": username })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn user_profile_details(
+    app: AppHandle,
+    profile: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "user.profile.details", json!({ "profile": profile })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn user_quotas(
+    app: AppHandle,
+    username: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "user.quotas", json!({ "username": username })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn sessions_list_all(
+    app: AppHandle,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "sessions.list.all", json!({})).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn session_sql_preview(
+    app: AppHandle,
+    sql_id: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "session.sql.preview", json!({ "sqlId": sql_id })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn session_priv_check(
+    app: AppHandle,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "session.priv.check", json!({})).await?;
+    Ok(res)
+}
+
+// ── Item #1C T1C.3+T1C.4 — Session Kill + Privileges ─────────────────────────
+
+#[tauri::command]
+pub async fn session_kill(
+    app: AppHandle,
+    sid: i64,
+    serial: i64,
+    confirmed_prod_kill: Option<bool>,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(
+        &app,
+        "session.kill",
+        json!({ "sid": sid, "serial": serial, "confirmedProdKill": confirmed_prod_kill }),
+    )
+    .await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn privileges_list(
+    app: AppHandle,
+    schema: String,
+) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "privileges.list", json!({ "schema": schema })).await?;
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn sessions_blocking_chain(app: AppHandle) -> Result<Value, ConnectionTestErr> {
+    let res = call_sidecar(&app, "sessions.blocking.chain", json!({})).await?;
+    Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    // Returns (entry_json_line, hmac) for use as the next prevHash.
+    fn make_entry(key: &[u8], prev_hash: &str, ts: &str, sql: &str) -> (String, String) {
+        let body = serde_json::json!({
+            "connectionId": "c1",
+            "elapsedMs": 5u64,
+            "env": "dev",
+            "errorCode": null,
+            "errorMessage": null,
+            "host": "localhost",
+            "origin": "user_typed",
+            "originDetail": null,
+            "rowCount": 1u64,
+            "source": "user",
+            "sql": sql,
+            "success": true,
+            "ts": ts,
+            "username": "test",
+        });
+        let body_str = body.to_string();
+        let hmac = crate::audit::chain::compute_hmac(key, prev_hash, &body_str);
+        let mut entry = body.as_object().unwrap().clone();
+        entry.insert("prevHash".to_string(), Value::String(prev_hash.to_string()));
+        entry.insert("hmac".to_string(), Value::String(hmac.clone()));
+        (Value::Object(entry).to_string(), hmac)
+    }
+
+    fn legacy_entry(ts: &str, sql: &str) -> String {
+        serde_json::json!({ "ts": ts, "sql": sql, "success": true }).to_string()
+    }
+
+    #[test]
+    fn verify_nonexistent_path_returns_empty_ok() {
+        let path = std::path::Path::new("/no/such/audit/file.jsonl");
+        let result = verify_chain_file(path, &[0u8; 32]);
+        assert!(result.ok);
+        assert_eq!(result.checked, 0);
+        assert_eq!(result.skipped_legacy, 0);
+        assert_eq!(result.sub_chains, 0);
+        assert!(result.broken_at.is_none());
+    }
+
+    #[test]
+    fn verify_empty_file_returns_ok() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f).unwrap();
+        let result = verify_chain_file(f.path(), &[0u8; 32]);
+        assert!(result.ok);
+        assert_eq!(result.checked, 0);
+    }
+
+    #[test]
+    fn verify_single_valid_entry() {
+        let key = vec![1u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let (line, _) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL");
+        writeln!(f, "{line}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok, "expected ok");
+        assert_eq!(result.checked, 1);
+        assert_eq!(result.skipped_legacy, 0);
+        assert_eq!(result.sub_chains, 1);
+        assert!(result.broken_at.is_none());
+    }
+
+    #[test]
+    fn verify_two_linked_entries() {
+        let key = vec![2u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let (line1, hmac1) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL");
+        let (line2, _) = make_entry(&key, &hmac1, "2026-05-11T10:00:01.000Z", "SELECT 2 FROM DUAL");
+        writeln!(f, "{line1}").unwrap();
+        writeln!(f, "{line2}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok, "expected ok");
+        assert_eq!(result.checked, 2);
+        assert_eq!(result.sub_chains, 1);
+    }
+
+    #[test]
+    fn verify_legacy_entry_skipped() {
+        let key = vec![3u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "{}", legacy_entry("2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL")).unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok, "legacy-only file should be ok");
+        assert_eq!(result.skipped_legacy, 1);
+        assert_eq!(result.checked, 0);
+        assert_eq!(result.sub_chains, 0);
+    }
+
+    #[test]
+    fn verify_mixed_legacy_and_chained() {
+        let key = vec![4u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "{}", legacy_entry("2026-05-11T09:59:00.000Z", "SELECT OLD FROM DUAL")).unwrap();
+        let (line, _) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT NEW FROM DUAL");
+        writeln!(f, "{line}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok);
+        assert_eq!(result.skipped_legacy, 1);
+        assert_eq!(result.checked, 1);
+        assert_eq!(result.sub_chains, 1);
+    }
+
+    #[test]
+    fn verify_tampered_body_detected() {
+        let key = vec![5u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let (line, _) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1 FROM DUAL");
+        let mut obj: serde_json::Map<String, Value> =
+            serde_json::from_str::<Value>(&line).unwrap().as_object().unwrap().clone();
+        obj.insert("sql".to_string(), Value::String("DROP TABLE employees".to_string()));
+        let tampered = Value::Object(obj).to_string();
+        writeln!(f, "{tampered}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(!result.ok, "tampered body must fail");
+        assert_eq!(result.broken_at.as_ref().unwrap().reason, "hmac_mismatch");
+    }
+
+    #[test]
+    fn verify_prev_hash_mismatch_detected() {
+        let key = vec![6u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let (line1, _hmac1) = make_entry(&key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1");
+        let (line2, _) = make_entry(&key, "deadbeef", "2026-05-11T10:00:01.000Z", "SELECT 2");
+        writeln!(f, "{line1}").unwrap();
+        writeln!(f, "{line2}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(!result.ok, "wrong prevHash must fail");
+        assert_eq!(result.broken_at.as_ref().unwrap().reason, "prev_hash_mismatch");
+        assert_eq!(result.broken_at.as_ref().unwrap().index, 1);
+    }
+
+    #[test]
+    fn verify_two_sub_chains_ok() {
+        let key = vec![7u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let (line1, _) = make_entry(&key, "genesis", "2026-05-11T08:00:00.000Z", "SELECT 1");
+        let (line2, _) = make_entry(&key, "genesis", "2026-05-11T09:00:00.000Z", "SELECT 2");
+        writeln!(f, "{line1}").unwrap();
+        writeln!(f, "{line2}").unwrap();
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok, "two sub-chains must still be ok");
+        assert_eq!(result.sub_chains, 2);
+        assert_eq!(result.checked, 2);
+    }
+
+    #[test]
+    fn verify_long_chain_ok() {
+        let key = vec![8u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let mut prev = "genesis".to_string();
+        for i in 0..50 {
+            let ts = format!("2026-05-11T10:{:02}:00.000Z", i);
+            let sql = format!("SELECT {i} FROM DUAL");
+            let (line, hmac) = make_entry(&key, &prev, &ts, &sql);
+            writeln!(f, "{line}").unwrap();
+            prev = hmac;
+        }
+        let result = verify_chain_file(f.path(), &key);
+        assert!(result.ok);
+        assert_eq!(result.checked, 50);
+        assert_eq!(result.sub_chains, 1);
+    }
+
+    #[test]
+    fn verify_wrong_key_detects_hmac_mismatch() {
+        let write_key = vec![9u8; 32];
+        let verify_key = vec![10u8; 32];
+        let mut f = NamedTempFile::new().unwrap();
+        let (line, _) = make_entry(&write_key, "genesis", "2026-05-11T10:00:00.000Z", "SELECT 1");
+        writeln!(f, "{line}").unwrap();
+        let result = verify_chain_file(f.path(), &verify_key);
+        assert!(!result.ok, "wrong verify key must fail");
+        assert_eq!(result.broken_at.as_ref().unwrap().reason, "hmac_mismatch");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_blocks_second_immediate_call() {
+        let rl = VerifyChainRateLimit {
+            last_call: tokio::sync::Mutex::new(None),
+        };
+        {
+            let mut last = rl.last_call.lock().await;
+            assert!(last.is_none());
+            *last = Some(std::time::Instant::now());
+        }
+        {
+            let last = rl.last_call.lock().await;
+            let elapsed = last.unwrap().elapsed();
+            assert!(
+                elapsed < VERIFY_MIN_INTERVAL,
+                "elapsed {elapsed:?} should be less than {VERIFY_MIN_INTERVAL:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_allows_after_expiry() {
+        let rl = VerifyChainRateLimit {
+            last_call: tokio::sync::Mutex::new(None),
+        };
+        {
+            let mut last = rl.last_call.lock().await;
+            *last = Some(
+                std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_secs(61))
+                    .unwrap(),
+            );
+        }
+        let last = rl.last_call.lock().await;
+        let elapsed = last.unwrap().elapsed();
+        assert!(
+            elapsed >= VERIFY_MIN_INTERVAL,
+            "elapsed {elapsed:?} should be >= {VERIFY_MIN_INTERVAL:?}"
+        );
+    }
 }

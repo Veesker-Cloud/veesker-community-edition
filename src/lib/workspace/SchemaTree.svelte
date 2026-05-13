@@ -6,7 +6,7 @@
 
 <script lang="ts">
   import type { ObjectKind, Loadable } from "$lib/workspace";
-  import { Table, Eye, Hash, Cog, SquareFunction, Package, Zap, FileType, Webhook } from "lucide-svelte";
+  import { Table, Eye, Hash, Cog, SquareFunction, Package, Zap, FileType, Webhook, Database, Link2, Folder, Inbox, Clock, User as UserIcon, Shield } from "lucide-svelte";
 
   export type SchemaNode = {
     name: string;
@@ -59,6 +59,9 @@
     PROCEDURE: "Procedures", FUNCTION: "Functions",
     PACKAGE: "Packages", TRIGGER: "Triggers", TYPE: "Types",
     REST_MODULE: "REST Modules",
+    MATERIALIZED_VIEW: "Materialized Views", SYNONYM: "Synonyms", DB_LINK: "DB Links",
+    DIRECTORY: "Directories", QUEUE: "Queues", SCHEDULER_JOB: "Scheduler Jobs",
+    DB_USER: "Users", PRIVILEGE: "Privileges",
   };
 
 
@@ -70,9 +73,10 @@
   }
 
   const KIND_GROUPS: { label: string; kinds: ObjectKind[] }[] = [
-    { label: "Data",        kinds: ["TABLE", "VIEW", "SEQUENCE"] },
+    { label: "Data",        kinds: ["TABLE", "VIEW", "SEQUENCE", "MATERIALIZED_VIEW"] },
     { label: "Code",        kinds: ["PROCEDURE", "FUNCTION", "PACKAGE", "TRIGGER", "TYPE"] },
-    { label: "Integration", kinds: ["REST_MODULE"] },
+    { label: "Integration", kinds: ["REST_MODULE", "SYNONYM", "DB_LINK", "DIRECTORY", "QUEUE"] },
+    { label: "Admin",       kinds: ["SCHEDULER_JOB", "DB_USER", "PRIVILEGE"] },
   ];
 
   const KIND_ORDER: ObjectKind[] = KIND_GROUPS.flatMap(g => g.kinds);
@@ -81,12 +85,18 @@
     TABLE: "#4a9eda", VIEW: "#4a9eda", SEQUENCE: "#4a9eda",
     PROCEDURE: "#e67e22", FUNCTION: "#e67e22", PACKAGE: "#e67e22", TRIGGER: "#e67e22", TYPE: "#e67e22",
     REST_MODULE: "#1a9ca6",
+    MATERIALIZED_VIEW: "#4a9eda", SYNONYM: "#1a9ca6", DB_LINK: "#1a9ca6",
+    DIRECTORY: "#1a9ca6", QUEUE: "#1a9ca6", SCHEDULER_JOB: "#9b59b6",
+    DB_USER: "#9b59b6", PRIVILEGE: "#9b59b6",
   };
 
   const KIND_ICON: Record<ObjectKind, any> = {
     TABLE: Table, VIEW: Eye, SEQUENCE: Hash,
     PROCEDURE: Cog, FUNCTION: SquareFunction, PACKAGE: Package, TRIGGER: Zap, TYPE: FileType,
     REST_MODULE: Webhook,
+    MATERIALIZED_VIEW: Database, SYNONYM: Link2, DB_LINK: Link2,
+    DIRECTORY: Folder, QUEUE: Inbox, SCHEDULER_JOB: Clock,
+    DB_USER: UserIcon, PRIVILEGE: Shield,
   };
 
   function isSystemSchema(name: string): boolean {

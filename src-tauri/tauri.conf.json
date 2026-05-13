@@ -28,8 +28,7 @@
     "targets": "all",
     "externalBin": ["binaries/veesker-sidecar"],
     "resources": [
-      "oracledb-bindings/*.node",
-      "binaries/*duckdb*"
+      "oracledb-bindings/*.node"
     ],
     "createUpdaterArtifacts": true,
     "macOS": {
