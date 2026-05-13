@@ -8,17 +8,17 @@
   // Item #4 Phase C — Pending TX modal (env-asymmetric).
   //
   // Behavior contract:
-  //   - No dismiss via ESC or click-outside. Only the "Cancelar" button.
+  //   - No dismiss via ESC or click-outside. Only the "Cancel" button.
   //   - COMMIT ALL is disabled when any row is staging or prod (forces
   //     the user to decide per-row instead of bulk-committing prod).
   //   - Single-row N-ready: today the sidecar is single-session so the
   //     `connections` array has length 1, but the layout already
   //     iterates so Item #5 multi-conn drops in cleanly.
-  //   - PROD: every row exposes a "Manter aberto" dropdown
+  //   - PROD: every row exposes a "Keep open" dropdown
   //     (30min/1h/2h/4h/8h, default 2h) that promises not to
   //     auto-rollback for the chosen window.
-  //   - The 5-min idle tray notification ("TX PROD aguardando decisão
-  //     há Xmin em CONN_X") is fired by the controller, not here.
+  //   - The 5-min idle tray notification ("PROD TX awaiting decision
+  //     for Xmin on CONN_X") is fired by the controller, not here.
 
   import type { TxModalDecision } from "$lib/workspace";
 
@@ -123,7 +123,7 @@
     <div class="head">
       <span class="warn-icon" aria-hidden="true">⏸</span>
       <div>
-        <h2 id="ptx-title">Transação aberta</h2>
+        <h2 id="ptx-title">Open transaction</h2>
         {#if triggerLabel}
           <div class="trigger-label">{triggerLabel}</div>
         {/if}
@@ -132,8 +132,8 @@
 
     <p id="ptx-desc" class="message">
       {connections.length === 1
-        ? "Existe uma transação aberta. Decida o que fazer antes de continuar."
-        : `Existem ${connections.length} conexões com transações abertas. Decida cada uma.`}
+        ? "An open transaction exists. Decide what to do before continuing."
+        : `${connections.length} connections have open transactions. Decide each one.`}
     </p>
 
     <ul class="rows">
@@ -174,10 +174,10 @@
             {#if row.env === "prod"}
               <div class="keep-open" data-testid="keep-open-{row.connectionId}">
                 <label class="keep-open-label">
-                  Manter aberto
+                  Keep open
                   <select
                     bind:value={keepOpenMinutes[row.connectionId]}
-                    aria-label="Janela de keep-open"
+                    aria-label="Keep-open window"
                   >
                     <option value={30}>30 min</option>
                     <option value={60}>1 h</option>
@@ -197,7 +197,7 @@
                     })}
                   data-testid="keep-open-apply-{row.connectionId}"
                 >
-                  Manter
+                  Keep
                 </button>
               </div>
             {/if}
@@ -212,7 +212,7 @@
         class="ghost"
         onclick={commitAll}
         disabled={hasStagingOrProd}
-        title={hasStagingOrProd ? "Bloqueado: há staging/prod na lista" : ""}
+        title={hasStagingOrProd ? "Blocked: staging/prod present in list" : ""}
         data-testid="commit-all"
       >
         Commit all
@@ -228,12 +228,12 @@
     </div>
 
     <p class="hint">
-      Esta janela só fecha por decisão explícita. ESC e clicar fora não dispensam.
+      This window only closes by explicit decision. ESC and click-outside do not dismiss.
     </p>
 
     <div class="actions">
       <button type="button" class="ghost" onclick={onCancel} data-testid="cancel">
-        Cancelar
+        Cancel
       </button>
       <button
         type="button"
@@ -242,7 +242,7 @@
         disabled={!allDecided}
         data-testid="apply"
       >
-        Aplicar
+        Apply
       </button>
     </div>
   </div>
