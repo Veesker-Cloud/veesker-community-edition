@@ -48,24 +48,35 @@ fn resolve_oracledb_binding_dir(app: &AppHandle) -> Option<String> {
     None
 }
 
-/// Locate the directory containing duckdb.dll. Bun's --compile bundles duckdb.node into
-/// the binary's virtual filesystem; at runtime the .node is extracted to a temp dir and
-/// LoadLibrary is called on it, but its sibling duckdb.dll is NOT extracted alongside,
-/// so the load fails with ERR_DLOPEN_FAILED. We work around this by ensuring duckdb.dll
-/// is reachable via the spawned process's PATH.
+/// Locate the directory containing the duckdb runtime shared library for the current
+/// platform (`duckdb.dll` on Windows, `libduckdb.dylib` on macOS, `libduckdb.so` on
+/// Linux). Bun's --compile bundles duckdb.node into the binary's virtual filesystem;
+/// at runtime the .node is extracted to a temp dir and the dynamic loader tries to
+/// resolve its sibling shared library — which is NOT extracted by Bun. The load
+/// fails with ERR_DLOPEN_FAILED. We work around this by ensuring the shared library
+/// is reachable via the spawned process's loader search path (PATH on Windows,
+/// DYLD_FALLBACK_LIBRARY_PATH on macOS, LD_LIBRARY_PATH on Linux).
 fn resolve_duckdb_binding_dir(app: &AppHandle) -> Option<String> {
-    // Dev mode: src-tauri/binaries/duckdb.dll (manually copied here from
-    // ce/node_modules/.bun/.../duckdb.dll alongside the sidecar exe).
+    let lib_name: &str = if cfg!(windows) {
+        "duckdb.dll"
+    } else if cfg!(target_os = "macos") {
+        "libduckdb.dylib"
+    } else {
+        "libduckdb.so"
+    };
+
+    // Dev mode: src-tauri/binaries/<lib_name> (populated by scripts/copy-duckdb-binding.ts
+    // before every cargo/tauri build).
     if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
         let dev = PathBuf::from(manifest).join("binaries");
-        if dev.join("duckdb.dll").is_file() {
+        if dev.join(lib_name).is_file() {
             return dev.canonicalize().ok().map(strip_extended_prefix);
         }
     }
     // Production: bundled into resource_dir/binaries/ via tauri.conf.json bundle.resources.
     if let Ok(res_dir) = app.path().resource_dir() {
         let prod = res_dir.join("binaries");
-        if prod.join("duckdb.dll").is_file() {
+        if prod.join(lib_name).is_file() {
             return prod.canonicalize().ok().map(strip_extended_prefix);
         }
     }
@@ -144,15 +155,31 @@ impl Sidecar {
             cmd = cmd.env("VEESKER_ORACLEDB_BINARY_DIR", dir);
         }
 
-        // Prepend the directory containing duckdb.dll to PATH so that Windows LoadLibrary
-        // can find it when Bun extracts duckdb.node from the binary's virtual filesystem
-        // to a temp directory at runtime. Without this, the .node load fails with
-        // ERR_DLOPEN_FAILED because duckdb.dll isn't in the temp dir alongside the .node.
+        // Prepend the directory containing the duckdb runtime shared library to the
+        // dynamic-loader search path so the OS can find it when Bun extracts duckdb.node
+        // from the sidecar binary's virtual filesystem to a temp dir at runtime. The env
+        // var differs per OS:
+        //   - Windows: PATH (LoadLibrary search order)
+        //   - macOS:   DYLD_FALLBACK_LIBRARY_PATH (dlopen fallback; honored under SIP,
+        //              unlike DYLD_LIBRARY_PATH which is stripped from sandboxed/hardened
+        //              processes). When this app is notarized in the future the env-var
+        //              approach may break entirely — tracked as tech debt.
+        //   - Linux:   LD_LIBRARY_PATH (ld.so search path)
         if let Some(duckdb_dir) = resolve_duckdb_binding_dir(app) {
-            let current_path = std::env::var("PATH").unwrap_or_default();
-            let separator = if cfg!(windows) { ";" } else { ":" };
-            let new_path = format!("{duckdb_dir}{separator}{current_path}");
-            cmd = cmd.env("PATH", new_path);
+            let (env_var, separator) = if cfg!(windows) {
+                ("PATH", ";")
+            } else if cfg!(target_os = "macos") {
+                ("DYLD_FALLBACK_LIBRARY_PATH", ":")
+            } else {
+                ("LD_LIBRARY_PATH", ":")
+            };
+            let current = std::env::var(env_var).unwrap_or_default();
+            let new_value = if current.is_empty() {
+                duckdb_dir
+            } else {
+                format!("{duckdb_dir}{separator}{current}")
+            };
+            cmd = cmd.env(env_var, new_value);
         }
 
         // Where the sidecar writes its rotating log file. We point it at
