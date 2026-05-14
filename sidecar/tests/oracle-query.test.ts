@@ -1,6 +1,12 @@
-import { describe, expect, test, beforeEach, mock } from "bun:test";
+import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import { setSession, clearSession } from "../src/state";
-import { queryExecute, type QueryResult, type MultiQueryResult } from "../src/oracle";
+import {
+  queryExecute,
+  ddlConfirm,
+  _testResetDdlWindow,
+  type QueryResult,
+  type MultiQueryResult,
+} from "../src/oracle";
 import { NO_ACTIVE_SESSION, ORACLE_ERR, RpcCodedError } from "../src/errors";
 
 function fakeConn(executeImpl: (...a: any[]) => any) {
@@ -14,6 +20,7 @@ function asSingle(r: QueryResult | MultiQueryResult): QueryResult {
 
 describe("queryExecute", () => {
   beforeEach(() => clearSession());
+  afterEach(() => _testResetDdlWindow());
 
   test("throws NO_ACTIVE_SESSION when no session is set", async () => {
     await expect(queryExecute({ sql: "SELECT 1 FROM DUAL" })).rejects.toThrow(RpcCodedError);
@@ -60,6 +67,8 @@ describe("queryExecute", () => {
       rowsAffected: undefined,
     }));
     setSession(conn, "SCOTT");
+    // Item #1E DDL gate: CREATE TABLE requires an open DDL window.
+    ddlConfirm({ kind: "ddl" });
     const r = asSingle(await queryExecute({ sql: "CREATE TABLE t (id NUMBER)" }));
     expect(r.rowCount).toBe(0);
   });
