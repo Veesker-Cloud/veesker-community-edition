@@ -7,29 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-beta.2] — 2026-05-14
+
+Repository unification release. All previously private Cloud Edition (CL)
+features now live in this public repository under Apache 2.0. Premium
+features will be runtime-gated by a feature flag served by
+`api.veesker.cloud` (gating wiring lands in 0.5.0-beta.3).
+
 ### Architecture
 
-- **Repository unification (2026-05-13):** All code from the private `veesker-cloud-edition` (CL) repository migrates to this public repository. The CL repo is being archived. This is a structural change — no features are removed. Source code for all features, including premium ones, is now Apache 2.0 in this repo. Premium features remain runtime-gated via a feature flag served by `api.veesker.cloud`.
-- **Open-core model clarification:** The "Community Edition vs Cloud Edition" framing (two separate binaries) is retired. There is one binary, one repository. Free tier = all core features. Subscription tier = premium features unlocked at runtime. The source for every feature is public.
-- Internal planning documents (`docs/superpowers/`, `CLAUDE.md` internal dev notes) removed from the public tree and archived privately as part of the cleanup.
+- **Repository unification (2026-05-13):** all code from the private
+  `veesker-cloud-edition` repository was migrated to this public repository.
+  The CL repo is being archived. No features are removed — every feature
+  is now Apache 2.0 source. Premium features remain runtime-gated via a
+  feature flag served by `api.veesker.cloud` (gating wires up in beta.3).
+- **Open-core model clarification:** the "Community Edition vs Cloud
+  Edition" framing (two separate binaries) is retired. One binary, one
+  repository. Free tier = all core features. Subscription tier = premium
+  features unlocked at runtime. Source for every feature is public.
+- Internal planning documents (`docs/superpowers/`, `CLAUDE.md` internal
+  dev notes) were removed from the public tree and archived privately as
+  part of the cleanup.
+
+### Added — from CL → CE unification (PR #88)
+
+- **Sandboxes** — full read-only workspace export to a shareable static
+  bundle. Routes: `/sandboxes` (list), `/sandboxes/[id]` (view),
+  `/sandboxes/publish` (export wizard). Bundle stored on Cloudflare R2.
+- **Vision graph** — entity-relationship visualizer for the active schema.
+  New `Vision*` types in the sidecar, graph rendering in the workspace.
+- **Vector index UI for Oracle 23ai** — new "Vectors" tab in the object
+  inspector for vector index creation, parameter tuning, and ANN search.
+- **Schema-aware AI prompts** — AI assistant now receives a schema-grounded
+  context (object names, column types, relationships) so generated SQL
+  references real objects instead of placeholders.
 
 ### Fixed
 
-- Schema tree freeze and `each_key_duplicate` exception when re-expanding pre-loaded schemas. Pragmatic workaround: `{#each}` blocks in `SchemaTree.svelte` converted to non-keyed iteration. Root cause (Svelte 5 proxy chain behavior with immutable spread patterns) remains under investigation as tech debt — see `DEBT.md`.
-- **BUG-1 — Workspace stuck on "Loading workspace..." after crash/reopen.** `openSession()` had no call-timeout protecting `applySessionIdentification` and the bootstrap V$VERSION/SYS_CONTEXT queries. If Oracle accepted the TCP connection but stalled on SQL (e.g. during recovery or under load), `applySessionIdentification` hung forever, leaving `meta` and `info` unset and the workspace loading screen permanent. Added a 20-second boot call-timeout before `applySessionIdentification`; subsequent queries inherit the user-configured session timeout. Changed `void bootstrap()` to `.catch()` so unexpected errors surface as a dismissible error instead of silent freeze.
-- **BUG-2 — PLAN tab empty + "Visual Flow failed: ORA-00904: FILTER_PREDICATES" after Explain Plan.** Two-phase fix: (1) `EXPLAIN PLAN FOR` write phase now catches ORA-00904 on stale `PLAN_TABLE` (missing `FILTER_PREDICATES`) and throws a `PLAN_TABLE_STALE` error with actionable remediation message; (2) auto-explain fire-and-forget propagates the error to the PLAN tab instead of swallowing it — users see the error message and a Retry button. `retryAutoExplain()` store action re-runs the plan in-place after the user fixes the schema. (PR #73)
-- **BUG-3 — Terminal appears expanded with blinking cursor but ignores keyboard input.** xterm.js attaches to a host `<div>` once in `onMount`. The previous `{#if !minimized}` conditional destroyed and recreated that element on every minimize/restore cycle, leaving xterm bound to a detached (ghost) div — keystrokes fired `onData` but were swallowed by the ghost. Fixed by keeping the host `<div>` permanently in the DOM (hidden via `display: none` when minimized). Added a ResizeObserver guard against zero-dimension hosts to prevent accidental 0-column terminal resets while hidden.
-- Download page on veesker.cloud was showing v0.2.4 after v0.5.0-beta.1 release. Manual update applied + CD pipeline fixes.
-- `release.yml` sed regex was `[0-9.]*`, breaking on pre-release version strings (`-beta.X`, `-rc.X`). Changed to `[^"]*` to match any quoted version.
-- `release.yml` "Update site version" step now updates `src/app.html` JSON-LD `softwareVersion` in addition to `src/routes/download/+page.svelte`. Previously only the download page was updated, leaving SEO structured data outdated.
-- `SITE_DEPLOY_TOKEN` regenerated with correct owner scope (`veesker-cloud` org + `veesker-site` contents write). Original token used personal account scope, causing `git push` to fail with HTTP 403 on every release.
-- Site `/changelog` had editorial dates that did not match actual git tag dates. All entries corrected to match `git log --tags` commit timestamps.
+- **Audit chain advance order (HMAC-SHA256 integrity bug-fix).** The
+  in-memory chain pointer now advances only AFTER the audit line is
+  durably written to disk. Previously, a disk-write failure could
+  leave the in-memory `prevHash` ahead of disk, producing a skewed
+  chain on next entry. (PR #88 — `commands.rs`)
+- **`audit_verify_chain` rate limiting.** Verification is now gated to
+  one call per 60 s per process (via `VerifyChainRateLimit` state),
+  preventing accidental N+1 verification storms from the UI. (PR #88)
+- **`tauri.conf.json` resource glob `binaries/*duckdb*` removed** —
+  DuckDB was removed earlier; the dangling glob was failing
+  `tauri-build`. (PR #88)
+- **`oracleTypeFor` return type migrated to `oracledb.DbType`** —
+  correct for `oracledb >= 6.x`. (PR #88)
+- Schema tree freeze and `each_key_duplicate` exception when re-expanding
+  pre-loaded schemas. Pragmatic workaround: `{#each}` blocks in
+  `SchemaTree.svelte` converted to non-keyed iteration. Root cause
+  (Svelte 5 proxy chain behavior with immutable spread patterns) remains
+  under investigation as tech debt — see `DEBT.md`.
+- **BUG-1 — Workspace stuck on "Loading workspace..." after crash/reopen.**
+  Added a 20-second boot call-timeout before `applySessionIdentification`;
+  subsequent queries inherit the user-configured session timeout. Changed
+  `void bootstrap()` to `.catch()` so unexpected errors surface as a
+  dismissible error instead of silent freeze.
+- **BUG-2 — PLAN tab empty + `ORA-00904: FILTER_PREDICATES` after Explain
+  Plan.** Two-phase fix: write phase catches stale `PLAN_TABLE` and
+  throws `PLAN_TABLE_STALE` with actionable remediation; auto-explain
+  propagates the error to the PLAN tab instead of swallowing it.
+  `retryAutoExplain()` re-runs the plan in place after the user fixes
+  the schema. (PR #73)
+- **BUG-3 — Terminal expanded with blinking cursor but ignores keyboard
+  input.** Host `<div>` for xterm.js is now permanently mounted (hidden
+  via `display: none` when minimized) instead of being destroyed by
+  `{#if !minimized}`. ResizeObserver guard added against zero-dimension
+  hosts.
+- Download page on veesker.cloud was showing v0.2.4 after v0.5.0-beta.1.
+  Manual update applied + CD pipeline fixes.
+- Site `/changelog` had editorial dates that did not match git tag dates.
+  All entries corrected to match `git log --tags` timestamps.
+
+### CI / Build
+
+- **Restore Ubuntu/macOS keychain setup in `ci.yml`** — PR #83 squash had
+  inadvertently overwritten this with the pre-keychain version of the
+  workflow. Restored `gnome-keyring`, `libsecret-1-0`, `libsecret-1-dev`,
+  `dbus-x11` Ubuntu deps + `Setup keyring (Ubuntu)` and `Setup keychain
+  (macOS)` steps from commit `c0c4c6c`. (PR #90)
+- **Restore release.yml fixes regressed by PR #83.** The CL→CE
+  unification squash overwrote four release.yml fixes that landed
+  pre-unification:
+  - `--bundles nsis` restored on the Windows build matrix (MSI bundle
+    does not support semver pre-release versions; without this, MSI
+    fails on `-beta.X` / `-rc.X` tags). Restored from `f228f0c`.
+  - `sed` regex `[0-9.]*` → `[^"]*` for the site download page bump
+    (matches pre-release strings). Restored from `599dddc`.
+  - Additional `sed` over `src/app.html` JSON-LD `softwareVersion`
+    field (so SEO structured data ships with the correct version).
+    Restored from `e4097c6`.
+  - Step name normalized to `Update site version`; commit message
+    normalized to `chore(release): bump version to …` (matches the
+    convention used by the rest of the release pipeline).
+    Restored from `e4097c6`.
+- **Sidecar DDL gate tests** — `oracle-query.test.ts` and
+  `tx-state.test.ts` now open a DDL window before exercising DDL
+  statements, matching the runtime behavior introduced by Item #1E.
+  (PR #89)
+- **`open_encrypted_or_migrate_handles_fresh_install` ignored on Linux**
+  — GitHub Actions Ubuntu image drift (gnome-keyring 46.1 default-
+  collection behavior) caused `set_password` to silent-fail on the
+  runner, preventing the SQLCipher key from persisting across the
+  test's two open calls. Test is `#[cfg_attr(target_os = "linux",
+  ignore = "...")]`-marked, consistent with the `secrets.rs:125`
+  convention. Tracked in `DEBT.md` for a fail-loud refactor of
+  `crypto::get_or_create_key`. (PR #91)
+- **`osv-scanner-action` restored to `v2.3.8`** — PR #83 squash had
+  downgraded it to `v2.0.2`; restored to match the dependabot upgrade
+  shipped in PR #58.
 
 ### Known Issues
 
-- **Directory detail panel** — even with `SELECT on DBA_DIRECTORIES` privilege, the inspector still shows "Directory details not available (requires SELECT on DBA_DIRECTORIES)" instead of displaying directory metadata. The directory list works correctly. Investigation pending — fix planned for v0.5.x.
-
-- **Sidecar stale binary** (source-build only) — if you cloned the repo and built from source before Phase 1 commits were merged, rebuild the sidecar binary: `cd sidecar && bun run build:win-x64`. Pre-built release binaries are current and unaffected.
+- **Directory detail panel** — even with `SELECT on DBA_DIRECTORIES`
+  privilege, the inspector still shows "Directory details not available
+  (requires SELECT on DBA_DIRECTORIES)" instead of displaying directory
+  metadata. The directory list works correctly. Investigation pending —
+  fix planned for v0.5.x.
+- **Sidecar stale binary** (source-build only) — if you cloned the repo
+  and built from source before recent commits, rebuild the sidecar:
+  `cd sidecar && bun run build:win-x64`. Pre-built release binaries are
+  current and unaffected.
+- **`crypto::get_or_create_key` silent-fail on Linux when keychain is
+  unavailable** — falls back to a zeroed key, meaning encrypted data
+  does not survive across runs. Fix planned (fail-loud) — tracked in
+  `DEBT.md`.
+- **Feature flag gating not yet wired** — premium features (Sandboxes,
+  Vision graph, Vector indexes, schema-aware AI) are currently
+  accessible regardless of subscription tier. Runtime gating lands in
+  v0.5.0-beta.3.
 
 ## [0.5.0-beta.1] — 2026-05-11
 
