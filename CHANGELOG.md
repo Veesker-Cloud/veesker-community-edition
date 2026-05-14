@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-beta.3] — 2026-05-14
+
+Hotfix release. The 0.5.0-beta.2 installer shipped without the DuckDB
+runtime shared library, causing the sidecar to crash at startup with
+`ERR_DLOPEN_FAILED` on Windows. The same gap existed on macOS and Linux
+but was not surfaced because those builds were not smoke-tested after
+the PR #88 unification. This release re-bundles the runtime lib on all
+three platforms and generalizes the loader-path injection in the Rust
+shell.
+
+### Fixed
+
+- **DuckDB sidecar startup crash on Windows (`ERR_DLOPEN_FAILED`).**
+  `bundle.resources` in `tauri.conf.json` now includes
+  `binaries/*duckdb.*`, so `duckdb.dll` (Windows), `libduckdb.dylib`
+  (macOS) and `libduckdb.so` (Linux) ship in the installer and reach
+  the resource directory at runtime. (PR #95)
+- **Cross-OS resolver in the Tauri shell.** `resolve_duckdb_binding_dir`
+  now detects the platform-specific library name; the spawn-time
+  caller prepends the binding directory to the correct loader env var
+  per OS — `PATH` on Windows, `DYLD_FALLBACK_LIBRARY_PATH` on macOS,
+  `LD_LIBRARY_PATH` on Linux. `DYLD_FALLBACK_LIBRARY_PATH` is preferred
+  over `DYLD_LIBRARY_PATH` for SIP compatibility; Apple notarization
+  (future) may still strip even the fallback — tracked as separate
+  tech debt. (PR #95)
+
+### Internal
+
+- **`scripts/copy-duckdb-binding.ts` post-unification roots.** The
+  candidate list now tries the CE repo root and `engine/` subdir
+  first; the previous list happened to work in GitHub Actions only
+  because the standard checkout path made a legacy candidate resolve
+  back to the repo root by coincidence. (PR #95)
+
 ## [0.5.0-beta.2] — 2026-05-14
 
 Repository unification release. All previously private Cloud Edition (CL)
