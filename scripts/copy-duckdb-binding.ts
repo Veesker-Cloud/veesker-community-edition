@@ -40,8 +40,15 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 //   root.
 // Try each candidate in order; the first one whose `.bun` cache exists wins.
 const CANDIDATE_CE_ENGINE_ROOTS = [
+  // Post-unification (2026-05-13): CE script runs from inside CE repo. The bun
+  // workspace hoists @duckdb/node-bindings-* to ce/node_modules/.bun, with engine
+  // also keeping its own node_modules/.bun in some install modes. Try both first.
+  REPO_ROOT,
+  join(REPO_ROOT, "engine"),
+  // Legacy CL layout: CL was a sibling of CE under a master vault root.
   resolve(REPO_ROOT, "..", "ce", "engine"),
   resolve(REPO_ROOT, "..", "ce"),
+  // CL CI checkout-as-subdir layout (kept for any external consumer still using it).
   resolve(REPO_ROOT, "..", "veesker-community-edition", "engine"),
   resolve(REPO_ROOT, "..", "veesker-community-edition"),
   join(REPO_ROOT, "veesker-community-edition", "engine"),
