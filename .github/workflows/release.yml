@@ -50,11 +50,6 @@ jobs:
             sidecar-cmd: build:mac-arm64
             rust-targets: aarch64-apple-darwin
             tauri-args: --target aarch64-apple-darwin
-          - platform: macos-13
-            sidecar-cmd: build:mac-x64
-            rust-targets: x86_64-apple-darwin
-            tauri-args: --target x86_64-apple-darwin
-            timeout: 60
           - platform: ubuntu-22.04
             sidecar-cmd: build:linux-x64
             rust-targets: ''
@@ -62,7 +57,7 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     timeout-minutes: ${{ matrix.timeout || 90 }}
-    continue-on-error: ${{ matrix.platform == 'macos-13' || matrix.platform == 'ubuntu-22.04' }}
+    continue-on-error: ${{ matrix.platform == 'ubuntu-22.04' }}
     steps:
       - uses: actions/checkout@v6
 
