@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, mock } from "bun:test";
+import { describe, expect, test, beforeEach, afterEach, mock } from "bun:test";
 import {
   setSession,
   clearSession,
@@ -7,7 +7,14 @@ import {
   recordTxModifying,
   setTxId,
 } from "../src/state";
-import { queryExecute, connectionCommit, connectionRollback, connectionTxState } from "../src/oracle";
+import {
+  queryExecute,
+  connectionCommit,
+  connectionRollback,
+  connectionTxState,
+  ddlConfirm,
+  _testResetDdlWindow,
+} from "../src/oracle";
 
 describe("TxState (state.ts)", () => {
   beforeEach(() => {
@@ -104,6 +111,7 @@ describe("syncTxStateAfterStatement (via queryExecute)", () => {
     clearSession();
     resetTxState();
   });
+  afterEach(() => _testResetDdlWindow());
 
   test("DML success with non-null txId increments pending", async () => {
     const conn = fakeConnSequence([
@@ -128,6 +136,8 @@ describe("syncTxStateAfterStatement (via queryExecute)", () => {
       txIdStep(null),                       // DDL implicit committed everything
     ]);
     setSession(conn, "SCOTT");
+    // Item #1E DDL gate: CREATE TABLE requires an open DDL window.
+    ddlConfirm({ kind: "ddl" });
     await queryExecute({ sql: "CREATE TABLE t (id NUMBER)" });
     const s = getTxState();
     expect(s.pendingStatements).toBe(0);
