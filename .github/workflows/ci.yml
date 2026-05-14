@@ -48,7 +48,28 @@ jobs:
             file \
             libssl-dev \
             libgtk-3-dev \
-            libayatana-appindicator3-dev
+            libayatana-appindicator3-dev \
+            gnome-keyring \
+            libsecret-1-0 \
+            libsecret-1-dev \
+            dbus-x11
+
+      - name: Setup keyring (Ubuntu)
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          eval "$(dbus-launch --sh-syntax)"
+          eval "$(printf '\n' | gnome-keyring-daemon --unlock --components=secrets)"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          echo "GNOME_KEYRING_CONTROL=$GNOME_KEYRING_CONTROL" >> "$GITHUB_ENV"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+
+      - name: Setup keychain (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security set-keychain-settings -t 3600 build.keychain
 
       - name: Install JS deps (root)
         run: bun install --frozen-lockfile
