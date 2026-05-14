@@ -94,6 +94,11 @@ jobs:
         working-directory: sidecar
         run: bun run ${{ matrix.sidecar-cmd }}
 
+      - name: Pin cargo to rustup proxy (workaround macOS Homebrew shim)
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
       - name: Build and upload
         uses: tauri-apps/tauri-action@v0
         env:
