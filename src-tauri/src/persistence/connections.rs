@@ -1184,7 +1184,18 @@ impl ConnectionService {
 // The legacy backup is left for the user to delete after they verify the
 // app still works — we do not auto-delete it.
 fn open_encrypted_or_migrate(db_path: &Path) -> Result<SqliteConnection, ConnectionError> {
-    let key = crate::crypto::get_or_create_db_key();
+    // F-D-001 (security audit 2026-05-14): refuse to open the workspace DB
+    // if the keychain is unavailable. Previously this path silently received
+    // a vec![0u8; 32] all-zero key, which made SQLCipher encrypt the DB with
+    // a publicly-known key — files on disk were effectively plaintext.
+    // We now propagate the error so the workspace fails to load and the user
+    // sees a clear actionable message rather than getting a silently-broken
+    // encryption story.
+    let key = crate::crypto::get_or_create_db_key().map_err(|e| {
+        ConnectionError::internal(format!(
+            "Workspace DB key unavailable: {e}. Encryption-at-rest is mandatory. On Linux, ensure a secret-service backend (gnome-keyring or kwallet) is running and unlocked. On macOS, unlock Keychain Access. On Windows, ensure the DPAPI service is running."
+        ))
+    })?;
     let pragma_arg = crate::crypto::db_key_as_sqlcipher_pragma_arg(&key);
 
     if !db_path.exists() {

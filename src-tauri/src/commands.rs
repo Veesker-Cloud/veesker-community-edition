@@ -812,10 +812,21 @@ async fn write_audit_entry(
     // If the cipher key is unavailable we degrade to plaintext rather than
     // dropping the audit record (legacy lines are still parseable).
     let body = entry.to_string();
-    let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
-    let line_payload = match crate::crypto::encrypt_audit_line(&cipher_key, &body) {
-        Ok(s) => s,
-        Err(_) => body.clone(),
+    // F-D-001: when the keychain is unavailable, fall back to the legacy
+    // plain-JSON line format honestly rather than emitting a body
+    // "encrypted" with a publicly-known zero key. The read path already
+    // handles plain-JSON lines for backward compat.
+    let line_payload = match crate::crypto::get_or_create_audit_cipher_key() {
+        Ok(cipher_key) => match crate::crypto::encrypt_audit_line(&cipher_key, &body) {
+            Ok(s) => s,
+            Err(_) => body.clone(),
+        },
+        Err(e) => {
+            eprintln!(
+                "audit-cipher: keychain unavailable ({e}) — writing line in legacy plaintext format"
+            );
+            body.clone()
+        }
     };
     let mut line = line_payload;
     line.push('\n');
@@ -874,17 +885,30 @@ pub async fn audit_recent(app: AppHandle, limit: Option<i64>) -> Vec<Value> {
     // for backward compat. A line that claims encryption but fails to
     // decrypt (key mismatch, tampering, truncation) is silently skipped so
     // a single bad record doesn't black out the entire panel.
-    let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
+    // F-D-001: when keychain is unavailable, encrypted lines cannot be
+    // decoded — they're silently skipped. Legacy plain-JSON lines still
+    // parse. This is acceptable degradation for the read path.
+    let cipher_key_opt = crate::crypto::get_or_create_audit_cipher_key().ok();
     let mut entries: Vec<Value> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .filter_map(
-            |l| match crate::crypto::decrypt_audit_line_if_envelope(&cipher_key, l) {
-                Ok(Some(plain)) => serde_json::from_str::<Value>(&plain).ok(),
-                Ok(None) => serde_json::from_str::<Value>(l).ok(),
-                Err(_) => None,
-            },
-        )
+        .filter_map(|l| match cipher_key_opt.as_deref() {
+            Some(cipher_key) => {
+                match crate::crypto::decrypt_audit_line_if_envelope(cipher_key, l) {
+                    Ok(Some(plain)) => serde_json::from_str::<Value>(&plain).ok(),
+                    Ok(None) => serde_json::from_str::<Value>(l).ok(),
+                    Err(_) => None,
+                }
+            }
+            None => {
+                // No key: only legacy plain-JSON lines are readable.
+                if l.starts_with(crate::crypto::ENCRYPTED_LINE_PREFIX) {
+                    None
+                } else {
+                    serde_json::from_str::<Value>(l).ok()
+                }
+            }
+        })
         .collect();
     // newest-first
     entries.reverse();
@@ -906,7 +930,10 @@ pub fn verify_chain_file(path: &Path, key: &[u8]) -> ChainVerifyResult {
         Err(_) => return ChainVerifyResult { ok: false, checked: 0, skipped_legacy: 0, sub_chains: 0,
             broken_at: Some(ChainBrokenAt { index: 0, ts: String::new(), reason: "file_not_utf8".to_string() }) },
     };
-    let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
+    // F-D-001: same fallback as audit_recent — if no keychain key is
+    // available, encrypted envelopes are unreadable and we treat them as
+    // skipped. Legacy plaintext lines still verify against the HMAC chain.
+    let cipher_key_opt = crate::crypto::get_or_create_audit_cipher_key().ok();
     let mut checked: usize = 0;
     let mut skipped_legacy: usize = 0;
     let mut sub_chains: usize = 0;
@@ -917,10 +944,19 @@ pub fn verify_chain_file(path: &Path, key: &[u8]) -> ChainVerifyResult {
         if line.trim().is_empty() {
             continue;
         }
-        let plain = match crate::crypto::decrypt_audit_line_if_envelope(&cipher_key, line) {
-            Ok(Some(p)) => p,
-            Ok(None) => line.to_string(),
-            Err(_) => { raw_index += 1; continue; }
+        let plain = match cipher_key_opt.as_deref() {
+            Some(cipher_key) => match crate::crypto::decrypt_audit_line_if_envelope(cipher_key, line) {
+                Ok(Some(p)) => p,
+                Ok(None) => line.to_string(),
+                Err(_) => { raw_index += 1; continue; }
+            },
+            None => {
+                if line.starts_with(crate::crypto::ENCRYPTED_LINE_PREFIX) {
+                    raw_index += 1;
+                    continue;
+                }
+                line.to_string()
+            }
         };
         let obj: serde_json::Map<String, Value> = match serde_json::from_str::<Value>(&plain) {
             Ok(Value::Object(m)) => m,
@@ -1890,10 +1926,18 @@ fn write_ddl_event(app: &AppHandle, event_obj: Value) {
     let date = now.format("%Y-%m-%d").to_string();
     let path = audit_dir.join(format!("{date}.jsonl"));
     let body = event_obj.to_string();
-    let cipher_key = crate::crypto::get_or_create_audit_cipher_key();
-    let line = match crate::crypto::encrypt_audit_line(&cipher_key, &body) {
-        Ok(s) => format!("{s}\n"),
-        Err(_) => format!("{body}\n"),
+    // F-D-001: same legacy-plaintext fallback when keychain is unavailable.
+    let line = match crate::crypto::get_or_create_audit_cipher_key() {
+        Ok(cipher_key) => match crate::crypto::encrypt_audit_line(&cipher_key, &body) {
+            Ok(s) => format!("{s}\n"),
+            Err(_) => format!("{body}\n"),
+        },
+        Err(e) => {
+            eprintln!(
+                "audit-cipher (ddl event): keychain unavailable ({e}) — writing line as legacy plaintext"
+            );
+            format!("{body}\n")
+        }
     };
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
         let _ = file.write_all(line.as_bytes());

@@ -1,6 +1,6 @@
 // Copyright 2022-2026 Geraldo Ferreira Viana Júnior
 // Licensed under the Apache License, Version 2.0
-// https://github.com/veesker-cloud/veesker-cloud-edition
+// https://github.com/veesker-cloud/veesker-community-edition
 
 // Onda 1.B (Sprint C) — encryption-at-rest primitives.
 //
@@ -12,11 +12,20 @@
 // escrow exists by design. The threat model is laptop theft / compromised
 // disk, not the user themselves.
 //
+// F-D-001 (security audit 2026-05-14): previously, when the OS keychain was
+// unavailable (headless Linux, broken gnome-keyring, etc.) these helpers
+// silently returned a vec![0u8; 32] all-zero key. SQLCipher then opened the
+// workspace DB with that publicly-known key, and the audit log encrypted
+// JSONL lines with the same zero key — both trivially decryptable by anyone
+// reading the file off disk. The functions now return Result and propagate
+// keychain failure as KeyringError. The DB open path refuses to proceed.
+// The audit-write path falls back to honest plaintext (the read path already
+// handles legacy plain-JSON lines) rather than silently emitting
+// public-knowledge "encrypted" data.
+//
 // Note: the audit-cipher-key is INDEPENDENT from the audit-hmac-key
 // introduced in Sprint B. The HMAC chain key signs entry bodies for tamper
-// detection; the cipher key encrypts the JSONL wire format. An attacker
-// with read-only access to the JSONL but neither key still cannot recover
-// SQL bodies; a compromise of one key does not weaken the other.
+// detection; the cipher key encrypts the JSONL wire format.
 
 use aes_gcm::{
     Aes256Gcm, Nonce,
@@ -40,9 +49,44 @@ const KEYCHAIN_SERVICE: &str = "veesker";
 const KEY_NAME_DB: &str = "db-master-key";
 const KEY_NAME_AUDIT_CIPHER: &str = "audit-cipher-key";
 
+/// Errors emitted by the keychain-backed key helpers. Replaces the previous
+/// silent-zero-key fallback so callers can decide whether to abort
+/// (SQLCipher open path) or emit honest plaintext (audit write path).
+#[derive(Debug)]
+pub enum KeyringError {
+    /// `keyring::Entry::new` failed — the OS keychain service is unreachable
+    /// (no D-Bus on Linux, locked DPAPI on Windows, securityd refusal on
+    /// unsigned macOS builds, etc.).
+    Unavailable(String),
+    /// Reading a stored entry succeeded but the stored value is corrupt
+    /// (wrong length, non-hex bytes). Treated separately so the caller can
+    /// distinguish "first run, never written" from "data drift".
+    Corrupt(String),
+    /// Persisting a freshly-generated key back to the keychain failed.
+    /// Using the key would orphan it (next start can't reload), so we
+    /// refuse it.
+    Persist(String),
+}
+
+impl std::fmt::Display for KeyringError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeyringError::Unavailable(s) => write!(f, "OS keychain unavailable: {s}"),
+            KeyringError::Corrupt(s) => write!(f, "Stored keychain entry is corrupt: {s}"),
+            KeyringError::Persist(s) => write!(f, "Could not persist key to keychain: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for KeyringError {}
+
 /// Returns the SQLCipher master key for `veesker.db`. Generates and
 /// persists a fresh 32-byte key on first call.
-pub fn get_or_create_db_key() -> Vec<u8> {
+///
+/// Returns `Err(KeyringError)` instead of the previous all-zero fallback.
+/// The DB open path must abort (refusing to encrypt with a public key)
+/// rather than write a publicly-decryptable workspace to disk.
+pub fn get_or_create_db_key() -> Result<Vec<u8>, KeyringError> {
     get_or_create_key(KEY_NAME_DB, "db-master")
 }
 
@@ -50,7 +94,12 @@ pub fn get_or_create_db_key() -> Vec<u8> {
 /// HMAC chain key (Sprint B): a read-only attacker who steals the JSONL
 /// still cannot recover the body without this cipher key, even if the HMAC
 /// key has been previously exposed.
-pub fn get_or_create_audit_cipher_key() -> Vec<u8> {
+///
+/// Returns `Err(KeyringError)` instead of the previous all-zero fallback.
+/// Audit write callers should fall back to emitting the body as a legacy
+/// plain-JSON line (the read path already handles that format) rather than
+/// silently encrypting with a public zero key.
+pub fn get_or_create_audit_cipher_key() -> Result<Vec<u8>, KeyringError> {
     get_or_create_key(KEY_NAME_AUDIT_CIPHER, "audit-cipher")
 }
 
@@ -60,9 +109,9 @@ pub fn get_or_create_audit_cipher_key() -> Vec<u8> {
 /// believe their history is encrypted. Callers must disable history recording
 /// for the session when this returns None.
 ///
-/// Also returns None when the freshly-generated key cannot be persisted — an
-/// ephemeral key would make every existing row inaccessible on the next
-/// restart, accumulating unrecoverable orphans.
+/// Kept as Option-returning for backward compatibility with existing
+/// callers that already handle the disabled-history case. The semantics
+/// match the new Result-returning helpers above (no zero-key fallback).
 pub fn get_or_create_command_history_key() -> Option<Vec<u8>> {
     let entry = Entry::new(KEYCHAIN_SERVICE, "command-history-cipher-key").ok()?;
     if let Ok(stored) = entry.get_password()
@@ -74,7 +123,10 @@ pub fn get_or_create_command_history_key() -> Option<Vec<u8>> {
         return Some(bytes);
     }
     let mut bytes = vec![0u8; KEY_BYTES];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    // F-D-003: OsRng matches the nonce path elsewhere in this file; thread_rng
+    // is technically also CSPRNG via ChaCha12 but tying to OsRng removes any
+    // ambiguity about thread-local seed source.
+    OsRng.fill_bytes(&mut bytes);
     let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
     if entry.set_password(&hex).is_err() {
         eprintln!(
@@ -85,31 +137,46 @@ pub fn get_or_create_command_history_key() -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn get_or_create_key(keychain_name: &str, log_label: &str) -> Vec<u8> {
-    let entry = match Entry::new(KEYCHAIN_SERVICE, keychain_name) {
-        Ok(e) => e,
-        Err(_) => {
-            eprintln!(
-                "{log_label}: keychain unavailable, deriving zeroed key (data will not survive across runs)"
-            );
-            return vec![0u8; KEY_BYTES];
+fn get_or_create_key(keychain_name: &str, log_label: &str) -> Result<Vec<u8>, KeyringError> {
+    let entry = Entry::new(KEYCHAIN_SERVICE, keychain_name).map_err(|e| {
+        eprintln!(
+            "{log_label}: keychain unavailable ({e}) — refusing to fall back to a zeroed key"
+        );
+        KeyringError::Unavailable(e.to_string())
+    })?;
+    match entry.get_password() {
+        Ok(stored) if stored.len() == KEY_HEX_LEN => {
+            match (0..KEY_BYTES)
+                .map(|i| u8::from_str_radix(&stored[i * 2..i * 2 + 2], 16))
+                .collect::<Result<Vec<u8>, _>>()
+            {
+                Ok(bytes) => Ok(bytes),
+                Err(e) => Err(KeyringError::Corrupt(format!(
+                    "{log_label} entry contains non-hex byte: {e}"
+                ))),
+            }
         }
-    };
-    if let Ok(stored) = entry.get_password()
-        && stored.len() == KEY_HEX_LEN
-        && let Ok(bytes) = (0..KEY_BYTES)
-            .map(|i| u8::from_str_radix(&stored[i * 2..i * 2 + 2], 16))
-            .collect::<Result<Vec<u8>, _>>()
-    {
-        return bytes;
+        Ok(_) => Err(KeyringError::Corrupt(format!(
+            "{log_label} entry has wrong length"
+        ))),
+        // First-run path: no stored entry yet, generate one and persist it.
+        Err(_) => {
+            let mut bytes = vec![0u8; KEY_BYTES];
+            // F-D-003: OsRng instead of thread_rng — removes any doubt about
+            // thread-local CSPRNG seed source for security-critical key gen.
+            OsRng.fill_bytes(&mut bytes);
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            if let Err(e) = entry.set_password(&hex) {
+                // Refuse to return an unpersisted key — the next restart
+                // wouldn't be able to reload it, leaving every encrypted
+                // row/file unrecoverable. Better to fail loudly here.
+                return Err(KeyringError::Persist(format!(
+                    "{log_label}: {e}"
+                )));
+            }
+            Ok(bytes)
+        }
     }
-    let mut bytes = vec![0u8; KEY_BYTES];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    if entry.set_password(&hex).is_err() {
-        eprintln!("{log_label}: could not persist key to keychain");
-    }
-    bytes
 }
 
 /// Encrypts an audit JSONL body into the on-disk wire format
@@ -166,6 +233,15 @@ pub fn decrypt_audit_line_if_envelope(key: &[u8], line: &str) -> Result<Option<S
 /// (PRAGMA does not accept binds).
 pub fn db_key_as_sqlcipher_pragma_arg(key: &[u8]) -> String {
     let hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
+    // Defensive: hex output MUST be exactly 64 ASCII hex chars. If a future
+    // refactor ever fed a non-32-byte key in, the SQLCipher PRAGMA would
+    // accept it silently as a passphrase rather than a blob literal. This
+    // assert keeps the splice point honest. (F-D-004 hardening.)
+    debug_assert_eq!(hex.len(), 64, "db key hex must be 64 chars");
+    debug_assert!(
+        hex.chars().all(|c| c.is_ascii_hexdigit()),
+        "db key hex must contain only hex digits"
+    );
     format!("\"x'{hex}'\"")
 }
 
@@ -282,5 +358,33 @@ mod tests {
         // Decrypts back exactly.
         let dec = decrypt_audit_line_if_envelope(&cipher_key, &enc).unwrap();
         assert_eq!(dec.as_deref(), Some(body));
+    }
+
+    // F-D-001 (security audit 2026-05-14): the public helpers must NEVER
+    // return an all-zero key as a silent fallback. If the keychain is
+    // available and a key exists, they return Ok(key); otherwise they
+    // return Err(KeyringError). The DB open path must propagate the Err
+    // rather than encrypt with a zero key.
+    //
+    // We can't easily test "keychain unavailable" without injecting a
+    // platform-specific failure, but we CAN assert that a successful
+    // first-call result is never the zero vector — i.e. the OsRng path
+    // is exercised.
+    #[test]
+    fn get_or_create_db_key_returns_random_bytes_not_zero() {
+        // This test exercises the real OS keychain. On a developer machine
+        // with a working keychain, the call should succeed and the returned
+        // key MUST NOT be all-zero. On CI without a keychain, the call
+        // returns Err — we accept that too, but if it returns Ok the
+        // bytes must be random.
+        match super::get_or_create_db_key() {
+            Ok(key) => {
+                assert_eq!(key.len(), KEY_BYTES);
+                assert_ne!(key, vec![0u8; KEY_BYTES], "key must not be all-zero");
+            }
+            Err(e) => {
+                eprintln!("(test) keychain unavailable in this environment: {e}");
+            }
+        }
     }
 }
