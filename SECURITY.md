@@ -95,6 +95,77 @@ Key files to review:
 - `src-tauri/src/pii.rs` — PII masking patterns applied to command history
 - `src-tauri/src/audit/chain.rs` — HMAC-SHA256 tamper-evident chain implementation
 
+## Verifying Veesker binaries
+
+The current beta releases (v0.5.0-beta.x) are distributed **unsigned**.
+Code signing certificates are in progress:
+
+- **Windows**: Azure Trusted Signing certificate awaiting Microsoft approval.
+- **macOS**: Apple Developer ID Application certificate to be provisioned post-approval.
+- **Linux**: distributed as static binaries — signing is via checksum verification.
+
+This means SmartScreen (Windows) and Gatekeeper (macOS) will warn on first run.
+This section documents how to verify the binary authenticity until signing is wired.
+
+### Windows (.exe / .msi)
+
+When you first run a Veesker installer, SmartScreen may display:
+
+> *Windows protected your PC — Microsoft Defender SmartScreen prevented an
+> unrecognized app from starting.*
+
+This is expected for unsigned binaries from non-Microsoft developers. To proceed:
+
+1. Click **More info**
+2. Click **Run anyway**
+
+To verify the installer matches the GitHub release **before** running:
+
+```powershell
+# Compute the SHA-256 of your downloaded installer
+Get-FileHash .\Veesker_0.5.0-beta.X_x64-setup.exe -Algorithm SHA256
+
+# Compare against the value published at:
+# https://github.com/Veesker-Cloud/veesker-community-edition/releases/tag/v0.5.0-beta.X
+# (look for the SHA256 entries in the release notes)
+```
+
+### macOS (.dmg / .app)
+
+Unsigned macOS binaries are flagged by Gatekeeper. You may see:
+
+> *"Veesker" cannot be opened because the developer cannot be verified.*
+
+To unquarantine the application after verifying the SHA-256:
+
+```bash
+# Verify SHA-256 first (compare against the GitHub release page)
+shasum -a 256 ~/Downloads/Veesker_0.5.0-beta.X_aarch64.dmg
+
+# After mounting the DMG and copying Veesker.app to /Applications:
+xattr -d com.apple.quarantine /Applications/Veesker.app
+```
+
+Note: this only removes the quarantine extended attribute. Gatekeeper itself
+is not disabled and other apps remain protected.
+
+### Linux (.AppImage / .deb / .rpm)
+
+Verify the SHA-256 of any downloaded artifact against the value in the
+matching GitHub release:
+
+```bash
+sha256sum Veesker_0.5.0-beta.X_amd64.AppImage
+# Compare against the SHA256 line in:
+# https://github.com/Veesker-Cloud/veesker-community-edition/releases/tag/v0.5.0-beta.X
+```
+
+### After signing is wired
+
+Once Azure Trusted Signing and Apple Developer ID are wired (target: v0.5.1
+or v0.6.0), this section will be replaced with verification via the platform
+certificate chains. Until then, SHA-256 verification is the canonical path.
+
 ## Repository consolidation (2026-05-13)
 
 On 2026-05-13, the internal `veesker-cloud-edition` (CL) private repository was consolidated into this public repository. As part of that cleanup, internal planning documents (`docs/superpowers/`, `CLAUDE.md` dev notes) were removed from the public tree and archived separately. These files contained implementation plans, AI session logs, and code conventions — not credentials or user data.
