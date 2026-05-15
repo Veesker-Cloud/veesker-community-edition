@@ -390,6 +390,7 @@ pub fn run() {
             commands::sessions_blocking_chain,
             terminal::terminal_create,
             terminal::terminal_confirm_session,
+            terminal::terminal_revoke_session,
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_close,

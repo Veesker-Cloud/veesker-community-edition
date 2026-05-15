@@ -20,6 +20,34 @@ pub fn terminal_confirm_session() -> Result<(), String> {
     Ok(())
 }
 
+/// F-C-001 (security audit 2026-05-14): revoke a previously-granted
+/// terminal-session confirmation. The renderer is expected to call this
+/// on workspace close, on logout, and any time the user's trust
+/// expectation should reset. Pairs with terminal_confirm_session.
+///
+/// Without this command, the original sticky-process-global flag meant a
+/// single confirmation lasted the entire app lifetime, even after the
+/// user closed the workspace or logged out of cloud.
+#[tauri::command]
+pub fn terminal_revoke_session() -> Result<(), String> {
+    let mut guard = TERMINAL_SESSION_CONFIRMED
+        .lock()
+        .map_err(|e| format!("lock poisoned: {e}"))?;
+    *guard = false;
+    Ok(())
+}
+
+/// F-C-001: hard-disable terminal commands via env var. Operators deploying
+/// Veesker into a managed/locked-down environment can set
+/// `VEESKER_DISABLE_TERMINAL=1` to fail every terminal_* command regardless
+/// of UI state. Returns true when the env var disables terminals.
+fn terminal_hard_disabled() -> bool {
+    matches!(
+        std::env::var("VEESKER_DISABLE_TERMINAL").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
 // portable-pty's MasterPty doesn't carry a Send bound in its trait definition,
 // but all concrete implementations (ConPtyMasterPty on Windows, UnixMasterPty
 // on macOS/Linux) use OS-level thread-safe handles internally. Access is always
@@ -71,6 +99,10 @@ pub fn terminal_create(
     cols: u16,
     rows: u16,
 ) -> Result<String, String> {
+    // F-C-001: hard env-var disable wins over every other check.
+    if terminal_hard_disabled() {
+        return Err("terminal_disabled_by_env".into());
+    }
     {
         let guard = TERMINAL_SESSION_CONFIRMED
             .lock()
@@ -93,7 +125,7 @@ pub fn terminal_create(
         .map_err(|e| e.to_string())?;
 
     let shell = detect_shell();
-    let mut cmd = CommandBuilder::new(shell);
+    let mut cmd = CommandBuilder::new(shell.clone());
     cmd.cwd(home_dir());
 
     pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
@@ -123,6 +155,24 @@ pub fn terminal_create(
     });
 
     store.lock().unwrap().insert(id.clone(), entry);
+
+    // F-C-001: emit an audit-trail event for every terminal spawn. The
+    // event lives only in the live `terminal:created` channel for now —
+    // it is NOT written to the AES-GCM audit JSONL because the terminal
+    // contents legitimately include shell history that a user wouldn't
+    // expect to be persisted. The event lets the renderer log to its
+    // session-scoped UI audit panel.
+    let _ = app.emit(
+        "terminal:created",
+        serde_json::json!({
+            "id": id,
+            "shell": shell,
+            "cols": cols,
+            "rows": rows,
+            "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        }),
+    );
+
     Ok(id)
 }
 
@@ -132,6 +182,23 @@ pub fn terminal_write(
     id: String,
     data: String,
 ) -> Result<(), String> {
+    // F-C-001: re-check both the hard-disable and the confirmation flag on
+    // EVERY write. terminal_create only checks once; without this re-check
+    // a hostile renderer that obtained a session id (via stored XSS, a
+    // crafted AI suggestion that bypassed CSP, etc.) could keep writing
+    // after `terminal_revoke_session` was called by the workspace-close
+    // handler.
+    if terminal_hard_disabled() {
+        return Err("terminal_disabled_by_env".into());
+    }
+    {
+        let guard = TERMINAL_SESSION_CONFIRMED
+            .lock()
+            .map_err(|e| format!("lock poisoned: {e}"))?;
+        if !*guard {
+            return Err("user_confirmation_required".into());
+        }
+    }
     let map = store.lock().unwrap();
     if let Some(entry) = map.get(&id) {
         let mut w = entry.writer.lock().unwrap();
@@ -166,4 +233,49 @@ pub fn terminal_resize(
 pub fn terminal_close(store: tauri::State<'_, TerminalStore>, id: String) -> Result<(), String> {
     store.lock().unwrap().remove(&id);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reset_flag() {
+        if let Ok(mut g) = TERMINAL_SESSION_CONFIRMED.lock() {
+            *g = false;
+        }
+    }
+
+    #[test]
+    fn confirm_then_revoke_round_trip() {
+        reset_flag();
+        // Initially unconfirmed
+        assert_eq!(*TERMINAL_SESSION_CONFIRMED.lock().unwrap(), false);
+        terminal_confirm_session().unwrap();
+        assert_eq!(*TERMINAL_SESSION_CONFIRMED.lock().unwrap(), true);
+        terminal_revoke_session().unwrap();
+        assert_eq!(*TERMINAL_SESSION_CONFIRMED.lock().unwrap(), false);
+    }
+
+    #[test]
+    fn hard_disable_env_var_matches_truthy_values() {
+        // Save current value
+        let prev = std::env::var("VEESKER_DISABLE_TERMINAL").ok();
+
+        for v in ["1", "true", "TRUE", "yes", "YES"] {
+            // SAFETY: tests are #[cfg(test)] single-threaded by default;
+            // env mutation is safe within this test scope.
+            unsafe { std::env::set_var("VEESKER_DISABLE_TERMINAL", v); }
+            assert!(terminal_hard_disabled(), "env={v} should disable");
+        }
+        for v in ["", "0", "false", "no", "off"] {
+            unsafe { std::env::set_var("VEESKER_DISABLE_TERMINAL", v); }
+            assert!(!terminal_hard_disabled(), "env={v} should NOT disable");
+        }
+
+        // Restore
+        match prev {
+            Some(v) => unsafe { std::env::set_var("VEESKER_DISABLE_TERMINAL", v); },
+            None => unsafe { std::env::remove_var("VEESKER_DISABLE_TERMINAL"); },
+        }
+    }
 }
