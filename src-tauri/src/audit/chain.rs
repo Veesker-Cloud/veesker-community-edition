@@ -1,38 +1,67 @@
+use aes_gcm::aead::OsRng;
 use hmac::{Hmac, Mac};
 use keyring::Entry;
-use sha2::{Digest, Sha256};
+use rand::RngCore;
+use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub fn get_or_create_key() -> Vec<u8> {
+const HMAC_KEY_BYTES: usize = 32;
+const HMAC_KEY_HEX_LEN: usize = HMAC_KEY_BYTES * 2;
+
+/// Returns the HMAC chain key, or None when the OS keychain is unavailable.
+///
+/// F-D-001 / F-D-002 (security audit 2026-05-14): previously this returned
+/// `vec![0u8; 32]` when the keychain could not be reached. The chain HMAC
+/// then signed every entry with a publicly-known zero key, so any attacker
+/// reading the JSONL file could forge or rewrite entries. We now return
+/// None and callers MUST emit entries without HMAC fields (or skip
+/// emission) rather than silently producing forgeable chains.
+///
+/// Also, key generation now uses `OsRng` directly. The previous version
+/// derived the key from `SHA-256(Uuid::v4() || timestamp_nanos)` — entropy
+/// theatre that added zero bits beyond `Uuid::v4()` and made the
+/// construction non-standard for auditors to verify. F-D-002 cleanup.
+pub fn get_or_create_key() -> Option<Vec<u8>> {
     let entry = match Entry::new("veesker", "audit-hmac-key") {
         Ok(e) => e,
-        Err(_) => {
-            eprintln!("audit-hmac: keychain unavailable, using zeroed key");
-            return vec![0u8; 32];
+        Err(e) => {
+            eprintln!(
+                "audit-hmac: keychain unavailable ({e}) — refusing to fall back to a zeroed key; chain HMAC will be omitted"
+            );
+            return None;
         }
     };
     if let Ok(stored) = entry.get_password()
-        && stored.len() == 64
-        && let Ok(bytes) = (0..32)
+        && stored.len() == HMAC_KEY_HEX_LEN
+        && let Ok(bytes) = (0..HMAC_KEY_BYTES)
             .map(|i| u8::from_str_radix(&stored[i * 2..i * 2 + 2], 16))
             .collect::<Result<Vec<u8>, _>>()
     {
-        return bytes;
+        return Some(bytes);
     }
-    let seed = format!(
-        "{}{}",
-        uuid::Uuid::new_v4(),
-        chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-    );
-    let key: Vec<u8> = Sha256::digest(seed.as_bytes()).to_vec();
-    let hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
-    if entry.set_password(&hex).is_err() {
-        eprintln!("audit-hmac: could not persist key to keychain");
+    // Fresh key: 32 bytes from OsRng. NOT derived from
+    // SHA-256(Uuid::v4() || timestamp_nanos) — that was non-standard and
+    // added zero entropy beyond Uuid::v4(). OsRng is the well-trodden path.
+    let mut bytes = vec![0u8; HMAC_KEY_BYTES];
+    OsRng.fill_bytes(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    if let Err(e) = entry.set_password(&hex) {
+        eprintln!(
+            "audit-hmac: could not persist key to keychain ({e}) — refusing to return an ephemeral key (would orphan existing entries on restart)"
+        );
+        return None;
     }
-    key
+    Some(bytes)
 }
 
+/// Computes the HMAC-SHA256 chain hash for an entry. The result is hex.
+///
+/// Note: the silent `"hmac-error"` fallback below is retained for API
+/// compatibility — `new_from_slice` only fails if the key length is
+/// invalid, which our 32-byte OsRng path cannot produce. The string is
+/// never written to disk on the happy path. If the audit caller passes a
+/// non-32-byte key (test fixtures only), they get the sentinel.
 pub fn compute_hmac(key: &[u8], prev_hash: &str, entry_json: &str) -> String {
     let mut mac = match HmacSha256::new_from_slice(key) {
         Ok(m) => m,
@@ -116,5 +145,20 @@ mod tests {
         // Same body, different prev_hash => different HMAC, proving the chain
         // links each entry to the previous.
         assert_ne!(h1, h2);
+    }
+
+    // F-D-002 (security audit 2026-05-14): get_or_create_key must return
+    // 32 random bytes (NOT all-zero) when the keychain is healthy.
+    #[test]
+    fn get_or_create_key_returns_random_bytes_not_zero() {
+        match get_or_create_key() {
+            Some(key) => {
+                assert_eq!(key.len(), HMAC_KEY_BYTES);
+                assert_ne!(key, vec![0u8; HMAC_KEY_BYTES], "key must not be all-zero");
+            }
+            None => {
+                eprintln!("(test) keychain unavailable in this environment — None is acceptable");
+            }
+        }
     }
 }

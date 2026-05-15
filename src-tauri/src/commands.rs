@@ -769,7 +769,13 @@ async fn write_audit_entry(
     let chain = app.state::<AuditChainState>();
     let mut prev_hash_guard = chain.0.lock().await;
 
-    let key = crate::audit::chain::get_or_create_key();
+    // F-D-002: get_or_create_key now returns Option. None = OS keychain
+    // unavailable; previously this silently used a zero key, producing
+    // forgeable HMACs. We now emit the entry without HMAC/prevHash fields
+    // and mark it `chain: "no-chain"`. The verifier treats `no-chain`
+    // entries as outside the integrity-protected chain (`skipped_legacy`)
+    // rather than chain breaks.
+    let key_opt = crate::audit::chain::get_or_create_key();
 
     let body_value = serde_json::json!({
         "ts":           now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -793,14 +799,26 @@ async fn write_audit_entry(
     });
     let body_str = body_value.to_string();
 
-    let hmac = crate::audit::chain::compute_hmac(&key, &prev_hash_guard, &body_str);
-
     let mut entry_obj = body_value.as_object().cloned().unwrap_or_default();
-    entry_obj.insert(
-        "prevHash".to_string(),
-        serde_json::Value::String(prev_hash_guard.clone()),
-    );
-    entry_obj.insert("hmac".to_string(), serde_json::Value::String(hmac.clone()));
+    let hmac = match key_opt.as_deref() {
+        Some(key) => {
+            let h = crate::audit::chain::compute_hmac(key, &prev_hash_guard, &body_str);
+            entry_obj.insert(
+                "prevHash".to_string(),
+                serde_json::Value::String(prev_hash_guard.clone()),
+            );
+            entry_obj.insert("hmac".to_string(), serde_json::Value::String(h.clone()));
+            h
+        }
+        None => {
+            // No keychain key — emit honestly without chain fields.
+            entry_obj.insert(
+                "chain".to_string(),
+                serde_json::Value::String("no-chain".to_string()),
+            );
+            String::new()
+        }
+    };
 
     let entry = serde_json::Value::Object(entry_obj);
     // L1.4 (Sprint C, Onda 1.B) — wrap the HMAC-signed body in an AES-GCM
@@ -983,7 +1001,26 @@ pub async fn audit_verify_chain(
     if !path.exists() {
         return Ok(ChainVerifyResult { ok: true, checked: 0, skipped_legacy: 0, sub_chains: 0, broken_at: None });
     }
-    let key = crate::audit::chain::get_or_create_key();
+    // F-D-002: get_or_create_key now returns Option. None = keychain
+    // unavailable — verify cannot proceed because HMAC recomputation needs
+    // the key. Surface that honestly rather than verifying with a zero
+    // key (which would pass-by-accident on every forged entry).
+    let key = match crate::audit::chain::get_or_create_key() {
+        Some(k) => k,
+        None => {
+            return Ok(ChainVerifyResult {
+                ok: false,
+                checked: 0,
+                skipped_legacy: 0,
+                sub_chains: 0,
+                broken_at: Some(ChainBrokenAt {
+                    index: 0,
+                    ts: String::new(),
+                    reason: "hmac_key_unavailable_keychain_locked".to_string(),
+                }),
+            });
+        }
+    };
     Ok(verify_chain_file(&path, &key))
 }
 
