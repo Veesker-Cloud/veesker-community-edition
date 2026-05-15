@@ -4150,7 +4150,7 @@ export async function schedulerJobPrivCheck(): Promise<SchedulerJobPrivs> {
   });
 }
 
-function validateOracleIdentifier(value: string, label: string): void {
+export function validateOracleIdentifier(value: string, label: string): void {
   if (!/^[A-Z][A-Z0-9_$#]{0,127}$/.test(value)) {
     throw new RpcCodedError(INVALID_IDENTIFIER, `Invalid ${label}: ${JSON.stringify(value)}`);
   }

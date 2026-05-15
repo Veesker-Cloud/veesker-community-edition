@@ -56,7 +56,7 @@ import type { StackEntry, TraceResult, PlsqlFrameEvent, TraceProcParams } from "
 import { DEFAULT_MAX_STEPS, DEFAULT_TIMEOUT_MS } from "./flow-types";
 import { DebugSession as RealDebugSession } from "./debug";
 import oracledb from "oracledb";
-import { procDescribe, oracleTypeFor, convertInputValue } from "./oracle";
+import { procDescribe, oracleTypeFor, convertInputValue, validateOracleIdentifier } from "./oracle";
 
 // BREAK_ANY_CALL = step-into (line + descend into any sub-call).
 // Spec wording suggested BREAK_ANY_LINE which would step over calls — but for a
@@ -85,6 +85,15 @@ export function setProcDescribeForTest(fn: ProcDescribeFn | null): void {
 }
 
 export async function traceProc(p: TraceProcParams): Promise<TraceResult> {
+  // Identifier-injection defense: validate BEFORE the schema/object names are
+  // ever spliced into the PL/SQL anonymous block at line ~192. The debugger
+  // trace path runs the block via DBMS_DEBUG and therefore bypasses
+  // enforceSafetyForStatement — identifier validation is the only gate.
+  const ownerUpper = p.owner.toUpperCase();
+  const nameUpper = p.name.toUpperCase();
+  validateOracleIdentifier(ownerUpper, "owner");
+  validateOracleIdentifier(nameUpper, "procedure name");
+
   const maxSteps = p.maxSteps ?? DEFAULT_MAX_STEPS;
   const timeoutMs = p.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const startedAt = new Date().toISOString();
@@ -190,8 +199,8 @@ export async function traceProc(p: TraceProcParams): Promise<TraceResult> {
     }
 
     const block = callArgs.length > 0
-      ? `BEGIN ${p.owner}.${p.name}(${callArgs.join(", ")}); END;`
-      : `BEGIN ${p.owner}.${p.name}; END;`;
+      ? `BEGIN ${ownerUpper}.${nameUpper}(${callArgs.join(", ")}); END;`
+      : `BEGIN ${ownerUpper}.${nameUpper}; END;`;
     session.startTarget(block, binds, cursorBindNames);
 
     let info = await session.synchronizeWithTimeout(30_000);
