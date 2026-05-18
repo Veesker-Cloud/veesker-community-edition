@@ -45,7 +45,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
-reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json"] }
 portable-pty = "0.8"
 regex = "1"
 
