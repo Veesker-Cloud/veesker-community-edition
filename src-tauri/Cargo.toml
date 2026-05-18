@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["rt", "sync", "io-util", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
-git2 = { version = "0.20", default-features = false, features = ["https", "vendored-openssl"] }
+git2 = { version = "0.21", default-features = false, features = ["https", "vendored-openssl"] }
 sha2 = "0.10"
 hmac = "0.12"
 aes-gcm = "0.10"
