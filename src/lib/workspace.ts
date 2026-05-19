@@ -79,8 +79,13 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<Res
 
 export const workspaceOpen  = (connectionId: string) =>
   call<WorkspaceInfo>("workspace_open", { connectionId });
-export const workspaceClose = () =>
-  call<void>("workspace_close");
+export const workspaceClose = () => {
+  // F-C-001: revoke terminal-session trust on workspace close (defense in depth,
+  // pairs with terminal.rs#terminal_revoke_session). Fire-and-forget so a Tauri
+  // failure here cannot block the close itself.
+  void invoke("terminal_revoke_session").catch(() => {});
+  return call<void>("workspace_close");
+};
 export const schemaList     = () =>
   call<Schema[]>("schema_list");
 export const objectsList    = (owner: string, kind: ObjectKind) =>

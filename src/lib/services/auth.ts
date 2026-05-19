@@ -62,6 +62,10 @@ export async function initAuth(): Promise<void> {
 }
 
 export async function logout(): Promise<void> {
+  // F-C-001: revoke terminal-session trust on logout (defense in depth,
+  // pairs with terminal.rs#terminal_revoke_session). Fire-and-forget so a
+  // Tauri failure here cannot block the logout itself.
+  void invoke("terminal_revoke_session").catch(() => {});
   CloudAuditService.stop();
   await invoke("auth_token_clear");
   localStorage.removeItem("veesker:features");
